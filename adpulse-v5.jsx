@@ -604,17 +604,21 @@ function getEmptyLinkedAssets() {
 }
 
 function getLinkedAssetExternalId(platform, value) {
-  if (value && typeof value === "object") {
-    return platform === "google_ads" ? sanitizeGoogleAdsId(value.externalId) : String(value.externalId || "").trim();
+  let raw = value && typeof value === "object"
+    ? String(value.externalId || "").trim()
+    : String(value || "").trim();
+  const prefix = `${platform}:`;
+
+  if (raw.startsWith(prefix)) {
+    const parts = raw.slice(prefix.length).split(":").filter(Boolean);
+    raw = parts.at(-1) || "";
   }
 
-  const raw = String(value || "").trim();
-  const prefix = `${platform}:`;
-  if (!raw.startsWith(prefix)) return platform === "google_ads" ? sanitizeGoogleAdsId(raw) : raw;
+  if (platform === "google_ads" || platform === "meta_ads" || platform === "ga4") {
+    return sanitizeGoogleAdsId(raw);
+  }
 
-  const parts = raw.slice(prefix.length).split(":");
-  const externalId = parts.length > 1 ? parts.slice(1).join(":") : parts[0] || "";
-  return platform === "google_ads" ? sanitizeGoogleAdsId(externalId) : externalId.trim();
+  return raw.trim();
 }
 
 function getLinkedAssetStableKey(platform, value) {
