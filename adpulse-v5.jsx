@@ -3,6 +3,7 @@ import {
   disconnectIntegrationProfile,
   fetchGoogleAdsLiveOverview,
   fetchIntegrationSnapshot,
+  fetchMetaAdsLiveOverview,
   fetchSearchTermHierarchy,
   fetchSearchTermTags,
   fetchSearchTerms,
@@ -636,6 +637,18 @@ function createEmptyIntegrationSnapshot() {
 }
 
 function createEmptyGoogleAdsLiveState() {
+  return {
+    loading: false,
+    error: "",
+    generatedAt: "",
+    accounts: [],
+    campaigns: [],
+    ads: [],
+    errors: [],
+  };
+}
+
+function createEmptyMetaAdsLiveState() {
   return {
     loading: false,
     error: "",
@@ -4735,6 +4748,7 @@ export default function AdPulse() {
     error: "",
   }));
   const [googleAdsLiveState, setGoogleAdsLiveState] = useState(() => createEmptyGoogleAdsLiveState());
+  const [metaAdsLiveState, setMetaAdsLiveState] = useState(() => createEmptyMetaAdsLiveState());
   const [integrationBusy, setIntegrationBusy] = useState({});
   const [currentUserId, setCurrentUserId] = useState(() => readStoredValue(STORAGE_KEYS.session, null));
   const [setupComplete, setSetupComplete] = useState(null);
@@ -4779,6 +4793,20 @@ export default function AdPulse() {
         ]))
     )
   ), [providerProfiles]);
+  const metaAdsAssetLookup = useMemo(() => (
+    new Map(
+      providerProfiles
+        .filter((profile) => profile.platform === "meta_ads")
+        .flatMap((profile) => (profile.assets || []).map((asset) => [
+          asset.id,
+          {
+            ...asset,
+            connectionId: profile.id,
+            connectionStatus: profile.status,
+          },
+        ]))
+    )
+  ), [providerProfiles]);
   const googleAdsLiveRequests = useMemo(() => (
     accessibleClients.flatMap((client) => {
       const linkedAssets = (client.linkedAssets?.google_ads || [])
@@ -4798,6 +4826,25 @@ export default function AdPulse() {
       }));
     })
   ), [accessibleClients, googleAdsAssetLookup]);
+  const metaAdsLiveRequests = useMemo(() => (
+    accessibleClients.flatMap((client) => {
+      const linkedAssets = (client.linkedAssets?.meta_ads || [])
+        .map((assetId) => metaAdsAssetLookup.get(assetId))
+        .filter((asset) => asset && sanitizeGoogleAdsId(asset.externalId));
+
+      if (!linkedAssets.length) return [];
+
+      const budgetHints = splitTotal(client.budgets.meta_ads || 0, linkedAssets.length, `${client.id}-meta-live-budget`);
+      return linkedAssets.map((asset, index) => ({
+        key: `${client.id}:${asset.id}`,
+        clientId: client.id,
+        connectionId: asset.connectionId,
+        assetId: asset.id,
+        adAccountId: sanitizeGoogleAdsId(asset.externalId),
+        budgetHint: budgetHints[index] || 0,
+      }));
+    })
+  ), [accessibleClients, metaAdsAssetLookup]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -4930,6 +4977,53 @@ export default function AdPulse() {
   }, [currentUser, googleAdsLiveRequests]);
 
   useEffect(() => {
+    if (!currentUser || !metaAdsLiveRequests.length) {
+      setMetaAdsLiveState(createEmptyMetaAdsLiveState());
+      return;
+    }
+
+    let cancelled = false;
+    setMetaAdsLiveState((current) => ({
+      ...current,
+      loading: true,
+      error: "",
+    }));
+
+    fetchMetaAdsLiveOverview({
+      dateRange: "THIS_MONTH",
+      requests: metaAdsLiveRequests,
+    })
+      .then((data) => {
+        if (cancelled) return;
+        setMetaAdsLiveState({
+          loading: false,
+          error: "",
+          generatedAt: data?.generatedAt || "",
+          accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+          campaigns: Array.isArray(data?.campaigns) ? data.campaigns : [],
+          ads: Array.isArray(data?.ads) ? data.ads : [],
+          errors: Array.isArray(data?.errors) ? data.errors : [],
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setMetaAdsLiveState({
+          loading: false,
+          error: error.message || "Could not load Meta Ads live data.",
+          generatedAt: "",
+          accounts: [],
+          campaigns: [],
+          ads: [],
+          errors: [],
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, metaAdsLiveRequests]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     if (currentUserId) {
       window.localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(currentUserId));
@@ -4993,27 +5087,35 @@ export default function AdPulse() {
       const liveGoogleAccounts = googleAdsLiveState.accounts.filter((account) => account.clientId === client.id);
       const liveGoogleCampaigns = googleAdsLiveState.campaigns.filter((campaign) => campaign.clientId === client.id);
       const liveGoogleAds = googleAdsLiveState.ads.filter((ad) => ad.clientId === client.id);
+      const liveMetaAccounts = metaAdsLiveState.accounts.filter((account) => account.clientId === client.id);
+      const liveMetaCampaigns = metaAdsLiveState.campaigns.filter((campaign) => campaign.clientId === client.id);
+      const liveMetaAds = metaAdsLiveState.ads.filter((ad) => ad.clientId === client.id);
       const hasLinkedGoogleAssets = Boolean(client.linkedAssets?.google_ads?.length);
-      const useLiveGoogle = hasLinkedGoogleAssets && Boolean(googleAdsLiveState.generatedAt || googleAdsLiveState.error);
+      const hasLinkedMetaAssets = Boolean(client.linkedAssets?.meta_ads?.length);
+      const useLiveGoogle = hasLinkedGoogleAssets && Boolean(googleAdsLiveState.loading || googleAdsLiveState.generatedAt || googleAdsLiveState.error);
+      const useLiveMeta = hasLinkedMetaAssets && Boolean(metaAdsLiveState.loading || metaAdsLiveState.generatedAt || metaAdsLiveState.error);
 
       // Effective connections: real-linked when OAuth connections exist, otherwise demo toggles
       const effectiveConnections = {
         google_ads: hasAnyProviders ? hasLinkedGoogleAssets : client.connections.google_ads,
-        meta_ads: hasAnyProviders ? Boolean(client.linkedAssets?.meta_ads?.length) : client.connections.meta_ads,
+        meta_ads: hasAnyProviders ? hasLinkedMetaAssets : client.connections.meta_ads,
         ga4: hasAnyProviders ? Boolean(client.linkedAssets?.ga4?.length) : client.connections.ga4,
       };
 
       const visibleAccounts = [
-        ...ACCOUNTS_BASE.filter((account) => account.clientId === client.id && effectiveConnections[account.platform] && (!useLiveGoogle || account.platform !== "google_ads")),
+        ...ACCOUNTS_BASE.filter((account) => account.clientId === client.id && effectiveConnections[account.platform] && (!useLiveGoogle || account.platform !== "google_ads") && (!useLiveMeta || account.platform !== "meta_ads")),
         ...(useLiveGoogle ? liveGoogleAccounts : []),
+        ...(useLiveMeta ? liveMetaAccounts : []),
       ];
       const visibleCampaigns = [
-        ...CAMPAIGNS_BASE.filter((campaign) => campaign.clientId === client.id && effectiveConnections[campaign.platform] && (!useLiveGoogle || campaign.platform !== "google_ads")),
+        ...CAMPAIGNS_BASE.filter((campaign) => campaign.clientId === client.id && effectiveConnections[campaign.platform] && (!useLiveGoogle || campaign.platform !== "google_ads") && (!useLiveMeta || campaign.platform !== "meta_ads")),
         ...(useLiveGoogle ? liveGoogleCampaigns : []),
+        ...(useLiveMeta ? liveMetaCampaigns : []),
       ];
       const visibleAds = [
-        ...ADS_BASE.filter((ad) => ad.clientId === client.id && effectiveConnections[ad.platform] && (!useLiveGoogle || ad.platform !== "google_ads")),
+        ...ADS_BASE.filter((ad) => ad.clientId === client.id && effectiveConnections[ad.platform] && (!useLiveGoogle || ad.platform !== "google_ads") && (!useLiveMeta || ad.platform !== "meta_ads")),
         ...(useLiveGoogle ? liveGoogleAds : []),
+        ...(useLiveMeta ? liveMetaAds : []),
       ];
       const ga4 = effectiveConnections.ga4 ? GA4_BASE[client.id] : null;
       const spend = visibleAccounts.reduce((acc, account) => acc + account.spend, 0);
@@ -5061,7 +5163,7 @@ export default function AdPulse() {
         health,
       };
     });
-  }, [accessibleClients, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.error, googleAdsLiveState.generatedAt, providerProfiles]);
+  }, [accessibleClients, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.error, googleAdsLiveState.generatedAt, googleAdsLiveState.loading, metaAdsLiveState.accounts, metaAdsLiveState.ads, metaAdsLiveState.campaigns, metaAdsLiveState.error, metaAdsLiveState.generatedAt, metaAdsLiveState.loading, providerProfiles]);
 
   const filteredClients = useMemo(() => {
     let list = enriched;
@@ -5095,6 +5197,7 @@ export default function AdPulse() {
   const gaVisibleClients = enriched.filter((client) => client.connections.ga4);
   const currentUserAssignedClients = currentUser?.role === "director" ? clients : clients.filter((client) => client.assignedUserIds?.includes(currentUser?.id));
   const chartAccounts = enriched.find((client) => client.id === chartForm.clientId)?.accounts || [];
+  const allDashboardAccounts = enriched.flatMap((client) => client.accounts || []);
   const gaClient = gaVisibleClients.find((client) => client.id === gaClientId) || gaVisibleClients[0] || null;
   const shellMaxWidth = viewportWidth >= 1880 ? 1740 : viewportWidth >= 1680 ? 1640 : viewportWidth >= 1440 ? 1540 : viewportWidth >= 1200 ? 1380 : 1120;
   const overviewColumns = viewportWidth >= 1680 ? "repeat(4, minmax(0, 1fr))" : viewportWidth >= 1220 ? "repeat(3, minmax(0, 1fr))" : viewportWidth >= 760 ? "repeat(2, minmax(0, 1fr))" : "1fr";
@@ -5641,7 +5744,7 @@ export default function AdPulse() {
               {charts.length ? (
                 <div style={{ display: "grid", gridTemplateColumns: chartColumns, gap: 18 }}>
                   {charts.map((chart) => (
-                    <ChartCard key={chart.id} chart={chart} clients={enriched} accounts={ACCOUNTS_BASE} seriesMap={SERIES_BASE} onRemove={() => setCharts((current) => current.filter((item) => item.id !== chart.id))} />
+                    <ChartCard key={chart.id} chart={chart} clients={enriched} accounts={allDashboardAccounts} seriesMap={SERIES_BASE} onRemove={() => setCharts((current) => current.filter((item) => item.id !== chart.id))} />
                   ))}
                 </div>
               ) : (
@@ -5658,7 +5761,7 @@ export default function AdPulse() {
           ) : null}
 
           {view === "studio" ? (
-            <ClientStudio clients={enriched} accounts={ACCOUNTS_BASE} users={users} providerProfiles={providerProfiles} selectedClientId={selectedClientId} setSelectedClientId={setSelectedClientId} draft={studioDraft} setDraft={setStudioDraft} onSave={saveStudioDraft} layoutColumns={studioColumns} canManageAssignments={isDirector} canEditCoreSettings={isDirector} onOpenConnections={() => setView("connections")} />
+            <ClientStudio clients={enriched} accounts={allDashboardAccounts} users={users} providerProfiles={providerProfiles} selectedClientId={selectedClientId} setSelectedClientId={setSelectedClientId} draft={studioDraft} setDraft={setStudioDraft} onSave={saveStudioDraft} layoutColumns={studioColumns} canManageAssignments={isDirector} canEditCoreSettings={isDirector} onOpenConnections={() => setView("connections")} />
           ) : null}
 
           {view === "connections" ? (

@@ -20,6 +20,8 @@ const GOOGLE_ADS_SYNC_AD_GROUP_CAP = Number(process.env.ADPULSE_GOOGLE_SYNC_AD_G
 const GOOGLE_ADS_LIVE_CAMPAIGN_LIMIT = Number(process.env.ADPULSE_GOOGLE_LIVE_CAMPAIGN_LIMIT || 1000);
 const GOOGLE_ADS_LIVE_AD_LIMIT = Number(process.env.ADPULSE_GOOGLE_LIVE_AD_LIMIT || 1000);
 const META_API_VERSION = process.env.META_API_VERSION || "v23.0";
+const META_ADS_LIVE_CAMPAIGN_LIMIT = Number(process.env.ADPULSE_META_LIVE_CAMPAIGN_LIMIT || 500);
+const META_ADS_LIVE_AD_LIMIT = Number(process.env.ADPULSE_META_LIVE_AD_LIMIT || 500);
 const SEARCH_TERM_ALLOWED_TAGS = new Set(["good", "bad", "neutral"]);
 const SEARCH_TERM_ALLOWED_SCOPE_LEVELS = new Set(["ad_group", "campaign"]);
 const SEARCH_TERM_ALLOWED_DATE_RANGES = new Set([
@@ -127,6 +129,19 @@ const server = http.createServer(async (request, response) => {
       }
 
       const payload = await fetchGoogleAdsLiveOverview(parsed);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/meta-ads/live-overview") {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const payload = await fetchMetaAdsLiveOverview(parsed);
       sendJson(response, 200, payload);
       return;
     }
@@ -1215,6 +1230,7 @@ async function syncMetaAds(existingConnection, tokenBundle) {
     connectionId: existingConnection?.id || null,
     health: Number(account.account_status) === 1 ? "healthy" : "attention",
     currency: account.currency || "",
+    timezone: account.timezone_name || "",
   }));
 
   return {
@@ -1632,6 +1648,180 @@ async function fetchGoogleAdsLiveOverview(payload) {
   return response;
 }
 
+async function fetchMetaAdsLiveOverview(payload) {
+  const dateRange = sanitizeGoogleAdsLiveDateRange(payload?.dateRange);
+  const requests = Array.isArray(payload?.requests)
+    ? payload.requests.map(normalizeMetaAdsLiveRequest).filter(Boolean)
+    : [];
+
+  if (!requests.length) {
+    return {
+      generatedAt: new Date().toISOString(),
+      dateRange,
+      accounts: [],
+      campaigns: [],
+      ads: [],
+      errors: [],
+    };
+  }
+
+  const connectionIds = Array.from(new Set(requests.map((item) => item.connectionId)));
+  const contextEntries = await Promise.all(connectionIds.map(async (connectionId) => ([
+    connectionId,
+    await getMetaAdsConnectionContext(connectionId),
+  ])));
+  const contextMap = new Map(contextEntries);
+
+  const uniqueTargets = [];
+  const targetKeys = new Set();
+  requests.forEach((request) => {
+    const targetKey = `${request.connectionId}:${request.adAccountId}`;
+    if (targetKeys.has(targetKey)) return;
+    targetKeys.add(targetKey);
+    uniqueTargets.push({
+      connectionId: request.connectionId,
+      adAccountId: request.adAccountId,
+    });
+  });
+
+  const settledTargets = await Promise.allSettled(uniqueTargets.map(async (target) => {
+    const context = contextMap.get(target.connectionId);
+    return {
+      targetKey: `${target.connectionId}:${target.adAccountId}`,
+      report: await fetchMetaAdsLiveAccountReport({
+        context,
+        adAccountId: target.adAccountId,
+        dateRange,
+      }),
+    };
+  }));
+
+  const reportMap = new Map();
+  settledTargets.forEach((result, index) => {
+    const target = uniqueTargets[index];
+    const targetKey = `${target.connectionId}:${target.adAccountId}`;
+
+    if (result.status === "fulfilled") {
+      reportMap.set(targetKey, result.value.report);
+      return;
+    }
+
+    reportMap.set(targetKey, {
+      adAccountId: target.adAccountId,
+      asset: null,
+      dataStatus: "error",
+      dataError: result.reason?.message || "Could not fetch Meta Ads live data.",
+      account: null,
+      campaigns: [],
+      ads: [],
+    });
+  });
+
+  const response = {
+    generatedAt: new Date().toISOString(),
+    dateRange,
+    accounts: [],
+    campaigns: [],
+    ads: [],
+    errors: [],
+  };
+
+  requests.forEach((request) => {
+    const targetKey = `${request.connectionId}:${request.adAccountId}`;
+    const report = reportMap.get(targetKey) || null;
+    const context = contextMap.get(request.connectionId);
+    const fallbackAsset = context?.connection?.assets?.find((asset) => sanitizeMetaAdAccountId(asset.externalId) === request.adAccountId) || null;
+    const asset = report?.asset || fallbackAsset;
+    const accountId = `live-meta-account:${request.key}`;
+    const monthlyBudget = toNumber(report?.account?.monthlyBudget) > 0 ? toNumber(report.account.monthlyBudget) : request.budgetHint;
+
+    response.accounts.push({
+      id: accountId,
+      clientId: request.clientId,
+      platform: "meta_ads",
+      name: report?.account?.name || asset?.name || `Meta Ads ${request.adAccountId}`,
+      status: report?.account?.status || "active",
+      monthlyBudget,
+      spend: toNumber(report?.account?.spend),
+      impressions: toNumber(report?.account?.impressions),
+      clicks: toNumber(report?.account?.clicks),
+      conversions: toNumber(report?.account?.conversions),
+      ctr: toNumber(report?.account?.ctr),
+      cpc: toNumber(report?.account?.cpc),
+      cpm: toNumber(report?.account?.cpm),
+      roas: toNumber(report?.account?.roas),
+      accountLabel: report?.account?.name || asset?.name || `Meta Ads ${request.adAccountId}`,
+      requestKey: request.key,
+      connectionId: request.connectionId,
+      assetId: request.assetId,
+      adAccountId: request.adAccountId,
+      currency: report?.account?.currency || asset?.currency || "",
+      timezone: report?.account?.timezone || asset?.timezone || "",
+      dataStatus: report?.dataStatus || "ready",
+      dataError: report?.dataError || "",
+    });
+
+    (report?.campaigns || []).forEach((campaign) => {
+      const campaignId = `live-meta-campaign:${request.key}:${campaign.rawCampaignId}`;
+      response.campaigns.push({
+        id: campaignId,
+        clientId: request.clientId,
+        accountId,
+        platform: "meta_ads",
+        name: campaign.name,
+        objective: campaign.objective,
+        status: campaign.status,
+        budget: campaign.budget,
+        spend: campaign.spend,
+        impressions: campaign.impressions,
+        clicks: campaign.clicks,
+        conversions: campaign.conversions,
+        cpc: campaign.cpc,
+        cpm: campaign.cpm,
+        requestKey: request.key,
+        connectionId: request.connectionId,
+        adAccountId: request.adAccountId,
+        externalId: campaign.rawCampaignId,
+        dataStatus: report?.dataStatus || "ready",
+        dataError: report?.dataError || "",
+      });
+    });
+
+    (report?.ads || []).forEach((ad) => {
+      response.ads.push({
+        id: `live-meta-ad:${request.key}:${ad.rawAdId}`,
+        clientId: request.clientId,
+        accountId,
+        campaignId: `live-meta-campaign:${request.key}:${ad.rawCampaignId}`,
+        platform: "meta_ads",
+        name: ad.name,
+        format: ad.format,
+        status: ad.status,
+        spend: ad.spend,
+        clicks: ad.clicks,
+        impressions: ad.impressions,
+        conversions: ad.conversions,
+        ctr: ad.ctr,
+        requestKey: request.key,
+        connectionId: request.connectionId,
+        adAccountId: request.adAccountId,
+        externalId: ad.rawAdId,
+      });
+    });
+
+    if (report?.dataError) {
+      response.errors.push({
+        requestKey: request.key,
+        connectionId: request.connectionId,
+        adAccountId: request.adAccountId,
+        error: report.dataError,
+      });
+    }
+  });
+
+  return response;
+}
+
 function normalizeGoogleAdsLiveRequest(value) {
   const connectionId = String(value?.connectionId || "").trim();
   const customerId = sanitizeGoogleAdsId(value?.customerId);
@@ -1646,6 +1836,24 @@ function normalizeGoogleAdsLiveRequest(value) {
     connectionId,
     assetId: String(value?.assetId || "").trim(),
     customerId,
+    budgetHint: Math.max(0, toNumber(value?.budgetHint)),
+  };
+}
+
+function normalizeMetaAdsLiveRequest(value) {
+  const connectionId = String(value?.connectionId || "").trim();
+  const adAccountId = sanitizeMetaAdAccountId(value?.adAccountId || value?.accountId || value?.externalId);
+
+  if (!connectionId || !adAccountId) {
+    return null;
+  }
+
+  return {
+    key: String(value?.key || `${connectionId}:${adAccountId}`).trim(),
+    clientId: String(value?.clientId || "").trim(),
+    connectionId,
+    assetId: String(value?.assetId || "").trim(),
+    adAccountId,
     budgetHint: Math.max(0, toNumber(value?.budgetHint)),
   };
 }
@@ -1827,6 +2035,177 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
       roas: spend ? +(conversionValue / spend).toFixed(2) : 0,
       currency: asset?.currency || "",
       timezone: asset?.timezone || "",
+    },
+    campaigns,
+    ads,
+  };
+}
+
+async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }) {
+  if (!context?.connection) {
+    throw new Error("Meta Ads connection context is missing.");
+  }
+
+  const { connection, tokenBundle } = context;
+  assertMetaAdAccountAccess(connection, adAccountId);
+
+  const accessToken = tokenBundle.accessToken;
+  const actId = `act_${adAccountId}`;
+  const asset = connection.assets?.find((item) => sanitizeMetaAdAccountId(item.externalId) === adAccountId) || null;
+  const datePreset = mapMetaDatePreset(dateRange);
+  const errors = [];
+  let accountDetails = null;
+  let campaignRows = [];
+  let campaignInsightRows = [];
+  let adRows = [];
+  let adInsightRows = [];
+
+  try {
+    accountDetails = await fetchJson(buildMetaGraphUrl(actId, {
+      fields: "id,account_id,name,account_status,currency,timezone_name",
+      access_token: accessToken,
+    }), {}, `Meta ad account ${adAccountId}`);
+  } catch (error) {
+    errors.push(error.message || `Could not fetch Meta ad account ${adAccountId}.`);
+  }
+
+  try {
+    campaignRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/campaigns`, {
+      fields: "id,name,status,effective_status,objective,daily_budget,lifetime_budget",
+      limit: String(META_ADS_LIVE_CAMPAIGN_LIMIT),
+      access_token: accessToken,
+    }), `Meta campaigns ${adAccountId}`);
+  } catch (error) {
+    errors.push(error.message || `Could not fetch Meta campaigns for ${adAccountId}.`);
+  }
+
+  try {
+    campaignInsightRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/insights`, {
+      fields: "campaign_id,campaign_name,impressions,clicks,spend,actions,action_values,purchase_roas",
+      level: "campaign",
+      date_preset: datePreset,
+      limit: String(META_ADS_LIVE_CAMPAIGN_LIMIT),
+      access_token: accessToken,
+    }), `Meta campaign insights ${adAccountId}`);
+  } catch (error) {
+    errors.push(error.message || `Could not fetch Meta campaign insights for ${adAccountId}.`);
+  }
+
+  try {
+    adRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/ads`, {
+      fields: "id,name,status,effective_status,creative{object_type},campaign{id,name}",
+      limit: String(META_ADS_LIVE_AD_LIMIT),
+      access_token: accessToken,
+    }), `Meta ads ${adAccountId}`);
+  } catch (error) {
+    errors.push(error.message || `Could not fetch Meta ads for ${adAccountId}.`);
+  }
+
+  try {
+    adInsightRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/insights`, {
+      fields: "ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,actions",
+      level: "ad",
+      date_preset: datePreset,
+      limit: String(META_ADS_LIVE_AD_LIMIT),
+      access_token: accessToken,
+    }), `Meta ad insights ${adAccountId}`);
+  } catch (error) {
+    errors.push(error.message || `Could not fetch Meta ad insights for ${adAccountId}.`);
+  }
+
+  const currency = accountDetails?.currency || asset?.currency || "";
+  const timezone = accountDetails?.timezone_name || asset?.timezone || "";
+  const campaignMap = new Map();
+
+  campaignRows
+    .map((row) => normalizeMetaCampaignRow(row, currency, dateRange))
+    .filter(Boolean)
+    .forEach((campaign) => {
+      campaignMap.set(campaign.rawCampaignId, campaign);
+    });
+
+  campaignInsightRows
+    .map(normalizeMetaCampaignInsightRow)
+    .filter(Boolean)
+    .forEach((campaign) => {
+      const existing = campaignMap.get(campaign.rawCampaignId);
+      campaignMap.set(campaign.rawCampaignId, mergeMetaLiveCampaign(existing, campaign));
+    });
+
+  const adStatusMap = new Map(
+    adRows
+      .map(normalizeMetaAdRow)
+      .filter(Boolean)
+      .map((ad) => [ad.rawAdId, ad])
+  );
+  const ads = adInsightRows
+    .map((row) => normalizeMetaAdInsightRow(row, adStatusMap))
+    .filter(Boolean)
+    .filter((ad) => ad.spend > 0 || ad.impressions > 0 || ad.clicks > 0 || ad.conversions > 0)
+    .sort((left, right) => right.spend - left.spend || left.name.localeCompare(right.name));
+
+  const adCampaignAggregates = ads.reduce((acc, ad) => {
+    const current = acc.get(ad.rawCampaignId) || {
+      rawCampaignId: ad.rawCampaignId,
+      name: ad.campaignName || `Campaign ${ad.rawCampaignId}`,
+      status: ad.status === "paused" ? "stopped" : "active",
+      objective: "Meta Ads",
+      budget: 0,
+      spend: 0,
+      impressions: 0,
+      clicks: 0,
+      conversions: 0,
+      conversionValue: 0,
+    };
+
+    current.spend += ad.spend;
+    current.impressions += ad.impressions;
+    current.clicks += ad.clicks;
+    current.conversions += ad.conversions;
+    if (ad.status !== "paused") {
+      current.status = "active";
+    }
+    acc.set(ad.rawCampaignId, current);
+    return acc;
+  }, new Map());
+
+  adCampaignAggregates.forEach((campaign, campaignId) => {
+    if (!campaignMap.has(campaignId)) {
+      campaignMap.set(campaignId, buildMetaLiveCampaign(campaign));
+    }
+  });
+
+  const campaigns = Array.from(campaignMap.values())
+    .map(buildMetaLiveCampaign)
+    .sort((left, right) => right.spend - left.spend || left.name.localeCompare(right.name));
+  const monthlyBudget = campaigns.reduce((acc, campaign) => acc + toNumber(campaign.budget), 0);
+  const spend = campaigns.reduce((acc, campaign) => acc + campaign.spend, 0);
+  const impressions = campaigns.reduce((acc, campaign) => acc + campaign.impressions, 0);
+  const clicks = campaigns.reduce((acc, campaign) => acc + campaign.clicks, 0);
+  const conversions = campaigns.reduce((acc, campaign) => acc + campaign.conversions, 0);
+  const conversionValue = campaigns.reduce((acc, campaign) => acc + campaign.conversionValue, 0);
+  const activeCampaigns = campaigns.filter((campaign) => campaign.status !== "stopped").length;
+  const dataStatus = errors.length ? (campaigns.length || ads.length ? "partial" : "error") : "ready";
+
+  return {
+    adAccountId,
+    asset,
+    dataStatus,
+    dataError: errors.join(" | "),
+    account: {
+      name: accountDetails?.name || asset?.name || `Meta Ads ${adAccountId}`,
+      status: mapMetaAccountStatus(accountDetails?.account_status, activeCampaigns),
+      monthlyBudget: +monthlyBudget.toFixed(2),
+      spend: +spend.toFixed(2),
+      impressions,
+      clicks,
+      conversions: +conversions.toFixed(2),
+      ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
+      cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
+      cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
+      roas: spend ? +(conversionValue / spend).toFixed(2) : 0,
+      currency,
+      timezone,
     },
     campaigns,
     ads,
@@ -2023,6 +2402,283 @@ function mapGoogleAdsCampaignStatus(status) {
 function mapGoogleAdsAdStatus(status) {
   const normalized = String(status || "").trim().toUpperCase();
   return normalized === "PAUSED" || normalized === "REMOVED" ? "paused" : "live";
+}
+
+async function getMetaAdsConnectionContext(connectionId) {
+  const store = readStore();
+  const connection = store.connections.find((item) => item.id === connectionId);
+
+  if (!connection) {
+    throw new Error("Connection not found.");
+  }
+
+  if (connection.platform !== "meta_ads") {
+    throw new Error("This endpoint is only available for Meta Ads connections.");
+  }
+
+  const refreshedTokens = await ensureProviderToken("meta_ads", connection, connection.tokens);
+  const tokenChanged = JSON.stringify(refreshedTokens || null) !== JSON.stringify(connection.tokens || null);
+  const hydratedConnection = tokenChanged
+    ? { ...connection, tokens: refreshedTokens, updatedAt: new Date().toISOString() }
+    : connection;
+
+  if (tokenChanged) {
+    upsertConnection(hydratedConnection);
+  }
+
+  return {
+    connection: hydratedConnection,
+    tokenBundle: refreshedTokens,
+  };
+}
+
+function assertMetaAdAccountAccess(connection, adAccountId) {
+  const allowedAdAccountIds = new Set((connection.assets || []).map((asset) => sanitizeMetaAdAccountId(asset.externalId)).filter(Boolean));
+  if (allowedAdAccountIds.size && !allowedAdAccountIds.has(adAccountId)) {
+    throw new Error("This Meta ad account is not available under the selected connection.");
+  }
+}
+
+function buildMetaGraphUrl(pathname, params = {}) {
+  const cleanPath = String(pathname || "").replace(/^\/+/, "");
+  const query = new URLSearchParams();
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value == null || value === "") return;
+    query.set(key, String(value));
+  });
+
+  return `https://graph.facebook.com/${META_API_VERSION}/${cleanPath}?${query.toString()}`;
+}
+
+async function fetchMetaGraphPages(initialUrl, label) {
+  const rows = [];
+  let nextUrl = initialUrl;
+
+  while (nextUrl) {
+    const page = await fetchJson(nextUrl, {}, label);
+    rows.push(...(Array.isArray(page?.data) ? page.data : []));
+    nextUrl = page?.paging?.next || "";
+  }
+
+  return rows;
+}
+
+function normalizeMetaCampaignRow(row, currency, dateRange) {
+  const rawCampaignId = String(row?.id || "").trim();
+  if (!rawCampaignId) return null;
+
+  const dailyBudget = normalizeMetaBudgetAmount(row.daily_budget, currency);
+  const lifetimeBudget = normalizeMetaBudgetAmount(row.lifetime_budget, currency);
+
+  return {
+    rawCampaignId,
+    name: row.name || `Campaign ${rawCampaignId}`,
+    status: mapMetaDeliveryStatus(row.effective_status || row.status),
+    objective: describeMetaObjective(row.objective),
+    budget: dailyBudget > 0 ? dailyBudget * getGoogleAdsBudgetDayCount(dateRange) : lifetimeBudget,
+    spend: 0,
+    impressions: 0,
+    clicks: 0,
+    conversions: 0,
+    conversionValue: 0,
+  };
+}
+
+function normalizeMetaCampaignInsightRow(row) {
+  const rawCampaignId = String(row?.campaign_id || "").trim();
+  if (!rawCampaignId) return null;
+
+  const spend = toNumber(row.spend);
+  const impressions = toNumber(row.impressions);
+  const clicks = toNumber(row.clicks);
+  const conversions = extractMetaConversionCount(row.actions);
+  const conversionValue = extractMetaConversionValue(row.action_values, row.purchase_roas, spend);
+
+  return {
+    rawCampaignId,
+    name: row.campaign_name || `Campaign ${rawCampaignId}`,
+    status: "",
+    objective: "Meta Ads",
+    budget: 0,
+    spend,
+    impressions,
+    clicks,
+    conversions,
+    conversionValue,
+  };
+}
+
+function mergeMetaLiveCampaign(base, overlay) {
+  if (!base) {
+    return { ...overlay };
+  }
+
+  return {
+    ...base,
+    ...overlay,
+    name: overlay.name || base.name,
+    status: overlay.status || base.status,
+    objective: base.objective && base.objective !== "Meta Ads" ? base.objective : overlay.objective,
+    budget: toNumber(base.budget) || toNumber(overlay.budget),
+    spend: toNumber(overlay.spend),
+    impressions: toNumber(overlay.impressions),
+    clicks: toNumber(overlay.clicks),
+    conversions: toNumber(overlay.conversions),
+    conversionValue: toNumber(overlay.conversionValue),
+  };
+}
+
+function buildMetaLiveCampaign(campaign) {
+  const spend = toNumber(campaign.spend);
+  const impressions = toNumber(campaign.impressions);
+  const clicks = toNumber(campaign.clicks);
+  const conversions = toNumber(campaign.conversions);
+  const conversionValue = toNumber(campaign.conversionValue);
+  const budget = toNumber(campaign.budget);
+
+  return {
+    rawCampaignId: campaign.rawCampaignId,
+    name: campaign.name || `Campaign ${campaign.rawCampaignId}`,
+    status: campaign.status || "active",
+    objective: campaign.objective || "Meta Ads",
+    budget: +budget.toFixed(2),
+    spend: +spend.toFixed(2),
+    impressions,
+    clicks,
+    conversions: +conversions.toFixed(2),
+    conversionValue: +conversionValue.toFixed(2),
+    cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
+    cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
+  };
+}
+
+function normalizeMetaAdRow(row) {
+  const rawAdId = String(row?.id || "").trim();
+  if (!rawAdId) return null;
+
+  return {
+    rawAdId,
+    name: row.name || `Ad ${rawAdId}`,
+    status: mapMetaAdStatus(row.effective_status || row.status),
+    format: describeMetaCreativeFormat(row.creative?.object_type),
+    rawCampaignId: String(row.campaign?.id || "").trim(),
+    campaignName: row.campaign?.name || "",
+  };
+}
+
+function normalizeMetaAdInsightRow(row, adStatusMap) {
+  const rawAdId = String(row?.ad_id || "").trim();
+  const rawCampaignId = String(row?.campaign_id || "").trim();
+  if (!rawAdId || !rawCampaignId) return null;
+
+  const statusRecord = adStatusMap.get(rawAdId) || {};
+  const spend = toNumber(row.spend);
+  const impressions = toNumber(row.impressions);
+  const clicks = toNumber(row.clicks);
+  const conversions = extractMetaConversionCount(row.actions);
+
+  return {
+    rawAdId,
+    rawCampaignId,
+    campaignName: row.campaign_name || statusRecord.campaignName || `Campaign ${rawCampaignId}`,
+    name: row.ad_name || statusRecord.name || `Ad ${rawAdId}`,
+    format: statusRecord.format || "Ad",
+    status: statusRecord.status || "live",
+    spend: +spend.toFixed(2),
+    impressions,
+    clicks,
+    conversions: +conversions.toFixed(2),
+    ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
+  };
+}
+
+function extractMetaConversionCount(actions) {
+  return (Array.isArray(actions) ? actions : []).reduce((acc, action) => {
+    const type = String(action?.action_type || "").toLowerCase();
+    if (!isMetaConversionAction(type)) return acc;
+    return acc + toNumber(action.value);
+  }, 0);
+}
+
+function extractMetaConversionValue(actionValues, purchaseRoas, spend) {
+  const explicitValue = (Array.isArray(actionValues) ? actionValues : []).reduce((acc, action) => {
+    const type = String(action?.action_type || "").toLowerCase();
+    if (!type.includes("purchase")) return acc;
+    return acc + toNumber(action.value);
+  }, 0);
+
+  if (explicitValue > 0) return explicitValue;
+
+  const roasValue = Array.isArray(purchaseRoas) ? toNumber(purchaseRoas[0]?.value) : toNumber(purchaseRoas);
+  return roasValue > 0 ? roasValue * toNumber(spend) : 0;
+}
+
+function isMetaConversionAction(type) {
+  return type.includes("purchase")
+    || type.includes("lead")
+    || type.includes("complete_registration")
+    || type.includes("submit_application")
+    || type.includes("schedule")
+    || type.includes("contact");
+}
+
+function mapMetaDatePreset(dateRange) {
+  if (dateRange === "LAST_7_DAYS") return "last_7d";
+  if (dateRange === "LAST_30_DAYS") return "last_30d";
+  if (dateRange === "LAST_MONTH") return "last_month";
+  return "this_month";
+}
+
+function mapMetaAccountStatus(status, activeCampaigns) {
+  if (Number(status) === 1) return "active";
+  if (status == null || status === "") return activeCampaigns ? "active" : "paused";
+  return "paused";
+}
+
+function mapMetaDeliveryStatus(status) {
+  const normalized = String(status || "").trim().toUpperCase();
+  if (normalized.includes("PAUSED") || normalized === "DELETED" || normalized === "ARCHIVED") return "stopped";
+  if (normalized === "IN_PROCESS" || normalized === "PENDING_REVIEW") return "learning";
+  return "active";
+}
+
+function mapMetaAdStatus(status) {
+  const normalized = String(status || "").trim().toUpperCase();
+  if (normalized.includes("PAUSED") || normalized === "DELETED" || normalized === "ARCHIVED") return "paused";
+  if (normalized === "IN_PROCESS" || normalized === "PENDING_REVIEW") return "learning";
+  return "live";
+}
+
+function describeMetaObjective(objective) {
+  const normalized = String(objective || "").trim().toLowerCase();
+  if (!normalized) return "Meta Ads";
+  return normalized
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function describeMetaCreativeFormat(objectType) {
+  const normalized = String(objectType || "").trim().toUpperCase();
+  if (normalized.includes("VIDEO")) return "Video";
+  if (normalized.includes("CAROUSEL")) return "Carousel";
+  if (normalized.includes("PHOTO") || normalized.includes("IMAGE")) return "Static";
+  if (normalized.includes("SHARE")) return "Post";
+  return "Ad";
+}
+
+function normalizeMetaBudgetAmount(value, currency = "") {
+  const amount = toNumber(value);
+  if (!amount) return 0;
+
+  const zeroDecimalCurrencies = new Set([
+    "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW",
+    "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
+  ]);
+
+  return zeroDecimalCurrencies.has(String(currency || "").trim().toUpperCase()) ? amount : amount / 100;
 }
 
 async function getGoogleAdsConnectionContext(connectionId) {
@@ -2272,6 +2928,11 @@ function normalizeSearchTermScopeLevel(value, adGroupId = "") {
 
 function sanitizeGoogleAdsId(value) {
   const normalized = String(value || "").replace(/\D/g, "");
+  return normalized || "";
+}
+
+function sanitizeMetaAdAccountId(value) {
+  const normalized = String(value || "").replace(/^act_/i, "").replace(/\D/g, "");
   return normalized || "";
 }
 
