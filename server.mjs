@@ -107,6 +107,11 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/clients") {
+      sendJson(response, 200, { clients: listStoredClients() });
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/users/login") {
       const body = await readRequestBody(request);
       let parsed;
@@ -143,6 +148,32 @@ const server = http.createServer(async (request, response) => {
       }
 
       const result = updateStoredUser(updateUserMatch[1], parsed);
+      sendJson(response, result.ok ? 200 : 400, result);
+      return;
+    }
+
+    if (request.method === "DELETE" && updateUserMatch) {
+      const result = deleteStoredUser(updateUserMatch[1]);
+      sendJson(response, result.ok ? 200 : 400, result);
+      return;
+    }
+
+    const clientMatch = url.pathname.match(/^\/api\/clients\/([^/]+)$/);
+    if (request.method === "PUT" && clientMatch) {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const result = saveStoredClient(clientMatch[1], parsed);
+      sendJson(response, result.ok ? 200 : 400, result);
+      return;
+    }
+
+    if (request.method === "DELETE" && clientMatch) {
+      const result = deleteStoredClient(clientMatch[1]);
       sendJson(response, result.ok ? 200 : 400, result);
       return;
     }
@@ -321,7 +352,7 @@ function ensureStore() {
   fs.mkdirSync(STORE_DIR, { recursive: true });
 
   if (!fs.existsSync(STORE_FILE)) {
-    fs.writeFileSync(STORE_FILE, JSON.stringify({ connections: [], searchTermTags: [], users: getDefaultStoredUsers() }, null, 2));
+    fs.writeFileSync(STORE_FILE, JSON.stringify({ connections: [], searchTermTags: [], users: getDefaultStoredUsers(), clients: [] }, null, 2));
   }
 }
 
@@ -333,34 +364,44 @@ function readStore() {
     const users = Array.isArray(parsed.users) && parsed.users.length
       ? parsed.users.map(normalizeStoredUser).filter(Boolean)
       : getDefaultStoredUsers();
+    const clients = Array.isArray(parsed.clients)
+      ? parsed.clients.map(normalizeStoredClient).filter(Boolean)
+      : [];
 
     return {
       connections: Array.isArray(parsed.connections) ? parsed.connections : [],
       searchTermTags: Array.isArray(parsed.searchTermTags) ? parsed.searchTermTags : [],
       users,
+      clients,
     };
   } catch (error) {
-    return { connections: [], searchTermTags: [], users: getDefaultStoredUsers() };
+    return { connections: [], searchTermTags: [], users: getDefaultStoredUsers(), clients: [] };
   }
 }
 
 function writeStore(store) {
   ensureStore();
   let existingUsers = [];
+  let existingClients = [];
 
   try {
     const parsed = JSON.parse(fs.readFileSync(STORE_FILE, "utf8"));
     existingUsers = Array.isArray(parsed.users) ? parsed.users.map(normalizeStoredUser).filter(Boolean) : [];
+    existingClients = Array.isArray(parsed.clients) ? parsed.clients.map(normalizeStoredClient).filter(Boolean) : [];
   } catch (error) {
     existingUsers = [];
+    existingClients = [];
   }
 
   fs.writeFileSync(STORE_FILE, JSON.stringify({
     connections: Array.isArray(store.connections) ? store.connections : [],
     searchTermTags: Array.isArray(store.searchTermTags) ? store.searchTermTags : [],
-    users: Array.isArray(store.users) && store.users.length
+    users: Array.isArray(store.users)
       ? store.users.map(normalizeStoredUser).filter(Boolean)
       : (existingUsers.length ? existingUsers : getDefaultStoredUsers()),
+    clients: Array.isArray(store.clients)
+      ? store.clients.map(normalizeStoredClient).filter(Boolean)
+      : existingClients,
   }, null, 2));
 }
 
@@ -544,6 +585,117 @@ function parseUserInput(input, options = {}) {
   };
 }
 
+function normalizeStoredClient(value) {
+  if (!value || typeof value !== "object") return null;
+
+  const id = String(value.id || `client-${crypto.randomUUID()}`).trim();
+  if (!id) return null;
+
+  const normalizeIdList = (items) => Array.isArray(items)
+    ? Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)))
+    : [];
+
+  return {
+    ...value,
+    id,
+    name: String(value.name || "New client").trim() || "New client",
+    category: String(value.category || "eshop").trim() || "eshop",
+    focus: String(value.focus || "Live media account").trim() || "Live media account",
+    accent: String(value.accent || "#0f8f66").trim() || "#0f8f66",
+    accent2: String(value.accent2 || "#78d1ad").trim() || "#78d1ad",
+    healthMode: String(value.healthMode || "healthy").trim() || "healthy",
+    logoText: String(value.logoText || "CL").trim().slice(0, 4) || "CL",
+    logoImage: String(value.logoImage || "").trim(),
+    owner: String(value.owner || "").trim(),
+    reportingGroup: String(value.reportingGroup || value.name || "New client").trim() || "New client",
+    budgets: {
+      google_ads: Number(value?.budgets?.google_ads) || 0,
+      meta_ads: Number(value?.budgets?.meta_ads) || 0,
+    },
+    connections: {
+      google_ads: value?.connections?.google_ads === true,
+      meta_ads: value?.connections?.meta_ads === true,
+      ga4: value?.connections?.ga4 === true,
+    },
+    linkedProfiles: value?.linkedProfiles && typeof value.linkedProfiles === "object" ? value.linkedProfiles : {},
+    linkedAssets: {
+      google_ads: normalizeIdList(value?.linkedAssets?.google_ads),
+      meta_ads: normalizeIdList(value?.linkedAssets?.meta_ads),
+      ga4: normalizeIdList(value?.linkedAssets?.ga4),
+    },
+    rules: value?.rules && typeof value.rules === "object" ? value.rules : {},
+    tags: Array.isArray(value.tags) ? value.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [],
+    assignedUserIds: normalizeIdList(value.assignedUserIds),
+  };
+}
+
+function listStoredClients() {
+  const store = readStore();
+  return store.clients
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function saveStoredClient(clientId, input) {
+  const store = readStore();
+  const normalized = normalizeStoredClient({
+    ...(input && typeof input === "object" ? input : {}),
+    id: clientId,
+  });
+
+  if (!normalized?.name) {
+    return { ok: false, error: "Client name is required." };
+  }
+
+  const clients = store.clients.slice();
+  const existingIndex = clients.findIndex((client) => client.id === normalized.id);
+
+  if (existingIndex >= 0) {
+    clients[existingIndex] = normalized;
+  } else {
+    clients.push(normalized);
+  }
+
+  writeStore({ ...store, clients });
+  return { ok: true, client: normalized };
+}
+
+function deleteStoredClient(clientId) {
+  const store = readStore();
+  const existing = store.clients.find((client) => client.id === clientId);
+  if (!existing) {
+    return { ok: false, error: "Client not found." };
+  }
+
+  const clients = store.clients.filter((client) => client.id !== clientId);
+  writeStore({ ...store, clients });
+  return { ok: true };
+}
+
+function deleteStoredUser(userId) {
+  const store = readStore();
+  const existing = store.users.find((user) => user.id === userId);
+  if (!existing) {
+    return { ok: false, error: "User not found." };
+  }
+
+  const directorCount = store.users.filter((user) => user.role === "director").length;
+  if (existing.role === "director" && directorCount <= 1) {
+    return { ok: false, error: "At least one Director account must remain." };
+  }
+
+  const users = store.users.filter((user) => user.id !== userId);
+  const clients = store.clients.map((client) => ({
+    ...client,
+    assignedUserIds: Array.isArray(client.assignedUserIds)
+      ? client.assignedUserIds.filter((assignedUserId) => assignedUserId !== userId)
+      : [],
+  }));
+
+  writeStore({ ...store, users, clients });
+  return { ok: true };
+}
+
 function getOrigin(request) {
   const forwardedProto = request.headers["x-forwarded-proto"];
   const forwardedHost = request.headers["x-forwarded-host"];
@@ -620,7 +772,7 @@ function serveStaticAsset(request, response, url) {
 
 function setCorsHeaders(response) {
   response.setHeader("Access-Control-Allow-Origin", "*");
-  response.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+  response.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 

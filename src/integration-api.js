@@ -53,6 +53,10 @@ export function fetchUsers() {
   return request("/users");
 }
 
+export function fetchClients() {
+  return request("/clients");
+}
+
 export function loginUser(payload) {
   return request("/users/login", {
     method: "POST",
@@ -74,6 +78,26 @@ export function updateUser(userId, payload) {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+}
+
+export function deleteUser(userId) {
+  return request(`/users/${userId}`, {
+    method: "DELETE",
+  });
+}
+
+export function saveClientRecord(clientId, payload) {
+  return request(`/clients/${clientId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteClientRecord(clientId) {
+  return request(`/clients/${clientId}`, {
+    method: "DELETE",
   });
 }
 

@@ -1,7 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   createUser,
+  deleteClientRecord,
+  deleteUser,
   disconnectIntegrationProfile,
+  fetchClients,
   fetchGa4LiveOverview,
   fetchGoogleAdsLiveOverview,
   fetchGoogleAdsReportDetails,
@@ -16,6 +19,7 @@ import {
   loginUser,
   saveSearchTermTag,
   saveSetupCredentials,
+  saveClientRecord,
   syncIntegrationProfile,
   updateUser,
 } from "./src/integration-api.js";
@@ -646,6 +650,11 @@ function getUserInitials(name) {
   return name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
 }
 
+function getClientLogoText(name) {
+  const parts = String(name || "Client").trim().split(/\s+/).filter(Boolean);
+  return parts.map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "CL";
+}
+
 function defaultScopeForPlatform(platform) {
   if (platform === "google_ads") return "Manager account";
   if (platform === "meta_ads") return "Business Manager";
@@ -742,6 +751,15 @@ function createEmptyGa4LiveState() {
 }
 
 function createEmptyUserDirectoryState() {
+  return {
+    loading: false,
+    savingKey: "",
+    error: "",
+    notice: "",
+  };
+}
+
+function createEmptyClientDirectoryState() {
   return {
     loading: false,
     savingKey: "",
@@ -885,7 +903,8 @@ function createLiveClientDraft(seed = Date.now()) {
     accent: "#0f8f66",
     accent2: "#78d1ad",
     healthMode: "healthy",
-    logoText: "NC",
+    logoText: getClientLogoText("New client"),
+    logoImage: "",
     owner: "",
     reportingGroup: "New client",
     budgets: {
@@ -903,6 +922,36 @@ function createLiveClientDraft(seed = Date.now()) {
     tags: ["Live client"],
     assignedUserIds: [],
   };
+}
+
+function getClientEditorFingerprint(client) {
+  if (!client) return "";
+
+  return JSON.stringify({
+    id: client.id,
+    name: client.name || "",
+    reportingGroup: client.reportingGroup || "",
+    owner: client.owner || "",
+    category: client.category || "",
+    logoText: client.logoText || "",
+    logoImage: client.logoImage || "",
+    budgets: {
+      google_ads: Number(client?.budgets?.google_ads) || 0,
+      meta_ads: Number(client?.budgets?.meta_ads) || 0,
+    },
+    connections: {
+      google_ads: client?.connections?.google_ads === true,
+      meta_ads: client?.connections?.meta_ads === true,
+      ga4: client?.connections?.ga4 === true,
+    },
+    linkedAssets: {
+      google_ads: [...(client?.linkedAssets?.google_ads || [])].sort(),
+      meta_ads: [...(client?.linkedAssets?.meta_ads || [])].sort(),
+      ga4: [...(client?.linkedAssets?.ga4 || [])].sort(),
+    },
+    assignedUserIds: [...(client?.assignedUserIds || [])].sort(),
+    rules: client?.rules || {},
+  });
 }
 
 function spendFactorForMode(mode, platform, slot) {
@@ -1422,6 +1471,8 @@ function hydrateClients(value) {
     return {
       ...fallback,
       ...stored,
+      logoText: String(stored.logoText || fallback.logoText || getClientLogoText(stored.name || fallback.name || "Client")).slice(0, 4),
+      logoImage: String(stored.logoImage || fallback.logoImage || ""),
       budgets: { ...fallback.budgets, ...stored.budgets },
       connections: { ...fallback.connections, ...stored.connections },
       linkedProfiles: { ...fallback.linkedProfiles, ...stored.linkedProfiles },
@@ -1541,9 +1592,18 @@ function LogoMark({ client, size = 44 }) {
         boxShadow: `0 10px 22px ${client.accent}33`,
         letterSpacing: "-0.04em",
         flexShrink: 0,
+        overflow: "hidden",
       }}
     >
-      {client.logoText}
+      {client.logoImage ? (
+        <img
+          src={client.logoImage}
+          alt={`${client.name} logo`}
+          style={{ width: "100%", height: "100%", objectFit: "contain", background: "#fff", padding: Math.max(4, Math.round(size * 0.08)) }}
+        />
+      ) : (
+        client.logoText || getClientLogoText(client.name)
+      )}
     </div>
   );
 }
@@ -2221,7 +2281,7 @@ function ProfilePanel({ user, draft, onDraftChange, onSave, onClose, onLogout, a
   );
 }
 
-function UserAdminPanel({ users, clients, currentUserId, state, onCreateUser, onUpdateUser }) {
+function UserAdminPanel({ users, clients, currentUserId, state, onCreateUser, onUpdateUser, onDeleteUser }) {
   const [createDraft, setCreateDraft] = useState(() => createEmptyUserDraft());
   const [editDrafts, setEditDrafts] = useState(() => Object.fromEntries((users || []).map((user) => [user.id, { ...createEmptyUserDraft(user.role), ...user, password: "" }])));
   const totalDirectors = users.filter((user) => user.role === "director").length;
@@ -2309,6 +2369,7 @@ function UserAdminPanel({ users, clients, currentUserId, state, onCreateUser, on
           {users.map((user) => {
             const draft = editDrafts[user.id] || { ...createEmptyUserDraft(user.role), ...user, password: "" };
             const assignedClients = clients.filter((client) => client.assignedUserIds?.includes(user.id));
+            const canDelete = user.id !== currentUserId && !(user.role === "director" && totalDirectors <= 1);
 
             return (
               <div key={user.id} style={{ padding: 18, borderRadius: 24, background: T.surface, border: `1px solid ${T.line}`, boxShadow: T.shadow, display: "grid", gap: 14 }}>
@@ -2367,9 +2428,14 @@ function UserAdminPanel({ users, clients, currentUserId, state, onCreateUser, on
                       <ToneBadge tone="warning">No clients assigned yet</ToneBadge>
                     )}
                   </div>
-                  <Button onClick={() => onUpdateUser(user.id, draft)} tone="primary" disabled={state.savingKey === user.id}>
-                    {state.savingKey === user.id ? "Saving..." : "Save changes"}
-                  </Button>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <Button onClick={() => onDeleteUser(user)} tone="danger" disabled={!canDelete || state.savingKey === `delete:${user.id}`}>
+                      {state.savingKey === `delete:${user.id}` ? "Deleting..." : "Delete user"}
+                    </Button>
+                    <Button onClick={() => onUpdateUser(user.id, draft)} tone="primary" disabled={state.savingKey === user.id}>
+                      {state.savingKey === user.id ? "Saving..." : "Save changes"}
+                    </Button>
+                  </div>
                 </div>
               </div>
             );
@@ -2382,6 +2448,7 @@ function UserAdminPanel({ users, clients, currentUserId, state, onCreateUser, on
 
 function Button({ children, onClick, active, tone = "soft", disabled = false }) {
   const isPrimary = tone === "primary";
+  const isDanger = tone === "danger";
 
   return (
     <button
@@ -2391,9 +2458,9 @@ function Button({ children, onClick, active, tone = "soft", disabled = false }) 
       style={{
         padding: "10px 14px",
         borderRadius: 12,
-        border: isPrimary ? "none" : `1px solid ${active ? T.lineStrong : T.line}`,
-        background: disabled ? T.bgSoft : isPrimary ? T.ink : active ? T.accentSoft : T.surfaceStrong,
-        color: disabled ? T.inkMute : isPrimary ? "#fff" : active ? T.accent : T.inkSoft,
+        border: isPrimary || isDanger ? "none" : `1px solid ${active ? T.lineStrong : T.line}`,
+        background: disabled ? T.bgSoft : isPrimary ? T.ink : isDanger ? T.coral : active ? T.accentSoft : T.surfaceStrong,
+        color: disabled ? T.inkMute : isPrimary || isDanger ? "#fff" : active ? T.accent : T.inkSoft,
         fontSize: 12,
         fontWeight: 800,
         cursor: disabled ? "not-allowed" : "pointer",
@@ -2435,6 +2502,66 @@ function ToneBadge({ tone = "neutral", children }) {
     >
       {children}
     </span>
+  );
+}
+
+function ActionCue({ tone = "neutral", children }) {
+  const tones = {
+    neutral: { background: T.surfaceStrong, color: T.inkSoft, border: T.line, dot: T.inkMute },
+    success: { background: T.accentSoft, color: T.accent, border: "rgba(15, 143, 102, 0.16)", dot: T.accent },
+    info: { background: "rgba(45, 108, 223, 0.10)", color: T.sky, border: "rgba(45, 108, 223, 0.16)", dot: T.sky },
+    warning: { background: T.amberSoft, color: T.amber, border: "rgba(199, 147, 33, 0.16)", dot: T.amber },
+    danger: { background: T.coralSoft, color: T.coral, border: "rgba(215, 93, 66, 0.16)", dot: T.coral },
+  };
+  const theme = tones[tone] || tones.neutral;
+
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 11px",
+        borderRadius: 999,
+        background: theme.background,
+        color: theme.color,
+        border: `1px solid ${theme.border}`,
+        fontSize: 11,
+        fontWeight: 800,
+        lineHeight: 1,
+        maxWidth: "100%",
+      }}
+    >
+      <span style={{ width: 8, height: 8, borderRadius: "50%", background: theme.dot, flexShrink: 0 }} />
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{children}</span>
+    </span>
+  );
+}
+
+function ToastStack({ items, onDismiss }) {
+  if (!items.length) return null;
+
+  return (
+    <div style={{ position: "fixed", top: 18, right: 18, zIndex: 50, display: "grid", gap: 10, width: "min(360px, calc(100vw - 24px))" }}>
+      {items.map((toast) => {
+        const tone = toast.tone === "danger" ? "danger" : toast.tone === "warning" ? "warning" : toast.tone === "info" ? "info" : "success";
+        return (
+          <div key={toast.id} style={{ padding: 14, borderRadius: 18, background: "#fff", border: `1px solid ${T.line}`, boxShadow: T.shadow, display: "flex", gap: 12, alignItems: "flex-start" }}>
+            <ActionCue tone={tone}>{toast.title || (tone === "danger" ? "Action failed" : "Saved")}</ActionCue>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{toast.message}</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onDismiss(toast.id)}
+              style={{ border: "none", background: "transparent", color: T.inkMute, cursor: "pointer", fontFamily: T.font, fontSize: 12, fontWeight: 800, padding: 0 }}
+            >
+              Close
+            </button>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -4608,7 +4735,10 @@ function AccountDateRangeControl({ value, onChange }) {
   );
 }
 
-function ClientStudio({ clients, accounts, users, providerProfiles, selectedClientId, setSelectedClientId, draft, setDraft, onSave, onCreateClient, layoutColumns, canManageAssignments, canEditCoreSettings, onOpenConnections }) {
+function ClientStudio({ clients, accounts, users, providerProfiles, selectedClientId, setSelectedClientId, draft, setDraft, onSave, onCreateClient, onDeleteClient, layoutColumns, canManageAssignments, canEditCoreSettings, onOpenConnections, state }) {
+  const logoInputRef = useRef(null);
+  const [logoError, setLogoError] = useState("");
+
   if (!draft) {
     return (
       <div
@@ -4674,6 +4804,19 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
     }));
   };
   const searchTermRules = normalizeSearchTermRules(draft.category, draft.rules?.searchTerms);
+  const persistedClient = clients.find((client) => client.id === draft.id) || null;
+  const isDirty = getClientEditorFingerprint(draft) !== getClientEditorFingerprint(persistedClient);
+  const actionCue = state?.savingKey === draft.id
+    ? { tone: "info", label: "Saving changes..." }
+    : state?.error
+      ? { tone: "danger", label: state.error }
+      : logoError
+        ? { tone: "warning", label: logoError }
+        : isDirty
+          ? { tone: "warning", label: "Unsaved changes" }
+          : state?.notice
+            ? { tone: "success", label: state.notice }
+            : { tone: "success", label: "All changes saved" };
   const updateSearchTermRule = (field, value) => {
     setDraft((current) => ({
       ...current,
@@ -4685,6 +4828,37 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
         },
       },
     }));
+  };
+  const canDeleteClient = canEditCoreSettings && Boolean(draft?.id);
+  const handleLogoFile = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setLogoError("Choose an image file for the client logo.");
+      return;
+    }
+    if (file.size > 1_500_000) {
+      setLogoError("Logo files must be under 1.5 MB.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      if (!result) {
+        setLogoError("Could not read that logo file.");
+        return;
+      }
+      setLogoError("");
+      setDraft((current) => ({
+        ...current,
+        logoImage: result,
+        logoText: current.logoText || getClientLogoText(current.name),
+      }));
+    };
+    reader.onerror = () => setLogoError("Could not read that logo file.");
+    reader.readAsDataURL(file);
   };
 
   return (
@@ -4737,6 +4911,16 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
       </div>
 
       <div style={{ display: "grid", gap: 18 }}>
+        {state?.error ? (
+          <div style={{ padding: "12px 14px", borderRadius: 16, background: T.coralSoft, color: T.coral, fontSize: 12, fontWeight: 700 }}>
+            {state.error}
+          </div>
+        ) : null}
+        {!state?.error && (state?.notice || logoError) ? (
+          <div style={{ padding: "12px 14px", borderRadius: 16, background: logoError ? T.amberSoft : T.accentSoft, color: logoError ? T.amber : T.accent, fontSize: 12, fontWeight: 700 }}>
+            {logoError || state.notice}
+          </div>
+        ) : null}
         <div
           style={{
             padding: 20,
@@ -4757,7 +4941,15 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
               </div>
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <Button onClick={onSave} tone="primary">{canEditCoreSettings ? "Save client" : "Save settings"}</Button>
+              <ActionCue tone={actionCue.tone}>{actionCue.label}</ActionCue>
+              {canDeleteClient ? (
+                <Button onClick={() => onDeleteClient(draft)} tone="danger" disabled={state?.savingKey === `delete:${draft.id}`}>
+                  {state?.savingKey === `delete:${draft.id}` ? "Deleting..." : "Delete client"}
+                </Button>
+              ) : null}
+              <Button onClick={onSave} tone="primary" disabled={state?.savingKey === draft.id}>
+                {state?.savingKey === draft.id ? "Saving..." : canEditCoreSettings ? "Save client" : "Save settings"}
+              </Button>
               <StatusPill ok={Object.values(draft.connections).filter(Boolean).length > 1} label="Connection stack" />
             </div>
           </div>
@@ -4771,7 +4963,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
           <div style={{ display: "grid", gridTemplateColumns: fitCols(220), gap: 12 }}>
             <div>
               <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Client name</div>
-              <input disabled={!canEditCoreSettings} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} style={canEditCoreSettings ? inputStyle : lockedInputStyle} />
+              <input disabled={!canEditCoreSettings} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value, logoText: current.logoImage ? current.logoText : getClientLogoText(event.target.value) }))} style={canEditCoreSettings ? inputStyle : lockedInputStyle} />
             </div>
             <div>
               <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Reporting group</div>
@@ -4780,6 +4972,30 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
             <div>
               <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Account owner</div>
               <input disabled={!canEditCoreSettings} value={draft.owner} onChange={(event) => setDraft((current) => ({ ...current, owner: event.target.value }))} style={canEditCoreSettings ? inputStyle : lockedInputStyle} />
+            </div>
+          </div>
+
+          <div style={{ padding: 18, borderRadius: 22, background: T.bgSoft, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 800, fontFamily: T.heading }}>Client logo</div>
+                <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft }}>Upload a logo for cards, reports and client selectors.</div>
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <LogoMark client={draft} size={56} />
+                {canEditCoreSettings ? (
+                  <>
+                    <input ref={logoInputRef} type="file" accept="image/*" onChange={handleLogoFile} style={{ display: "none" }} />
+                    <Button onClick={() => logoInputRef.current?.click()}>Upload logo</Button>
+                    <Button onClick={() => {
+                      setLogoError("");
+                      setDraft((current) => ({ ...current, logoImage: "", logoText: getClientLogoText(current.name) }));
+                    }} disabled={!draft.logoImage}>
+                      Remove logo
+                    </Button>
+                  </>
+                ) : null}
+              </div>
             </div>
           </div>
 
@@ -6254,6 +6470,7 @@ export default function AdPulse() {
     error: "",
   }));
   const [userDirectoryState, setUserDirectoryState] = useState(() => createEmptyUserDirectoryState());
+  const [clientDirectoryState, setClientDirectoryState] = useState(() => createEmptyClientDirectoryState());
   const [googleAdsLiveState, setGoogleAdsLiveState] = useState(() => createEmptyGoogleAdsLiveState());
   const [googleAdsReportState, setGoogleAdsReportState] = useState(() => createEmptyGoogleAdsReportState());
   const [metaAdsLiveState, setMetaAdsLiveState] = useState(() => createEmptyMetaAdsLiveState());
@@ -6262,6 +6479,7 @@ export default function AdPulse() {
   const [currentUserId, setCurrentUserId] = useState(() => readStoredValue(STORAGE_KEYS.session, null));
   const [setupComplete, setSetupComplete] = useState(null);
   const [openMap, setOpenMap] = useState({});
+  const [toasts, setToasts] = useState([]);
   const [selectedClientId, setSelectedClientId] = useState(CLIENTS_BASE[0]?.id || "");
   const [viewportWidth, setViewportWidth] = useState(() => (typeof window === "undefined" ? 1440 : window.innerWidth));
   const [showProfile, setShowProfile] = useState(false);
@@ -6420,6 +6638,58 @@ export default function AdPulse() {
           loading: false,
           error: error.message || "Could not load saved users.",
         }));
+        pushToast(error.message || "Could not load saved users.", "danger", "Users");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const localClients = clients;
+    setClientDirectoryState((current) => ({ ...current, loading: true, error: "" }));
+
+    fetchClients()
+      .then(async (payload) => {
+        if (cancelled) return;
+        const storedClients = Array.isArray(payload?.clients) ? payload.clients : [];
+
+        if (storedClients.length) {
+          setClients(hydrateClients(storedClients));
+          setClientDirectoryState((current) => ({ ...current, loading: false, error: "", notice: "" }));
+          return;
+        }
+
+        if (localClients.length) {
+          const results = await Promise.allSettled(localClients.map((client) => saveClientRecord(client.id, client)));
+          if (cancelled) return;
+          const failed = results.filter((result) => result.status === "rejected");
+          setClientDirectoryState((current) => ({
+            ...current,
+            loading: false,
+            error: failed.length ? failed[0].reason?.message || "Could not migrate local clients to the server." : "",
+            notice: failed.length ? "" : "Client records migrated to the server.",
+          }));
+          if (failed.length) {
+            pushToast(failed[0].reason?.message || "Could not migrate local clients to the server.", "danger", "Clients");
+          } else {
+            pushToast("Client records migrated to the server.", "info", "Clients");
+          }
+          return;
+        }
+
+        setClientDirectoryState((current) => ({ ...current, loading: false, error: "", notice: "" }));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setClientDirectoryState((current) => ({
+          ...current,
+          loading: false,
+          error: error.message || "Could not load saved clients.",
+        }));
+        pushToast(error.message || "Could not load saved clients.", "danger", "Clients");
       });
 
     return () => {
@@ -6455,12 +6725,14 @@ export default function AdPulse() {
 
       if (event.data.ok) {
         refreshIntegrations({ silent: true });
+        pushToast("Connection completed successfully.", "success", "Integrations");
       } else {
         setIntegrationState((current) => ({
           ...current,
           error: event.data.error || "The provider login did not complete.",
           loading: false,
         }));
+        pushToast(event.data.error || "The provider login did not complete.", "danger", "Integrations");
       }
     };
 
@@ -6889,6 +7161,28 @@ export default function AdPulse() {
     ]));
   }
 
+  function mergeClientRecord(nextClient) {
+    setClients((current) => hydrateClients([
+      ...current.filter((client) => client.id !== nextClient.id),
+      nextClient,
+    ]));
+  }
+
+  function dismissToast(toastId) {
+    setToasts((current) => current.filter((toast) => toast.id !== toastId));
+  }
+
+  function pushToast(message, tone = "success", title = "") {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setToasts((current) => [...current.slice(-2), { id, message, tone, title }]);
+
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => {
+        setToasts((current) => current.filter((toast) => toast.id !== id));
+      }, 3600);
+    }
+  }
+
   async function handleLogin(credentials = loginForm) {
     const email = credentials.email.trim().toLowerCase();
     const password = credentials.password;
@@ -6944,8 +7238,10 @@ export default function AdPulse() {
       }
       setShowProfile(false);
       setUserDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: "Profile updated." }));
+      pushToast("Your profile has been updated.", "success", "Profile");
     } catch (error) {
       setUserDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not update the profile.", notice: "" }));
+      pushToast(error.message || "Could not update the profile.", "danger", "Profile");
     }
   }
 
@@ -6957,10 +7253,12 @@ export default function AdPulse() {
       if (payload?.user) {
         mergeUserRecord(payload.user);
         setUserDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: `${payload.user.name} created.` }));
+        pushToast(`${payload.user.name} created successfully.`, "success", "Users");
         return payload.user;
       }
     } catch (error) {
       setUserDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not create the user.", notice: "" }));
+      pushToast(error.message || "Could not create the user.", "danger", "Users");
     }
 
     return null;
@@ -6974,9 +7272,39 @@ export default function AdPulse() {
       if (payload?.user) {
         mergeUserRecord(payload.user);
         setUserDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: `${payload.user.name} updated.` }));
+        pushToast(`${payload.user.name} updated.`, "success", "Users");
       }
     } catch (error) {
       setUserDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not update the user.", notice: "" }));
+      pushToast(error.message || "Could not update the user.", "danger", "Users");
+    }
+  }
+
+  async function deleteDashboardUser(user) {
+    if (!user?.id) return;
+    if (user.id === currentUserId) {
+      setUserDirectoryState((current) => ({ ...current, error: "You cannot delete the user who is currently signed in.", notice: "" }));
+      pushToast("You cannot delete the user who is currently signed in.", "warning", "Users");
+      return;
+    }
+    if (typeof window !== "undefined" && !window.confirm(`Delete ${user.name}? This will remove their login and unassign them from any clients.`)) {
+      return;
+    }
+
+    setUserDirectoryState((current) => ({ ...current, savingKey: `delete:${user.id}`, error: "", notice: "" }));
+
+    try {
+      await deleteUser(user.id);
+      setUsers((current) => current.filter((item) => item.id !== user.id));
+      setClients((current) => current.map((client) => ({
+        ...client,
+        assignedUserIds: (client.assignedUserIds || []).filter((assignedUserId) => assignedUserId !== user.id),
+      })));
+      setUserDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: `${user.name} deleted.` }));
+      pushToast(`${user.name} deleted.`, "success", "Users");
+    } catch (error) {
+      setUserDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not delete the user.", notice: "" }));
+      pushToast(error.message || "Could not delete the user.", "danger", "Users");
     }
   }
 
@@ -6996,48 +7324,105 @@ export default function AdPulse() {
     setClients((current) => [...current, nextClient]);
     setSelectedClientId(nextClient.id);
     setStudioDraft(nextClient);
+    setClientDirectoryState((current) => ({ ...current, error: "", notice: "New client draft created. Save it to persist the record." }));
+    pushToast("New client draft created. Save it to persist the record.", "info", "Clients");
     setView("studio");
   }
 
-  function saveStudioDraft() {
+  async function saveStudioDraft() {
     if (!studioDraft) return;
 
+    setClientDirectoryState((current) => ({ ...current, savingKey: studioDraft.id, error: "", notice: "" }));
+
+    let nextClient = null;
+
     if (!isDirector) {
-      setClients((current) => current.map((client) => (
-        client.id === studioDraft.id
-          ? {
-              ...client,
-              budgets: { ...client.budgets, ...studioDraft.budgets },
-              linkedAssets: {
-                ...(client.linkedAssets || getEmptyLinkedAssets()),
-                ...(studioDraft.linkedAssets || getEmptyLinkedAssets()),
-              },
-              connections: { ...client.connections, ...studioDraft.connections },
-              rules: {
-                ...client.rules,
-                ...studioDraft.rules,
-                searchTerms: normalizeSearchTermRules(studioDraft.category || client.category, studioDraft.rules?.searchTerms),
-              },
-            }
-          : client
-      )));
+      const currentClient = clients.find((client) => client.id === studioDraft.id);
+      if (!currentClient) {
+        setClientDirectoryState((current) => ({ ...current, savingKey: "", error: "Client not found.", notice: "" }));
+        pushToast("Client not found.", "danger", "Clients");
+        return;
+      }
+
+      nextClient = {
+        ...currentClient,
+        budgets: { ...currentClient.budgets, ...studioDraft.budgets },
+        linkedAssets: {
+          ...(currentClient.linkedAssets || getEmptyLinkedAssets()),
+          ...(studioDraft.linkedAssets || getEmptyLinkedAssets()),
+        },
+        connections: { ...currentClient.connections, ...studioDraft.connections },
+        rules: {
+          ...currentClient.rules,
+          ...studioDraft.rules,
+          searchTerms: normalizeSearchTermRules(studioDraft.category || currentClient.category, studioDraft.rules?.searchTerms),
+        },
+        logoImage: studioDraft.logoImage || currentClient.logoImage || "",
+        logoText: studioDraft.logoText || currentClient.logoText || getClientLogoText(studioDraft.name || currentClient.name),
+      };
+    } else {
+      nextClient = {
+        ...studioDraft,
+        logoText: studioDraft.logoText || getClientLogoText(studioDraft.name),
+        assignedUserIds: Array.from(new Set((studioDraft.assignedUserIds || []).filter((userId) => accountUserIds.includes(userId)))),
+        linkedAssets: {
+          ...getEmptyLinkedAssets(),
+          ...(studioDraft.linkedAssets || {}),
+        },
+        connections: { ...studioDraft.connections },
+        rules: {
+          ...studioDraft.rules,
+          searchTerms: normalizeSearchTermRules(studioDraft.category, studioDraft.rules?.searchTerms),
+        },
+      };
+    }
+
+    try {
+      const payload = await saveClientRecord(nextClient.id, nextClient);
+      const savedClient = payload?.client ? hydrateClients([payload.client])[0] : nextClient;
+      mergeClientRecord(savedClient);
+      setStudioDraft(savedClient);
+      setClientDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: `${savedClient.name} saved.` }));
+      pushToast(`${savedClient.name} saved successfully.`, "success", "Clients");
+    } catch (error) {
+      setClientDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not save the client.", notice: "" }));
+      pushToast(error.message || "Could not save the client.", "danger", "Clients");
+    }
+  }
+
+  async function deleteDashboardClient(client) {
+    if (!client?.id) return;
+    if (typeof window !== "undefined" && !window.confirm(`Delete ${client.name}? This removes the client record, linked assets, and Director configuration for it.`)) {
       return;
     }
 
-    const normalizedDraft = {
-      ...studioDraft,
-      assignedUserIds: Array.from(new Set((studioDraft.assignedUserIds || []).filter((userId) => accountUserIds.includes(userId)))),
-      linkedAssets: {
-        ...getEmptyLinkedAssets(),
-        ...(studioDraft.linkedAssets || {}),
-      },
-      connections: { ...studioDraft.connections },
-      rules: {
-        ...studioDraft.rules,
-        searchTerms: normalizeSearchTermRules(studioDraft.category, studioDraft.rules?.searchTerms),
-      },
-    };
-    setClients((current) => current.map((client) => (client.id === studioDraft.id ? normalizedDraft : client)));
+    setClientDirectoryState((current) => ({ ...current, savingKey: `delete:${client.id}`, error: "", notice: "" }));
+
+    try {
+      await deleteClientRecord(client.id);
+      const remaining = clients.filter((item) => item.id !== client.id);
+      const nextSelectedId = remaining[0]?.id || "";
+      const nextGaClientId = remaining.find((item) => item.connections?.ga4)?.id || nextSelectedId;
+
+      setClients(remaining);
+      setOpenMap((current) => {
+        const next = { ...current };
+        delete next[client.id];
+        return next;
+      });
+      setCharts((current) => current.filter((chart) => chart.clientId !== client.id));
+      if (selectedClientId === client.id) setSelectedClientId(nextSelectedId);
+      if (reportClientId === client.id) setReportClientId(nextSelectedId);
+      if (gaClientId === client.id) setGaClientId(nextGaClientId);
+      if (studioDraft?.id === client.id) {
+        setStudioDraft(remaining.find((item) => item.id === nextSelectedId) || null);
+      }
+      setClientDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: `${client.name} deleted.` }));
+      pushToast(`${client.name} deleted.`, "success", "Clients");
+    } catch (error) {
+      setClientDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not delete the client.", notice: "" }));
+      pushToast(error.message || "Could not delete the client.", "danger", "Clients");
+    }
   }
 
   function addChart() {
@@ -7068,6 +7453,9 @@ export default function AdPulse() {
         loading: false,
         error: error.message || "Could not load integration state. Make sure the local API server is running.",
       }));
+      if (!silent) {
+        pushToast(error.message || "Could not load integration state.", "danger", "Integrations");
+      }
     }
   }
 
@@ -7084,10 +7472,12 @@ export default function AdPulse() {
         error: "Popup blocked. Allow popups for AdPulse and try again.",
       }));
       setIntegrationBusy((current) => ({ ...current, [`connect-${platform}`]: false }));
+      pushToast("Popup blocked. Allow popups for AdPulse and try again.", "danger", "Integrations");
       return;
     }
 
     popup.focus?.();
+    pushToast(`Finish the ${PLATFORM_META[platform]?.label || platform} login in the popup window.`, "info", "Integrations");
     const timer = window.setInterval(() => {
       if (popup.closed) {
         window.clearInterval(timer);
@@ -7102,11 +7492,13 @@ export default function AdPulse() {
     try {
       await syncIntegrationProfile(profileId);
       await refreshIntegrations({ silent: true });
+      pushToast("Integration synced successfully.", "success", "Integrations");
     } catch (error) {
       setIntegrationState((current) => ({
         ...current,
         error: error.message || "Sync failed.",
       }));
+      pushToast(error.message || "Sync failed.", "danger", "Integrations");
     } finally {
       setIntegrationBusy((current) => ({ ...current, [profileId]: false }));
     }
@@ -7122,11 +7514,13 @@ export default function AdPulse() {
     try {
       await disconnectIntegrationProfile(profileId);
       await refreshIntegrations({ silent: true });
+      pushToast("Integration disconnected.", "success", "Integrations");
     } catch (error) {
       setIntegrationState((current) => ({
         ...current,
         error: error.message || "Disconnect failed.",
       }));
+      pushToast(error.message || "Disconnect failed.", "danger", "Integrations");
     } finally {
       setIntegrationBusy((current) => ({ ...current, [`${profileId}-disconnect`]: false }));
     }
@@ -7165,6 +7559,7 @@ export default function AdPulse() {
           pointerEvents: "none",
         }}
       />
+      <ToastStack items={toasts} onDismiss={dismissToast} />
 
       <div style={{ position: "relative", maxWidth: shellMaxWidth, margin: "0 auto", padding: "clamp(12px, 2vw, 24px)", overflowX: "hidden" }}>
         <div
@@ -7512,7 +7907,7 @@ export default function AdPulse() {
           ) : null}
 
           {view === "studio" ? (
-            <ClientStudio clients={enriched} accounts={allDashboardAccounts} users={users} providerProfiles={providerProfiles} selectedClientId={selectedClientId} setSelectedClientId={setSelectedClientId} draft={studioDraft} setDraft={setStudioDraft} onSave={saveStudioDraft} onCreateClient={createClient} layoutColumns={studioColumns} canManageAssignments={isDirector} canEditCoreSettings={isDirector} onOpenConnections={() => setView("connections")} />
+            <ClientStudio clients={enriched} accounts={allDashboardAccounts} users={users} providerProfiles={providerProfiles} selectedClientId={selectedClientId} setSelectedClientId={setSelectedClientId} draft={studioDraft} setDraft={setStudioDraft} onSave={saveStudioDraft} onCreateClient={createClient} onDeleteClient={deleteDashboardClient} layoutColumns={studioColumns} canManageAssignments={isDirector} canEditCoreSettings={isDirector} onOpenConnections={() => setView("connections")} state={clientDirectoryState} />
           ) : null}
 
           {view === "users" ? (
@@ -7523,6 +7918,7 @@ export default function AdPulse() {
               state={userDirectoryState}
               onCreateUser={createDashboardUser}
               onUpdateUser={saveDashboardUser}
+              onDeleteUser={deleteDashboardUser}
             />
           ) : null}
 
