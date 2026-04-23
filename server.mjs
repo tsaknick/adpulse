@@ -1859,6 +1859,7 @@ async function fetchGoogleAdsLiveOverview(payload) {
       cpc: toNumber(report?.account?.cpc),
       cpm: toNumber(report?.account?.cpm),
       roas: toNumber(report?.account?.roas),
+      series: Array.isArray(report?.account?.series) ? report.account.series : [],
       accountLabel: report?.account?.name || asset?.name || `Google Ads ${request.customerId}`,
       requestKey: request.key,
       connectionId: request.connectionId,
@@ -2155,6 +2156,7 @@ async function fetchMetaAdsLiveOverview(payload) {
       cpc: toNumber(report?.account?.cpc),
       cpm: toNumber(report?.account?.cpm),
       roas: toNumber(report?.account?.roas),
+      series: Array.isArray(report?.account?.series) ? report.account.series : [],
       accountLabel: report?.account?.name || asset?.name || `Meta Ads ${request.adAccountId}`,
       requestKey: request.key,
       connectionId: request.connectionId,
@@ -2575,6 +2577,143 @@ function normalizeGa4DailySeries(report) {
   });
 }
 
+function buildDailySeriesDates(dateRange) {
+  const startDate = sanitizeIsoDate(dateRange?.startDate);
+  const endDate = sanitizeIsoDate(dateRange?.endDate);
+  if (!startDate || !endDate || endDate < startDate) return [];
+
+  const dates = [];
+  let cursor = new Date(`${startDate}T00:00:00Z`);
+  const final = new Date(`${endDate}T00:00:00Z`);
+
+  while (cursor <= final) {
+    dates.push(formatUtcDate(cursor));
+    cursor = addUtcDays(cursor, 1);
+  }
+
+  return dates;
+}
+
+function formatDailySeriesLabel(value) {
+  const normalized = sanitizeIsoDate(value);
+  if (!normalized) return String(value || "");
+
+  const [, month, day] = normalized.split("-");
+  const monthIndex = Number(month) - 1;
+  const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  if (monthIndex < 0 || monthIndex >= monthLabels.length) return normalized;
+  return `${monthLabels[monthIndex]} ${day}`;
+}
+
+function normalizeGoogleAdsDailySeriesRows(rows, dateRange) {
+  const byDate = new Map();
+
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const date = sanitizeIsoDate(row?.segments?.date || row?.date || "");
+    if (!date) return;
+
+    const spend = toNumber(row.metrics?.costMicros) / 1_000_000;
+    const impressions = toNumber(row.metrics?.impressions);
+    const clicks = toNumber(row.metrics?.clicks);
+    const conversions = toNumber(row.metrics?.conversions);
+    const allConversions = toNumber(row.metrics?.allConversions);
+    const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
+    const allConversionValue = normalizeGoogleAdsConversionValue(row.metrics?.allConversionsValue);
+
+    byDate.set(date, {
+      date,
+      label: formatDailySeriesLabel(date),
+      spend: +spend.toFixed(2),
+      impressions,
+      clicks,
+      conversions: +conversions.toFixed(2),
+      allConversions: +allConversions.toFixed(2),
+      conversionValue: +conversionValue.toFixed(2),
+      allConversionValue: +allConversionValue.toFixed(2),
+      cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
+      cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
+      ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
+      roas: spend ? +(conversionValue / spend).toFixed(2) : 0,
+      revenue: +conversionValue.toFixed(2),
+    });
+  });
+
+  const dates = buildDailySeriesDates(dateRange);
+  if (!dates.length) {
+    return Array.from(byDate.values()).sort((left, right) => String(left.date).localeCompare(String(right.date)));
+  }
+
+  return dates.map((date) => byDate.get(date) || {
+    date,
+    label: formatDailySeriesLabel(date),
+    spend: 0,
+    impressions: 0,
+    clicks: 0,
+    conversions: 0,
+    allConversions: 0,
+    conversionValue: 0,
+    allConversionValue: 0,
+    cpc: 0,
+    cpm: 0,
+    ctr: 0,
+    roas: 0,
+    revenue: 0,
+  });
+}
+
+function normalizeMetaDailySeriesRows(rows, dateRange) {
+  const byDate = new Map();
+
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const date = sanitizeIsoDate(row?.date_start || row?.date || "");
+    if (!date) return;
+
+    const spend = toNumber(row.spend);
+    const impressions = toNumber(row.impressions);
+    const clicks = toNumber(row.clicks);
+    const reach = toNumber(row.reach);
+    const conversions = extractMetaConversionCount(row.actions);
+    const conversionValue = extractMetaConversionValue(row.action_values, row.purchase_roas, spend);
+
+    byDate.set(date, {
+      date,
+      label: formatDailySeriesLabel(date),
+      spend: +spend.toFixed(2),
+      impressions,
+      clicks,
+      reach,
+      conversions: +conversions.toFixed(2),
+      conversionValue: +conversionValue.toFixed(2),
+      cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
+      cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
+      ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
+      roas: spend ? +(conversionValue / spend).toFixed(2) : 0,
+      revenue: +conversionValue.toFixed(2),
+    });
+  });
+
+  const dates = buildDailySeriesDates(dateRange);
+  if (!dates.length) {
+    return Array.from(byDate.values()).sort((left, right) => String(left.date).localeCompare(String(right.date)));
+  }
+
+  return dates.map((date) => byDate.get(date) || {
+    date,
+    label: formatDailySeriesLabel(date),
+    spend: 0,
+    impressions: 0,
+    clicks: 0,
+    reach: 0,
+    conversions: 0,
+    conversionValue: 0,
+    cpc: 0,
+    cpm: 0,
+    ctr: 0,
+    roas: 0,
+    revenue: 0,
+  });
+}
+
 function getGa4MetricValue(report, row, fallbackRows, metricName, options = {}) {
   const index = (report?.metricHeaders || []).findIndex((header) => header.name === metricName);
   if (index < 0) return 0;
@@ -2598,6 +2737,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
   }
 
   const { connection, tokenBundle, loginCustomerIds } = context;
+  const customerLoginCustomerIds = getGoogleAdsScopedLoginCustomerIds(connection, customerId, loginCustomerIds);
   assertGoogleAdsCustomerAccess(connection, customerId);
 
   const asset = connection.assets?.find((item) => sanitizeGoogleAdsId(item.externalId) === customerId) || null;
@@ -2605,19 +2745,20 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
     connection,
     customerId,
     tokenBundle,
-    loginCustomerIds,
+    loginCustomerIds: customerLoginCustomerIds,
     asset,
   });
   const errors = [];
   let accountSummary = null;
   let campaignMetricsResponse = null;
   let adMetricsResponse = null;
+  let dailySeries = [];
 
   try {
     accountSummary = await fetchGoogleAdsAccountSummary({
       customerId,
       tokenBundle,
-      loginCustomerIds,
+      loginCustomerIds: customerLoginCustomerIds,
       dateRange,
     });
   } catch (error) {
@@ -2628,7 +2769,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
     campaignMetricsResponse = await fetchGoogleAdsRowsWithLoginFallback({
       customerId,
       tokenBundle,
-      loginCustomerIds,
+      loginCustomerIds: customerLoginCustomerIds,
       query: [
         "SELECT",
         "  campaign.id,",
@@ -2660,7 +2801,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
     adMetricsResponse = await fetchGoogleAdsRowsWithLoginFallback({
       customerId,
       tokenBundle,
-      loginCustomerIds,
+      loginCustomerIds: customerLoginCustomerIds,
       query: [
         "SELECT",
         "  ad_group_ad.ad.id,",
@@ -2688,6 +2829,17 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
     });
   } catch (error) {
     errors.push(error.message || `Could not fetch ad metrics for ${customerId}.`);
+  }
+
+  try {
+    dailySeries = await fetchGoogleAdsDailySeriesReport({
+      customerId,
+      tokenBundle,
+      loginCustomerIds: customerLoginCustomerIds,
+      dateRange,
+    });
+  } catch (error) {
+    errors.push(error.message || `Could not fetch daily series for ${customerId}.`);
   }
 
   const metricCampaigns = (campaignMetricsResponse?.results || [])
@@ -2803,6 +2955,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
       roas: spend ? +(conversionValue / spend).toFixed(2) : 0,
       currency: asset?.currency || "",
       timezone: asset?.timezone || "",
+      series: dailySeries,
     },
     campaigns,
     ads,
@@ -2833,20 +2986,47 @@ async function fetchGoogleAdsAccountSummary({ customerId, tokenBundle, loginCust
   return normalizeGoogleAdsAccountSummaryRow(response.results?.[0] || null);
 }
 
+async function fetchGoogleAdsDailySeriesReport({ customerId, tokenBundle, loginCustomerIds, dateRange }) {
+  const response = await fetchGoogleAdsRowsWithLoginFallback({
+    customerId,
+    tokenBundle,
+    loginCustomerIds,
+    query: [
+      "SELECT",
+      "  segments.date,",
+      "  metrics.impressions,",
+      "  metrics.clicks,",
+      "  metrics.conversions,",
+      "  metrics.all_conversions,",
+      "  metrics.conversions_value,",
+      "  metrics.all_conversions_value,",
+      "  metrics.cost_micros",
+      "FROM customer",
+      getGoogleAdsDateWhereClause(dateRange),
+      "ORDER BY segments.date ASC",
+      "LIMIT 400",
+    ].join(" "),
+    label: `Google Ads daily series ${customerId}`,
+  });
+
+  return normalizeGoogleAdsDailySeriesRows(response.results || [], dateRange);
+}
+
 async function fetchGoogleAdsReportDetailForCustomer({ context, customerId, dateRange }) {
   if (!context?.connection) {
     throw new Error("Google Ads connection context is missing.");
   }
 
   const { connection, tokenBundle, loginCustomerIds } = context;
+  const customerLoginCustomerIds = getGoogleAdsScopedLoginCustomerIds(connection, customerId, loginCustomerIds);
   assertGoogleAdsCustomerAccess(connection, customerId);
 
   const errors = [];
   const [deviceResult, geographyResult, keywordResult, impressionShareResult] = await Promise.allSettled([
-    fetchGoogleAdsDeviceReport({ customerId, tokenBundle, loginCustomerIds, dateRange }),
-    fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCustomerIds, dateRange }),
-    fetchGoogleAdsKeywordReport({ customerId, tokenBundle, loginCustomerIds, dateRange }),
-    fetchGoogleAdsImpressionShareReport({ customerId, tokenBundle, loginCustomerIds, dateRange }),
+    fetchGoogleAdsDeviceReport({ customerId, tokenBundle, loginCustomerIds: customerLoginCustomerIds, dateRange }),
+    fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCustomerIds: customerLoginCustomerIds, dateRange }),
+    fetchGoogleAdsKeywordReport({ customerId, tokenBundle, loginCustomerIds: customerLoginCustomerIds, dateRange }),
+    fetchGoogleAdsImpressionShareReport({ customerId, tokenBundle, loginCustomerIds: customerLoginCustomerIds, dateRange }),
   ]);
 
   if (deviceResult.status === "rejected") errors.push(deviceResult.reason?.message || "Could not fetch device performance.");
@@ -2894,7 +3074,7 @@ async function fetchGoogleAdsDeviceReport({ customerId, tokenBundle, loginCustom
 }
 
 async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCustomerIds, dateRange }) {
-  const fetchRows = async (viewName, labelSuffix) => {
+  const fetchRows = async (viewName, labelSuffix, extraConditions = []) => {
     const response = await fetchGoogleAdsRowsWithLoginFallback({
       customerId,
       tokenBundle,
@@ -2913,6 +3093,7 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
         "  metrics.cost_micros",
         `FROM ${viewName}`,
         "WHERE metrics.clicks > 0",
+        ...extraConditions,
         dateRange.googleCondition,
         "ORDER BY metrics.conversions DESC",
         "LIMIT 20",
@@ -2923,39 +3104,26 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
     return (response.results || []).map(normalizeGoogleAdsGeographyReportRow).filter(Boolean);
   };
 
+  const attempts = [
+    { viewName: "geographic_view", labelSuffix: "geo-target", extraConditions: [] },
+    { viewName: "user_location_view", labelSuffix: "user-location", extraConditions: [] },
+    { viewName: "campaign", labelSuffix: "campaign-segments", extraConditions: ["  AND campaign.status != REMOVED"] },
+    { viewName: "customer", labelSuffix: "customer-segments", extraConditions: [] },
+  ];
+  const messages = [];
   let rows = [];
-  let primaryError = null;
-  let secondaryError = null;
 
-  try {
-    rows = await fetchRows("geographic_view", "geo-target");
-  } catch (error) {
-    primaryError = error;
-  }
-
-  if (!rows.length) {
+  for (const attempt of attempts) {
     try {
-      rows = await fetchRows("user_location_view", "user-location");
+      rows = await fetchRows(attempt.viewName, attempt.labelSuffix, attempt.extraConditions);
+      if (rows.length) break;
     } catch (error) {
-      secondaryError = error;
+      messages.push(error.message || `Could not fetch ${attempt.labelSuffix} geography rows for ${customerId}.`);
     }
   }
 
-  if (!rows.length) {
-    try {
-      rows = await fetchRows("customer", "customer-segments");
-    } catch (error) {
-      const messages = [
-        primaryError?.message || "",
-        secondaryError?.message || "",
-        error.message || "",
-      ].filter(Boolean);
-
-      if (messages.length) {
-        throw new Error(messages.join(" | "));
-      }
-      throw error;
-    }
+  if (!rows.length && messages.length) {
+    throw new Error(messages.join(" | "));
   }
 
   const names = await fetchGoogleAdsGeoTargetNames({
@@ -3095,6 +3263,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
   let campaignInsightRows = [];
   let adRows = [];
   let adInsightRows = [];
+  let dailyInsightRows = [];
 
   try {
     accountDetails = await fetchJson(buildMetaGraphUrl(actId, {
@@ -3147,6 +3316,18 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
     }), `Meta ad insights ${adAccountId}`);
   } catch (error) {
     errors.push(error.message || `Could not fetch Meta ad insights for ${adAccountId}.`);
+  }
+
+  try {
+    dailyInsightRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/insights`, {
+      fields: "date_start,reach,impressions,clicks,spend,actions,action_values,purchase_roas",
+      time_increment: "1",
+      ...metaDateParams,
+      limit: "400",
+      access_token: accessToken,
+    }), `Meta daily insights ${adAccountId}`);
+  } catch (error) {
+    errors.push(error.message || `Could not fetch Meta daily insights for ${adAccountId}.`);
   }
 
   const currency = accountDetails?.currency || asset?.currency || "";
@@ -3226,6 +3407,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
   const conversionValue = campaigns.reduce((acc, campaign) => acc + campaign.conversionValue, 0);
   const activeCampaigns = campaigns.filter((campaign) => campaign.status !== "stopped").length;
   const dataStatus = errors.length ? (campaigns.length || ads.length ? "partial" : "error") : "ready";
+  const dailySeries = normalizeMetaDailySeriesRows(dailyInsightRows, dateRange);
 
   return {
     adAccountId,
@@ -3248,6 +3430,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
       roas: spend ? +(conversionValue / spend).toFixed(2) : 0,
       currency,
       timezone,
+      series: dailySeries,
     },
     campaigns,
     ads,
@@ -4079,6 +4262,16 @@ async function getGoogleAdsConnectionContext(connectionId) {
     tokenBundle: refreshedTokens,
     loginCustomerIds: getGoogleAdsLoginCustomerIds(hydratedConnection),
   };
+}
+
+function getGoogleAdsScopedLoginCustomerIds(connection, customerId, loginCustomerIds = []) {
+  const normalizedCustomerId = sanitizeGoogleAdsId(customerId);
+  const asset = (connection?.assets || []).find((item) => sanitizeGoogleAdsId(item.externalId) === normalizedCustomerId);
+
+  return Array.from(new Set([
+    sanitizeGoogleAdsId(asset?.parentManagerId),
+    ...loginCustomerIds.map((value) => sanitizeGoogleAdsId(value)),
+  ].filter(Boolean)));
 }
 
 function getGoogleAdsLoginCustomerIds(connection) {

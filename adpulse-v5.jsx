@@ -1151,12 +1151,41 @@ function allocateSeries(total, key) {
   });
 }
 
+function normalizeProvidedSeries(points) {
+  return (Array.isArray(points) ? points : [])
+    .map((point) => ({
+      date: String(point?.date || "").trim(),
+      label: String(point?.label || point?.date || "").trim(),
+      spend: Number(point?.spend) || 0,
+      clicks: Number(point?.clicks) || 0,
+      impressions: Number(point?.impressions) || 0,
+      conversions: Number(point?.conversions) || 0,
+      conversionValue: Number(point?.conversionValue ?? point?.revenue) || 0,
+      revenue: Number(point?.revenue ?? point?.conversionValue) || 0,
+      cpc: Number(point?.cpc) || 0,
+      cpm: Number(point?.cpm) || 0,
+      roas: Number(point?.roas) || 0,
+    }))
+    .filter((point) => point.label || point.date);
+}
+
 function buildSeriesMap(clients, accounts, ga4) {
   const series = {};
   const clientBuckets = Object.fromEntries(clients.map((client) => [client.id, []]));
 
   accounts.forEach((account) => {
     clientBuckets[account.clientId].push(account);
+    const providedSeries = normalizeProvidedSeries(account.series);
+    if (providedSeries.length) {
+      series[`account:${account.id}`] = providedSeries;
+      return;
+    }
+
+    if (account.requestKey || String(account.id || "").startsWith("live-")) {
+      series[`account:${account.id}`] = [];
+      return;
+    }
+
     const spend = allocateSeries(account.spend, `${account.id}-spend`);
     const clicks = allocateSeries(account.clicks, `${account.id}-clicks`);
     const conversions = allocateSeries(account.conversions, `${account.id}-conversions`);
@@ -3449,24 +3478,57 @@ function escapeHtml(value) {
 }
 
 function getPlatformReportSeries(client, platform, seriesMap) {
-  const accountSeries = (client.accounts || [])
-    .filter((account) => account.platform === platform)
-    .map((account) => seriesMap[`account:${account.id}`] || [])
-    .filter((series) => series.length);
-  const length = Math.max(0, ...accountSeries.map((series) => series.length));
+  const merged = new Map();
 
-  return Array.from({ length }, (_, index) => accountSeries.reduce((acc, series) => {
-    const point = series[index] || {};
-    return {
-      label: acc.label || point.label || "",
-      spend: acc.spend + (Number(point.spend) || 0),
-      clicks: acc.clicks + (Number(point.clicks) || 0),
-      impressions: acc.impressions + Math.round((Number(point.clicks) || 0) * 12),
-      conversions: acc.conversions + (Number(point.conversions) || 0),
-      conversionValue: acc.conversionValue + (Number(point.conversionValue) || Number(point.revenue) || 0),
-      revenue: acc.revenue + (Number(point.revenue) || 0),
-    };
-  }, { label: "", spend: 0, clicks: 0, impressions: 0, conversions: 0, conversionValue: 0, revenue: 0 }));
+  (client.accounts || [])
+    .filter((account) => account.platform === platform)
+    .forEach((account) => {
+      const accountSeries = normalizeProvidedSeries(account.series).length
+        ? normalizeProvidedSeries(account.series)
+        : (seriesMap[`account:${account.id}`] || []);
+
+      accountSeries.forEach((point, index) => {
+        const key = String(point?.date || point?.label || `point-${index}`);
+        const current = merged.get(key) || {
+          date: point?.date || "",
+          label: point?.label || point?.date || "",
+          spend: 0,
+          clicks: 0,
+          impressions: 0,
+          conversions: 0,
+          conversionValue: 0,
+          revenue: 0,
+        };
+
+        current.date = current.date || point?.date || "";
+        current.label = current.label || point?.label || point?.date || "";
+        current.spend += Number(point?.spend) || 0;
+        current.clicks += Number(point?.clicks) || 0;
+        current.impressions += Number(point?.impressions) || 0;
+        current.conversions += Number(point?.conversions) || 0;
+        current.conversionValue += Number(point?.conversionValue ?? point?.revenue) || 0;
+        current.revenue += Number(point?.revenue ?? point?.conversionValue) || 0;
+        merged.set(key, current);
+      });
+    });
+
+  const rows = Array.from(merged.values());
+  return rows.every((point) => point.date)
+    ? rows.sort((left, right) => String(left.date).localeCompare(String(right.date)))
+    : rows;
+}
+
+function getGoogleGeographyEmptyLabel(errorMessage) {
+  const message = String(errorMessage || "").trim();
+  if (!message) {
+    return "No geographic rows were returned by Google Ads for the selected account and date range.";
+  }
+
+  if (/403|permission/i.test(message)) {
+    return "Google Ads did not allow a geographic breakdown for this account with the current login. Reconnect the Google Ads login and make sure the correct parent MCC has access to this ad account.";
+  }
+
+  return message;
 }
 
 function aggregateReportRows(rows, keyField, numericFields, sorterField = "cost") {
@@ -3940,7 +4002,7 @@ function ReportGoogleGeographyPage({ details, loading }) {
           { label: "Total Conversion Value", align: "right", render: (row) => formatReportCurrency(row.conversionValue) },
         ]}
         rows={rows.slice(0, 12)}
-        emptyLabel={loading ? "Loading geographic performance..." : geographyError || "No geographic rows were returned by Google Ads for the selected account and date range."}
+        emptyLabel={loading ? "Loading geographic performance..." : getGoogleGeographyEmptyLabel(geographyError)}
       />
     </ReportPage>
   );
