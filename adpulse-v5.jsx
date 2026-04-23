@@ -1,19 +1,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  createUser,
   disconnectIntegrationProfile,
   fetchGa4LiveOverview,
   fetchGoogleAdsLiveOverview,
   fetchGoogleAdsReportDetails,
   fetchIntegrationSnapshot,
   fetchMetaAdsLiveOverview,
+  fetchUsers,
   fetchSearchTermHierarchy,
   fetchSearchTermTags,
   fetchSearchTerms,
   fetchSetupStatus,
   getProviderStartUrl,
+  loginUser,
   saveSearchTermTag,
   saveSetupCredentials,
   syncIntegrationProfile,
+  updateUser,
 } from "./src/integration-api.js";
 
 const T = {
@@ -100,7 +104,8 @@ const PROVIDER_PROFILE_BLUEPRINTS = [
   { id: "profile-ga4-commerce", platform: "ga4", name: "Commerce GA4 Portfolio", email: "commerce-analytics@adpulse.local", externalId: "GA4-2017", scopeLabel: "Analytics portfolio", status: "healthy", lastSyncedAt: "Apr 15, 2026 13:29", note: "GA4 profile used for e-commerce revenue reporting." },
 ];
 
-const ACCOUNT_USER_IDS = USER_BLUEPRINTS.filter((user) => user.role === "account").map((user) => user.id);
+const DEFAULT_ACCOUNT_USER_IDS = USER_BLUEPRINTS.filter((user) => user.role === "account").map((user) => user.id);
+const DEMO_USER_PASSWORD = "demo123";
 
 const STORAGE_KEYS = {
   session: "adpulse/session",
@@ -736,17 +741,41 @@ function createEmptyGa4LiveState() {
   };
 }
 
+function createEmptyUserDirectoryState() {
+  return {
+    loading: false,
+    savingKey: "",
+    error: "",
+    notice: "",
+  };
+}
+
+function createEmptyUserDraft(role = "account") {
+  return {
+    name: "",
+    title: role === "director" ? "Director" : "Account Manager",
+    email: "",
+    role,
+    password: "",
+  };
+}
+
 function buildUsers() {
   return USER_BLUEPRINTS.map((blueprint) => ({
     ...blueprint,
     initials: getUserInitials(blueprint.name),
+    isSeeded: true,
   }));
 }
 
+function getAccountUserIds(users) {
+  return (users || []).filter((user) => user.role === "account").map((user) => user.id);
+}
+
 function getDefaultAssignedUserIds(index) {
-  const primary = ACCOUNT_USER_IDS[index % ACCOUNT_USER_IDS.length];
-  const secondary = index % 3 === 0 ? ACCOUNT_USER_IDS[(index + 1) % ACCOUNT_USER_IDS.length] : null;
-  const tertiary = index % 5 === 0 ? ACCOUNT_USER_IDS[(index + 2) % ACCOUNT_USER_IDS.length] : null;
+  const primary = DEFAULT_ACCOUNT_USER_IDS[index % DEFAULT_ACCOUNT_USER_IDS.length];
+  const secondary = index % 3 === 0 ? DEFAULT_ACCOUNT_USER_IDS[(index + 1) % DEFAULT_ACCOUNT_USER_IDS.length] : null;
+  const tertiary = index % 5 === 0 ? DEFAULT_ACCOUNT_USER_IDS[(index + 2) % DEFAULT_ACCOUNT_USER_IDS.length] : null;
 
   return Array.from(new Set([primary, secondary, tertiary].filter(Boolean)));
 }
@@ -1320,10 +1349,21 @@ function readStoredValue(key, fallback) {
 function hydrateUsers(value) {
   if (!Array.isArray(value)) return USERS_BASE;
 
-  return USERS_BASE.map((baseUser) => {
+  const mergedBase = USERS_BASE.map((baseUser) => {
     const stored = value.find((item) => item.id === baseUser.id);
     return stored ? { ...baseUser, ...stored, initials: getUserInitials(stored.name || baseUser.name) } : baseUser;
   });
+  const extras = value
+    .filter((item) => item?.id && !USERS_BASE.some((baseUser) => baseUser.id === item.id))
+    .map((item) => ({
+      accent: USER_ROLE_META[item.role]?.color || T.accent,
+      accent2: USER_ROLE_META[item.role]?.color || T.sky,
+      title: item.role === "director" ? "Director" : "Account Manager",
+      ...item,
+      initials: getUserInitials(item.name || item.email || "User"),
+    }));
+
+  return [...mergedBase, ...extras];
 }
 
 function hydrateProviderProfiles(value) {
@@ -1367,7 +1407,7 @@ function hydrateClients(value) {
       rules,
       tags: Array.isArray(stored.tags) ? stored.tags : fallback.tags,
       assignedUserIds: Array.isArray(stored.assignedUserIds)
-        ? Array.from(new Set(stored.assignedUserIds.filter((userId) => ACCOUNT_USER_IDS.includes(userId))))
+        ? Array.from(new Set(stored.assignedUserIds.map((userId) => String(userId)).filter(Boolean)))
         : fallback.assignedUserIds,
     };
   };
@@ -1909,7 +1949,7 @@ function EmptyState({ title, body }) {
   );
 }
 
-function LoginScreen({ users, form, onFormChange, onSubmit, onQuickLogin, error }) {
+function LoginScreen({ users, demoUsers, form, onFormChange, onSubmit, onQuickLogin, error }) {
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.ink, fontFamily: T.font, letterSpacing: "-0.01em", padding: "clamp(16px, 3vw, 36px)" }}>
       <div style={{ maxWidth: 1180, margin: "0 auto", display: "grid", gridTemplateColumns: fitCols(360), gap: 22, alignItems: "start" }}>
@@ -1977,7 +2017,9 @@ function LoginScreen({ users, form, onFormChange, onSubmit, onQuickLogin, error 
           <div>
             <div style={{ fontSize: 12, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Sign in</div>
             <div style={{ marginTop: 8, fontSize: 24, fontWeight: 800, fontFamily: T.heading }}>Welcome back</div>
-            <div style={{ marginTop: 6, fontSize: 13, color: T.inkSoft }}>All demo users use password <span style={{ fontFamily: T.mono, color: T.ink }}>demo123</span>.</div>
+            <div style={{ marginTop: 6, fontSize: 13, color: T.inkSoft }}>
+              Use your saved credentials. Seeded demo users still use password <span style={{ fontFamily: T.mono, color: T.ink }}>{DEMO_USER_PASSWORD}</span>.
+            </div>
           </div>
 
           <form
@@ -2033,7 +2075,7 @@ function LoginScreen({ users, form, onFormChange, onSubmit, onQuickLogin, error 
 
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Quick demo access</div>
-            {users.map((user) => (
+            {(demoUsers || []).length ? demoUsers.map((user) => (
               <button
                 key={user.id}
                 onClick={() => onQuickLogin(user.id)}
@@ -2063,7 +2105,11 @@ function LoginScreen({ users, form, onFormChange, onSubmit, onQuickLogin, error 
                 </div>
                 <div style={{ fontSize: 11, fontWeight: 800, color: T.inkSoft, whiteSpace: "nowrap" }}>Use demo</div>
               </button>
-            ))}
+            )) : (
+              <div style={{ padding: 12, borderRadius: 16, background: T.bgSoft, color: T.inkSoft, fontSize: 12 }}>
+                No seeded demo users are available in this environment.
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -2140,6 +2186,165 @@ function ProfilePanel({ user, draft, onDraftChange, onSave, onClose, onLogout, a
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <Button onClick={onSave} tone="primary">Save profile</Button>
           <Button onClick={onLogout}>Sign out</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UserAdminPanel({ users, clients, currentUserId, state, onCreateUser, onUpdateUser }) {
+  const [createDraft, setCreateDraft] = useState(() => createEmptyUserDraft());
+  const [editDrafts, setEditDrafts] = useState(() => Object.fromEntries((users || []).map((user) => [user.id, { ...createEmptyUserDraft(user.role), ...user, password: "" }])));
+  const totalDirectors = users.filter((user) => user.role === "director").length;
+  const totalAccounts = users.filter((user) => user.role === "account").length;
+
+  useEffect(() => {
+    setEditDrafts(Object.fromEntries((users || []).map((user) => [user.id, { ...createEmptyUserDraft(user.role), ...user, password: "" }])));
+  }, [users]);
+
+  const fieldStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "12px 13px",
+    borderRadius: 14,
+    border: `1px solid ${T.line}`,
+    background: T.surfaceStrong,
+    color: T.ink,
+    fontSize: 13,
+    outline: "none",
+    fontFamily: T.font,
+  };
+  const labelStyle = { marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" };
+
+  async function handleCreate() {
+    const created = await onCreateUser(createDraft);
+    if (created) {
+      setCreateDraft(createEmptyUserDraft());
+    }
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: fitCols(180), gap: 12 }}>
+        <MetricTile label="Total users" value={users.length} subValue="Persisted server-side" />
+        <MetricTile label="Directors" value={totalDirectors} subValue="Full portfolio access" />
+        <MetricTile label="Account users" value={totalAccounts} subValue="Client-assigned visibility" />
+      </div>
+
+      {state.error ? (
+        <div style={{ padding: "12px 14px", borderRadius: 16, background: T.coralSoft, color: T.coral, fontSize: 12, fontWeight: 700 }}>
+          {state.error}
+        </div>
+      ) : null}
+      {state.notice ? (
+        <div style={{ padding: "12px 14px", borderRadius: 16, background: T.accentSoft, color: T.accent, fontSize: 12, fontWeight: 700 }}>
+          {state.notice}
+        </div>
+      ) : null}
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 380px) minmax(0, 1fr)", gap: 18 }}>
+        <div style={{ padding: 18, borderRadius: 24, background: T.surface, border: `1px solid ${T.line}`, boxShadow: T.shadow, display: "grid", gap: 14, alignSelf: "start" }}>
+          <div>
+            <div style={{ fontSize: 12, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Create user</div>
+            <div style={{ marginTop: 8, fontSize: 22, fontWeight: 800, fontFamily: T.heading }}>New login account</div>
+            <div style={{ marginTop: 6, fontSize: 13, color: T.inkSoft }}>Create either a Director or an Account user. Account users can then be assigned to clients in Client Studio.</div>
+          </div>
+
+          <div>
+            <div style={labelStyle}>Role</div>
+            <select value={createDraft.role} onChange={(event) => setCreateDraft((current) => ({ ...current, role: event.target.value, title: event.target.value === "director" ? "Director" : current.title || "Account Manager" }))} style={fieldStyle}>
+              <option value="account">Account</option>
+              <option value="director">Director</option>
+            </select>
+          </div>
+          <div>
+            <div style={labelStyle}>Full name</div>
+            <input value={createDraft.name} onChange={(event) => setCreateDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Jane Doe" style={fieldStyle} />
+          </div>
+          <div>
+            <div style={labelStyle}>Title</div>
+            <input value={createDraft.title} onChange={(event) => setCreateDraft((current) => ({ ...current, title: event.target.value }))} placeholder={createDraft.role === "director" ? "Director" : "Account Manager"} style={fieldStyle} />
+          </div>
+          <div>
+            <div style={labelStyle}>Email</div>
+            <input value={createDraft.email} onChange={(event) => setCreateDraft((current) => ({ ...current, email: event.target.value }))} placeholder="jane@company.com" style={fieldStyle} />
+          </div>
+          <div>
+            <div style={labelStyle}>Password</div>
+            <input type="password" value={createDraft.password} onChange={(event) => setCreateDraft((current) => ({ ...current, password: event.target.value }))} placeholder="At least 6 characters" style={fieldStyle} />
+          </div>
+          <Button onClick={handleCreate} tone="primary" disabled={state.savingKey === "__create__"}>{state.savingKey === "__create__" ? "Creating..." : "Create account"}</Button>
+        </div>
+
+        <div style={{ display: "grid", gap: 12 }}>
+          {users.map((user) => {
+            const draft = editDrafts[user.id] || { ...createEmptyUserDraft(user.role), ...user, password: "" };
+            const assignedClients = clients.filter((client) => client.assignedUserIds?.includes(user.id));
+
+            return (
+              <div key={user.id} style={{ padding: 18, borderRadius: 24, background: T.surface, border: `1px solid ${T.line}`, boxShadow: T.shadow, display: "grid", gap: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", minWidth: 0 }}>
+                    <UserAvatar user={user} size={40} />
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>{user.name}</div>
+                        <RoleChip role={user.role} />
+                        {user.id === currentUserId ? <ToneBadge tone="positive">Current session</ToneBadge> : null}
+                        {user.isSeeded ? <ToneBadge tone="neutral">Seeded demo</ToneBadge> : null}
+                      </div>
+                      <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft }}>{user.email}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <MetricTile label="Clients" value={user.role === "director" ? "All" : assignedClients.length} subValue={user.role === "director" ? "Full access" : "Assigned"} />
+                    <MetricTile label="Role" value={USER_ROLE_META[user.role]?.label || user.role} subValue={draft.title} />
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: fitCols(220), gap: 12 }}>
+                  <div>
+                    <div style={labelStyle}>Full name</div>
+                    <input value={draft.name} onChange={(event) => setEditDrafts((current) => ({ ...current, [user.id]: { ...draft, name: event.target.value } }))} style={fieldStyle} />
+                  </div>
+                  <div>
+                    <div style={labelStyle}>Title</div>
+                    <input value={draft.title} onChange={(event) => setEditDrafts((current) => ({ ...current, [user.id]: { ...draft, title: event.target.value } }))} style={fieldStyle} />
+                  </div>
+                  <div>
+                    <div style={labelStyle}>Email</div>
+                    <input value={draft.email} onChange={(event) => setEditDrafts((current) => ({ ...current, [user.id]: { ...draft, email: event.target.value } }))} style={fieldStyle} />
+                  </div>
+                  <div>
+                    <div style={labelStyle}>Role</div>
+                    <select value={draft.role} onChange={(event) => setEditDrafts((current) => ({ ...current, [user.id]: { ...draft, role: event.target.value } }))} style={fieldStyle}>
+                      <option value="account">Account</option>
+                      <option value="director">Director</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div style={labelStyle}>New password</div>
+                    <input type="password" value={draft.password} onChange={(event) => setEditDrafts((current) => ({ ...current, [user.id]: { ...draft, password: event.target.value } }))} placeholder="Leave blank to keep current password" style={fieldStyle} />
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {user.role === "director" ? (
+                      <ToneBadge tone="positive">Directors can access all clients</ToneBadge>
+                    ) : assignedClients.length ? assignedClients.map((client) => (
+                      <ToneBadge key={`${user.id}-${client.id}`} tone="neutral">{client.name}</ToneBadge>
+                    )) : (
+                      <ToneBadge tone="warning">No clients assigned yet</ToneBadge>
+                    )}
+                  </div>
+                  <Button onClick={() => onUpdateUser(user.id, draft)} tone="primary" disabled={state.savingKey === user.id}>
+                    {state.savingKey === user.id ? "Saving..." : "Save changes"}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -5980,6 +6185,7 @@ export default function AdPulse() {
     loading: true,
     error: "",
   }));
+  const [userDirectoryState, setUserDirectoryState] = useState(() => createEmptyUserDirectoryState());
   const [googleAdsLiveState, setGoogleAdsLiveState] = useState(() => createEmptyGoogleAdsLiveState());
   const [googleAdsReportState, setGoogleAdsReportState] = useState(() => createEmptyGoogleAdsReportState());
   const [metaAdsLiveState, setMetaAdsLiveState] = useState(() => createEmptyMetaAdsLiveState());
@@ -6008,6 +6214,8 @@ export default function AdPulse() {
   const isDirector = currentUser?.role === "director";
   const providerProfiles = integrationState.connections;
   const accountUsers = users.filter((user) => user.role === "account");
+  const accountUserIds = useMemo(() => getAccountUserIds(users), [users]);
+  const demoUsers = useMemo(() => users.filter((user) => user.isSeeded), [users]);
   const accessibleClients = useMemo(() => {
     if (!currentUser) return [];
     return isDirector ? clients : clients.filter((client) => client.assignedUserIds?.includes(currentUser.id));
@@ -6125,6 +6333,30 @@ export default function AdPulse() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.removeItem(LEGACY_DEMO_CLIENT_STORAGE_KEY);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setUserDirectoryState((current) => ({ ...current, loading: true, error: "" }));
+
+    fetchUsers()
+      .then((payload) => {
+        if (cancelled) return;
+        setUsers(hydrateUsers(payload?.users));
+        setUserDirectoryState((current) => ({ ...current, loading: false, error: "" }));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setUserDirectoryState((current) => ({
+          ...current,
+          loading: false,
+          error: error.message || "Could not load saved users.",
+        }));
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -6388,6 +6620,13 @@ export default function AdPulse() {
   }, [currentUser]);
 
   useEffect(() => {
+    if (isDirector) return;
+    if (view === "connections" || view === "users") {
+      setView("overview");
+    }
+  }, [isDirector, view]);
+
+  useEffect(() => {
     if (!accessibleClients.length) return;
     if (!accessibleClients.some((client) => client.id === selectedClientId)) {
       setSelectedClientId(accessibleClients[0].id);
@@ -6572,33 +6811,49 @@ export default function AdPulse() {
     { key: "reports", label: "Reports" },
     { key: "alerts", label: "Alerts" },
     { key: "studio", label: "Client Studio" },
-    ...(isDirector ? [{ key: "connections", label: "Connections" }] : []),
+    ...(isDirector ? [{ key: "users", label: "Users" }, { key: "connections", label: "Connections" }] : []),
   ];
 
-  function handleLogin() {
-    const email = loginForm.email.trim().toLowerCase();
-    const match = users.find((user) => user.email.toLowerCase() === email && user.password === loginForm.password);
+  function mergeUserRecord(nextUser) {
+    setUsers((current) => hydrateUsers([
+      ...current.filter((user) => user.id !== nextUser.id),
+      nextUser,
+    ]));
+  }
 
-    if (!match) {
-      setLoginError("Wrong email or password. Use one of the demo users or password demo123.");
+  async function handleLogin(credentials = loginForm) {
+    const email = credentials.email.trim().toLowerCase();
+    const password = credentials.password;
+
+    if (!email || !password) {
+      setLoginError("Enter your email and password.");
       return;
     }
 
-    setCurrentUserId(match.id);
-    setLoginError("");
-    setShowProfile(false);
-    setView("overview");
+    try {
+      const payload = await loginUser({ email, password });
+      if (!payload?.user) {
+        setLoginError("Wrong email or password.");
+        return;
+      }
+
+      mergeUserRecord(payload.user);
+      setCurrentUserId(payload.user.id);
+      setLoginError("");
+      setShowProfile(false);
+      setView("overview");
+    } catch (error) {
+      setLoginError(error.message || "Wrong email or password.");
+    }
   }
 
-  function quickLogin(userId) {
+  async function quickLogin(userId) {
     const match = users.find((user) => user.id === userId);
     if (!match) return;
 
-    setLoginForm({ email: match.email, password: match.password });
-    setCurrentUserId(match.id);
-    setLoginError("");
-    setShowProfile(false);
-    setView("overview");
+    const nextCredentials = { email: match.email, password: DEMO_USER_PASSWORD };
+    setLoginForm(nextCredentials);
+    await handleLogin(nextCredentials);
   }
 
   function handleLogout() {
@@ -6609,10 +6864,52 @@ export default function AdPulse() {
     setView("overview");
   }
 
-  function saveProfile() {
+  async function saveProfile() {
     if (!currentUser) return;
-    setUsers((current) => current.map((user) => (user.id === currentUser.id ? { ...user, ...profileDraft, initials: getUserInitials(profileDraft.name || user.name) } : user)));
-    setShowProfile(false);
+
+    setUserDirectoryState((current) => ({ ...current, savingKey: currentUser.id, error: "", notice: "" }));
+
+    try {
+      const payload = await updateUser(currentUser.id, profileDraft);
+      if (payload?.user) {
+        mergeUserRecord(payload.user);
+      }
+      setShowProfile(false);
+      setUserDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: "Profile updated." }));
+    } catch (error) {
+      setUserDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not update the profile.", notice: "" }));
+    }
+  }
+
+  async function createDashboardUser(draft) {
+    setUserDirectoryState((current) => ({ ...current, savingKey: "__create__", error: "", notice: "" }));
+
+    try {
+      const payload = await createUser(draft);
+      if (payload?.user) {
+        mergeUserRecord(payload.user);
+        setUserDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: `${payload.user.name} created.` }));
+        return payload.user;
+      }
+    } catch (error) {
+      setUserDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not create the user.", notice: "" }));
+    }
+
+    return null;
+  }
+
+  async function saveDashboardUser(userId, draft) {
+    setUserDirectoryState((current) => ({ ...current, savingKey: userId, error: "", notice: "" }));
+
+    try {
+      const payload = await updateUser(userId, draft);
+      if (payload?.user) {
+        mergeUserRecord(payload.user);
+        setUserDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: `${payload.user.name} updated.` }));
+      }
+    } catch (error) {
+      setUserDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not update the user.", notice: "" }));
+    }
   }
 
   function jumpToAccounts(clientId) {
@@ -6661,7 +6958,7 @@ export default function AdPulse() {
 
     const normalizedDraft = {
       ...studioDraft,
-      assignedUserIds: Array.from(new Set((studioDraft.assignedUserIds || []).filter((userId) => ACCOUNT_USER_IDS.includes(userId)))),
+      assignedUserIds: Array.from(new Set((studioDraft.assignedUserIds || []).filter((userId) => accountUserIds.includes(userId)))),
       linkedAssets: {
         ...getEmptyLinkedAssets(),
         ...(studioDraft.linkedAssets || {}),
@@ -6779,6 +7076,7 @@ export default function AdPulse() {
     return (
       <LoginScreen
         users={users}
+        demoUsers={demoUsers}
         form={loginForm}
         onFormChange={(field, value) => setLoginForm((current) => ({ ...current, [field]: value }))}
         onSubmit={handleLogin}
@@ -7147,6 +7445,17 @@ export default function AdPulse() {
 
           {view === "studio" ? (
             <ClientStudio clients={enriched} accounts={allDashboardAccounts} users={users} providerProfiles={providerProfiles} selectedClientId={selectedClientId} setSelectedClientId={setSelectedClientId} draft={studioDraft} setDraft={setStudioDraft} onSave={saveStudioDraft} onCreateClient={createClient} layoutColumns={studioColumns} canManageAssignments={isDirector} canEditCoreSettings={isDirector} onOpenConnections={() => setView("connections")} />
+          ) : null}
+
+          {view === "users" ? (
+            <UserAdminPanel
+              users={users}
+              clients={clients}
+              currentUserId={currentUserId}
+              state={userDirectoryState}
+              onCreateUser={createDashboardUser}
+              onUpdateUser={saveDashboardUser}
+            />
           ) : null}
 
           {view === "connections" ? (

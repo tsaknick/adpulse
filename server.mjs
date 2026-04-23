@@ -23,6 +23,7 @@ const META_API_VERSION = process.env.META_API_VERSION || "v23.0";
 const META_ADS_LIVE_CAMPAIGN_LIMIT = Number(process.env.ADPULSE_META_LIVE_CAMPAIGN_LIMIT || 500);
 const META_ADS_LIVE_AD_LIMIT = Number(process.env.ADPULSE_META_LIVE_AD_LIMIT || 500);
 const SEARCH_TERM_ALLOWED_TAGS = new Set(["good", "bad", "neutral"]);
+const USER_ALLOWED_ROLES = new Set(["director", "account"]);
 const SEARCH_TERM_ALLOWED_SCOPE_LEVELS = new Set(["ad_group", "campaign"]);
 const SEARCH_TERM_ALLOWED_DATE_RANGES = new Set([
   "LAST_7_DAYS",
@@ -67,6 +68,13 @@ const PROVIDERS = {
 };
 
 const pendingStates = new Map();
+const DEFAULT_USERS = [
+  { id: "usr-01", name: "Maria Papadaki", role: "director", title: "Performance Director", email: "director@adpulse.local", password: "demo123", accent: "#162218", accent2: "#2d6cdf" },
+  { id: "usr-02", name: "Anna Kosta", role: "account", title: "Senior Account Manager", email: "anna@adpulse.local", password: "demo123", accent: "#0f8f66", accent2: "#78d1ad" },
+  { id: "usr-03", name: "Nikos Lazos", role: "account", title: "Account Manager", email: "nikos@adpulse.local", password: "demo123", accent: "#2d6cdf", accent2: "#8db1ff" },
+  { id: "usr-04", name: "Eleni Moraitou", role: "account", title: "Paid Media Manager", email: "eleni@adpulse.local", password: "demo123", accent: "#cf553e", accent2: "#f2b07c" },
+  { id: "usr-05", name: "Kostas Marinis", role: "account", title: "Growth Account Manager", email: "kostas@adpulse.local", password: "demo123", accent: "#9966e8", accent2: "#c7a8ff" },
+];
 
 ensureStore();
 
@@ -91,6 +99,51 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/api/integrations") {
       sendJson(response, 200, buildSnapshot());
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/users") {
+      sendJson(response, 200, { users: listStoredUsers() });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/users/login") {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const result = authenticateStoredUser(parsed);
+      sendJson(response, result.ok ? 200 : 401, result);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/users") {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const result = createStoredUser(parsed);
+      sendJson(response, result.ok ? 200 : 400, result);
+      return;
+    }
+
+    const updateUserMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
+    if (request.method === "PATCH" && updateUserMatch) {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const result = updateStoredUser(updateUserMatch[1], parsed);
+      sendJson(response, result.ok ? 200 : 400, result);
       return;
     }
 
@@ -268,7 +321,7 @@ function ensureStore() {
   fs.mkdirSync(STORE_DIR, { recursive: true });
 
   if (!fs.existsSync(STORE_FILE)) {
-    fs.writeFileSync(STORE_FILE, JSON.stringify({ connections: [], searchTermTags: [] }, null, 2));
+    fs.writeFileSync(STORE_FILE, JSON.stringify({ connections: [], searchTermTags: [], users: getDefaultStoredUsers() }, null, 2));
   }
 }
 
@@ -277,21 +330,218 @@ function readStore() {
 
   try {
     const parsed = JSON.parse(fs.readFileSync(STORE_FILE, "utf8"));
+    const users = Array.isArray(parsed.users) && parsed.users.length
+      ? parsed.users.map(normalizeStoredUser).filter(Boolean)
+      : getDefaultStoredUsers();
+
     return {
       connections: Array.isArray(parsed.connections) ? parsed.connections : [],
       searchTermTags: Array.isArray(parsed.searchTermTags) ? parsed.searchTermTags : [],
+      users,
     };
   } catch (error) {
-    return { connections: [], searchTermTags: [] };
+    return { connections: [], searchTermTags: [], users: getDefaultStoredUsers() };
   }
 }
 
 function writeStore(store) {
   ensureStore();
+  let existingUsers = [];
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(STORE_FILE, "utf8"));
+    existingUsers = Array.isArray(parsed.users) ? parsed.users.map(normalizeStoredUser).filter(Boolean) : [];
+  } catch (error) {
+    existingUsers = [];
+  }
+
   fs.writeFileSync(STORE_FILE, JSON.stringify({
     connections: Array.isArray(store.connections) ? store.connections : [],
     searchTermTags: Array.isArray(store.searchTermTags) ? store.searchTermTags : [],
+    users: Array.isArray(store.users) && store.users.length
+      ? store.users.map(normalizeStoredUser).filter(Boolean)
+      : (existingUsers.length ? existingUsers : getDefaultStoredUsers()),
   }, null, 2));
+}
+
+function getDefaultStoredUsers() {
+  return DEFAULT_USERS.map((user, index) => normalizeStoredUser({
+    ...user,
+    passwordHash: hashPassword(user.password),
+    createdAt: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
+    isSeeded: true,
+  })).filter(Boolean);
+}
+
+function normalizeStoredUser(value) {
+  if (!value || typeof value !== "object") return null;
+
+  const role = USER_ALLOWED_ROLES.has(value.role) ? value.role : "account";
+  const email = String(value.email || "").trim().toLowerCase();
+  if (!email) return null;
+
+  return {
+    id: String(value.id || `usr-${crypto.randomUUID()}`),
+    name: String(value.name || "New user").trim() || "New user",
+    role,
+    title: String(value.title || (role === "director" ? "Director" : "Account Manager")).trim(),
+    email,
+    passwordHash: normalizePasswordHash(value.passwordHash || value.password),
+    accent: String(value.accent || getUserPalette(role).accent),
+    accent2: String(value.accent2 || getUserPalette(role).accent2),
+    createdAt: value.createdAt || new Date().toISOString(),
+    isSeeded: value.isSeeded === true,
+  };
+}
+
+function normalizePasswordHash(value) {
+  const raw = String(value || "").trim();
+  if (raw.startsWith("scrypt$")) return raw;
+  return hashPassword(raw || "demo123");
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(String(password || ""), salt, 64).toString("hex");
+  return `scrypt$${salt}$${hash}`;
+}
+
+function verifyPassword(password, passwordHash) {
+  const raw = String(passwordHash || "");
+  const [scheme, salt, expected] = raw.split("$");
+  if (scheme !== "scrypt" || !salt || !expected) return false;
+
+  const actual = crypto.scryptSync(String(password || ""), salt, 64).toString("hex");
+  try {
+    return crypto.timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"));
+  } catch (error) {
+    return false;
+  }
+}
+
+function getUserPalette(role) {
+  return role === "director"
+    ? { accent: "#162218", accent2: "#2d6cdf" }
+    : { accent: "#0f8f66", accent2: "#78d1ad" };
+}
+
+function redactUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    role: user.role,
+    title: user.title,
+    email: user.email,
+    accent: user.accent,
+    accent2: user.accent2,
+    createdAt: user.createdAt,
+    isSeeded: user.isSeeded === true,
+  };
+}
+
+function listStoredUsers() {
+  const store = readStore();
+  return store.users
+    .slice()
+    .sort((left, right) => {
+      if (left.role !== right.role) return left.role === "director" ? -1 : 1;
+      return left.name.localeCompare(right.name);
+    })
+    .map(redactUser);
+}
+
+function authenticateStoredUser(input) {
+  const email = String(input?.email || "").trim().toLowerCase();
+  const password = String(input?.password || "");
+  const store = readStore();
+  const user = store.users.find((item) => item.email === email);
+
+  if (!user || !verifyPassword(password, user.passwordHash)) {
+    return { ok: false, error: "Wrong email or password." };
+  }
+
+  return { ok: true, user: redactUser(user) };
+}
+
+function createStoredUser(input) {
+  const store = readStore();
+  const parsed = parseUserInput(input, { mode: "create" });
+  if (!parsed.ok) return parsed;
+
+  if (store.users.some((user) => user.email === parsed.value.email)) {
+    return { ok: false, error: "A user with that email already exists." };
+  }
+
+  const created = normalizeStoredUser({
+    id: `usr-${crypto.randomUUID()}`,
+    ...parsed.value,
+    createdAt: new Date().toISOString(),
+    isSeeded: false,
+  });
+  const users = [...store.users, created];
+  writeStore({ ...store, users });
+  return { ok: true, user: redactUser(created) };
+}
+
+function updateStoredUser(userId, input) {
+  const store = readStore();
+  const index = store.users.findIndex((user) => user.id === userId);
+  if (index < 0) {
+    return { ok: false, error: "User not found." };
+  }
+
+  const current = store.users[index];
+  const parsed = parseUserInput(input, { mode: "update", current });
+  if (!parsed.ok) return parsed;
+
+  if (store.users.some((user) => user.id !== userId && user.email === parsed.value.email)) {
+    return { ok: false, error: "A user with that email already exists." };
+  }
+
+  const nextRole = parsed.value.role;
+  const directorCount = store.users.filter((user) => user.role === "director").length;
+  if (current.role === "director" && nextRole !== "director" && directorCount <= 1) {
+    return { ok: false, error: "At least one Director account must remain." };
+  }
+
+  const updated = normalizeStoredUser({
+    ...current,
+    ...parsed.value,
+    passwordHash: parsed.value.password ? hashPassword(parsed.value.password) : current.passwordHash,
+  });
+  const users = store.users.slice();
+  users[index] = updated;
+  writeStore({ ...store, users });
+  return { ok: true, user: redactUser(updated) };
+}
+
+function parseUserInput(input, options = {}) {
+  const current = options.current || {};
+  const mode = options.mode || "create";
+  const role = USER_ALLOWED_ROLES.has(input?.role) ? input.role : current.role || "account";
+  const name = String(input?.name ?? current.name ?? "").trim();
+  const title = String(input?.title ?? current.title ?? "").trim();
+  const email = String(input?.email ?? current.email ?? "").trim().toLowerCase();
+  const password = String(input?.password || "");
+
+  if (!name) return { ok: false, error: "Name is required." };
+  if (!title) return { ok: false, error: "Title is required." };
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: "Enter a valid email address." };
+  if (mode === "create" && password.length < 6) return { ok: false, error: "Password must be at least 6 characters." };
+  if (mode === "update" && password && password.length < 6) return { ok: false, error: "New password must be at least 6 characters." };
+
+  return {
+    ok: true,
+    value: {
+      name,
+      role,
+      title,
+      email,
+      password,
+      accent: current.accent || getUserPalette(role).accent,
+      accent2: current.accent2 || getUserPalette(role).accent2,
+    },
+  };
 }
 
 function getOrigin(request) {
@@ -370,7 +620,7 @@ function serveStaticAsset(request, response, url) {
 
 function setCorsHeaders(response) {
   response.setHeader("Access-Control-Allow-Origin", "*");
-  response.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  response.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 

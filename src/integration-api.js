@@ -49,6 +49,34 @@ export function fetchIntegrationSnapshot() {
   return request("/integrations");
 }
 
+export function fetchUsers() {
+  return request("/users");
+}
+
+export function loginUser(payload) {
+  return request("/users/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createUser(payload) {
+  return request("/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateUser(userId, payload) {
+  return request(`/users/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export function syncIntegrationProfile(profileId) {
   return request(`/integrations/${profileId}/sync`, {
     method: "POST",
