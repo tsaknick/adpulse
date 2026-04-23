@@ -147,6 +147,19 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/ga4/live-overview") {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const payload = await fetchGa4LiveOverview(parsed);
+      sendJson(response, 200, payload);
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/setup") {
       sendJson(response, 200, getSetupStatus());
       return;
@@ -1563,7 +1576,7 @@ async function fetchGoogleAdsLiveOverview(payload) {
     const fallbackAsset = context?.connection?.assets?.find((asset) => sanitizeGoogleAdsId(asset.externalId) === request.customerId) || null;
     const asset = report?.asset || fallbackAsset;
     const accountId = `live-google-account:${request.key}`;
-    const monthlyBudget = toNumber(report?.account?.monthlyBudget) > 0 ? toNumber(report.account.monthlyBudget) : request.budgetHint;
+    const monthlyBudget = request.budgetHint;
 
     response.accounts.push({
       id: accountId,
@@ -1745,7 +1758,7 @@ async function fetchMetaAdsLiveOverview(payload) {
     const fallbackAsset = context?.connection?.assets?.find((asset) => sanitizeMetaAdAccountId(asset.externalId) === request.adAccountId) || null;
     const asset = report?.asset || fallbackAsset;
     const accountId = `live-meta-account:${request.key}`;
-    const monthlyBudget = toNumber(report?.account?.monthlyBudget) > 0 ? toNumber(report.account.monthlyBudget) : request.budgetHint;
+    const monthlyBudget = request.budgetHint;
 
     response.accounts.push({
       id: accountId,
@@ -1837,6 +1850,128 @@ async function fetchMetaAdsLiveOverview(payload) {
   return response;
 }
 
+async function fetchGa4LiveOverview(payload) {
+  const dateRange = normalizeLiveDateRange(payload);
+  const requests = Array.isArray(payload?.requests)
+    ? payload.requests.map(normalizeGa4LiveRequest).filter(Boolean)
+    : [];
+
+  if (!requests.length) {
+    return {
+      generatedAt: new Date().toISOString(),
+      dateRange: dateRange.id,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      properties: [],
+      errors: [],
+    };
+  }
+
+  const connectionIds = Array.from(new Set(requests.map((item) => item.connectionId)));
+  const contextEntries = await Promise.all(connectionIds.map(async (connectionId) => ([
+    connectionId,
+    await getGa4ConnectionContext(connectionId),
+  ])));
+  const contextMap = new Map(contextEntries);
+
+  const uniqueTargets = [];
+  const targetKeys = new Set();
+  requests.forEach((request) => {
+    const targetKey = `${request.connectionId}:${request.propertyId}`;
+    if (targetKeys.has(targetKey)) return;
+    targetKeys.add(targetKey);
+    uniqueTargets.push({
+      connectionId: request.connectionId,
+      propertyId: request.propertyId,
+    });
+  });
+
+  const settledTargets = await Promise.allSettled(uniqueTargets.map(async (target) => {
+    const context = contextMap.get(target.connectionId);
+    return {
+      targetKey: `${target.connectionId}:${target.propertyId}`,
+      report: await fetchGa4LivePropertyReport({
+        context,
+        propertyId: target.propertyId,
+        dateRange,
+      }),
+    };
+  }));
+
+  const reportMap = new Map();
+  settledTargets.forEach((result, index) => {
+    const target = uniqueTargets[index];
+    const targetKey = `${target.connectionId}:${target.propertyId}`;
+
+    if (result.status === "fulfilled") {
+      reportMap.set(targetKey, result.value.report);
+      return;
+    }
+
+    reportMap.set(targetKey, {
+      propertyId: target.propertyId,
+      asset: null,
+      dataStatus: "error",
+      dataError: result.reason?.message || "Could not fetch GA4 live data.",
+      series: [],
+    });
+  });
+
+  const response = {
+    generatedAt: new Date().toISOString(),
+    dateRange: dateRange.id,
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+    properties: [],
+    errors: [],
+  };
+
+  requests.forEach((request) => {
+    const targetKey = `${request.connectionId}:${request.propertyId}`;
+    const report = reportMap.get(targetKey) || null;
+    const context = contextMap.get(request.connectionId);
+    const fallbackAsset = context?.connection?.assets?.find((asset) => sanitizeGoogleAdsId(asset.externalId) === request.propertyId) || null;
+    const asset = report?.asset || fallbackAsset;
+
+    response.properties.push({
+      id: `live-ga4-property:${request.key}`,
+      clientId: request.clientId,
+      platform: "ga4",
+      propertyId: request.propertyId,
+      propertyName: report?.propertyName || asset?.name || `GA4 property ${request.propertyId}`,
+      accountName: report?.accountName || asset?.subtitle || "",
+      sessions: toNumber(report?.sessions),
+      users: toNumber(report?.users),
+      engagedRate: toNumber(report?.engagedRate),
+      conversionRate: toNumber(report?.conversionRate),
+      purchasesOrLeads: toNumber(report?.purchasesOrLeads),
+      conversions: toNumber(report?.conversions),
+      revenueCurrentPeriod: toNumber(report?.revenueCurrentPeriod),
+      revenueLastYearPeriod: toNumber(report?.revenueLastYearPeriod),
+      aov: toNumber(report?.aov),
+      channels: report?.channels || {},
+      series: Array.isArray(report?.series) ? report.series : [],
+      insight: report?.insight || "Live GA4 property linked.",
+      requestKey: request.key,
+      connectionId: request.connectionId,
+      assetId: request.assetId,
+      dataStatus: report?.dataStatus || "ready",
+      dataError: report?.dataError || "",
+    });
+
+    if (report?.dataError) {
+      response.errors.push({
+        requestKey: request.key,
+        connectionId: request.connectionId,
+        propertyId: request.propertyId,
+        error: report.dataError,
+      });
+    }
+  });
+
+  return response;
+}
+
 function normalizeGoogleAdsLiveRequest(value) {
   const connectionId = String(value?.connectionId || "").trim();
   const customerId = sanitizeGoogleAdsId(value?.customerId);
@@ -1871,6 +2006,209 @@ function normalizeMetaAdsLiveRequest(value) {
     adAccountId,
     budgetHint: Math.max(0, toNumber(value?.budgetHint)),
   };
+}
+
+function normalizeGa4LiveRequest(value) {
+  const connectionId = String(value?.connectionId || "").trim();
+  const propertyId = sanitizeGoogleAdsId(value?.propertyId || value?.externalId);
+
+  if (!connectionId || !propertyId) {
+    return null;
+  }
+
+  return {
+    key: String(value?.key || `${connectionId}:${propertyId}`).trim(),
+    clientId: String(value?.clientId || "").trim(),
+    connectionId,
+    assetId: String(value?.assetId || "").trim(),
+    propertyId,
+  };
+}
+
+async function fetchGa4LivePropertyReport({ context, propertyId, dateRange }) {
+  if (!context?.connection) {
+    throw new Error("GA4 connection context is missing.");
+  }
+
+  const { connection, tokenBundle } = context;
+  assertGa4PropertyAccess(connection, propertyId);
+
+  const asset = connection.assets?.find((item) => sanitizeGoogleAdsId(item.externalId) === propertyId) || null;
+  const channelResult = await fetchGa4RunReportWithMetricFallback({
+    tokenBundle,
+    propertyId,
+    dateRange,
+    dimensions: ["sessionDefaultChannelGroup"],
+    orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+    limit: 50,
+    label: `GA4 channel report ${propertyId}`,
+  });
+
+  let dailyReport = null;
+  let dailyError = "";
+
+  try {
+    dailyReport = await fetchGa4RunReport({
+      tokenBundle,
+      propertyId,
+      dateRange,
+      dimensions: ["date"],
+      metricNames: channelResult.metricNames,
+      orderBys: [{ dimension: { dimensionName: "date" } }],
+      limit: 400,
+      label: `GA4 daily report ${propertyId}`,
+    });
+  } catch (error) {
+    dailyError = error.message || "Could not fetch GA4 daily trend.";
+  }
+
+  const summary = normalizeGa4PropertySummary({
+    report: channelResult.report,
+    metricNames: channelResult.metricNames,
+    asset,
+    propertyId,
+  });
+
+  return {
+    ...summary,
+    asset,
+    dataStatus: dailyError ? "partial" : "ready",
+    dataError: dailyError,
+    series: dailyReport ? normalizeGa4DailySeries(dailyReport, channelResult.metricNames) : [],
+  };
+}
+
+async function fetchGa4RunReportWithMetricFallback({ tokenBundle, propertyId, dateRange, dimensions, orderBys, limit, label }) {
+  const metricAttempts = [
+    ["sessions", "totalUsers", "engagementRate", "totalRevenue", "transactions", "keyEvents"],
+    ["sessions", "totalUsers", "engagementRate", "totalRevenue", "transactions", "conversions"],
+    ["sessions", "totalUsers", "engagementRate", "totalRevenue", "keyEvents"],
+    ["sessions", "totalUsers", "engagementRate", "totalRevenue", "conversions"],
+    ["sessions", "totalUsers", "engagementRate", "totalRevenue", "transactions"],
+    ["sessions", "totalUsers", "engagementRate", "totalRevenue"],
+  ];
+  let lastError = null;
+
+  for (const metricNames of metricAttempts) {
+    try {
+      return {
+        metricNames,
+        report: await fetchGa4RunReport({
+          tokenBundle,
+          propertyId,
+          dateRange,
+          dimensions,
+          metricNames,
+          orderBys,
+          limit,
+          label,
+        }),
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error(`Could not fetch GA4 report for property ${propertyId}.`);
+}
+
+async function fetchGa4RunReport({ tokenBundle, propertyId, dateRange, dimensions = [], metricNames = [], orderBys = [], limit = 50, label = "GA4 report" }) {
+  return fetchJson(`https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${tokenBundle.accessToken}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      dateRanges: [buildGa4ReportDateRange(dateRange)],
+      dimensions: dimensions.map((name) => ({ name })),
+      metrics: metricNames.map((name) => ({ name })),
+      metricAggregations: ["TOTAL"],
+      keepEmptyRows: false,
+      limit: String(limit),
+      orderBys,
+    }),
+  }, label);
+}
+
+function normalizeGa4PropertySummary({ report, metricNames, asset, propertyId }) {
+  const rows = Array.isArray(report?.rows) ? report.rows : [];
+  const totalRow = Array.isArray(report?.totals) && report.totals[0] ? report.totals[0] : null;
+  const sessions = Math.round(getGa4MetricValue(report, totalRow, rows, "sessions"));
+  const users = Math.round(getGa4MetricValue(report, totalRow, rows, "totalUsers"));
+  const engagementRateRaw = getGa4MetricValue(report, totalRow, rows, "engagementRate", { average: true });
+  const revenue = getGa4MetricValue(report, totalRow, rows, "totalRevenue");
+  const transactions = getGa4MetricValue(report, totalRow, rows, "transactions");
+  const keyEvents = getGa4MetricValue(report, totalRow, rows, "keyEvents") || getGa4MetricValue(report, totalRow, rows, "conversions");
+  const conversions = keyEvents || transactions;
+  const channelSessions = rows.reduce((acc, row) => {
+    const channel = String(row.dimensionValues?.[0]?.value || "Unassigned").trim() || "Unassigned";
+    acc.set(channel, (acc.get(channel) || 0) + getGa4MetricValue(report, row, [], "sessions"));
+    return acc;
+  }, new Map());
+  const channels = Object.fromEntries(Array.from(channelSessions.entries())
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 6)
+    .map(([channel, value]) => [channel, sessions ? Math.round(value / sessions * 100) : 0]));
+
+  return {
+    propertyId,
+    propertyName: asset?.name || `GA4 property ${propertyId}`,
+    accountName: asset?.subtitle || "",
+    sessions,
+    users,
+    engagedRate: engagementRateRaw <= 1 ? +(engagementRateRaw * 100).toFixed(1) : +engagementRateRaw.toFixed(1),
+    conversionRate: sessions ? +(conversions / sessions * 100).toFixed(2) : 0,
+    purchasesOrLeads: +conversions.toFixed(2),
+    conversions: +conversions.toFixed(2),
+    revenueCurrentPeriod: +revenue.toFixed(2),
+    revenueLastYearPeriod: 0,
+    aov: transactions ? +(revenue / transactions).toFixed(2) : 0,
+    channels: Object.keys(channels).length ? channels : { Unassigned: 0 },
+    insight: `Live GA4 data from ${asset?.name || `property ${propertyId}`}.`,
+    metricNames,
+  };
+}
+
+function normalizeGa4DailySeries(report) {
+  const rows = Array.isArray(report?.rows) ? report.rows : [];
+
+  return rows.map((row) => {
+    const rawDate = String(row.dimensionValues?.[0]?.value || "");
+    const date = rawDate.replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
+    const sessions = Math.round(getGa4MetricValue(report, row, [], "sessions"));
+    const users = Math.round(getGa4MetricValue(report, row, [], "totalUsers"));
+    const revenue = getGa4MetricValue(report, row, [], "totalRevenue");
+    const transactions = getGa4MetricValue(report, row, [], "transactions");
+    const keyEvents = getGa4MetricValue(report, row, [], "keyEvents") || getGa4MetricValue(report, row, [], "conversions");
+    const conversions = keyEvents || transactions;
+
+    return {
+      date,
+      sessions,
+      users,
+      conversions: +conversions.toFixed(2),
+      revenue: +revenue.toFixed(2),
+    };
+  });
+}
+
+function getGa4MetricValue(report, row, fallbackRows, metricName, options = {}) {
+  const index = (report?.metricHeaders || []).findIndex((header) => header.name === metricName);
+  if (index < 0) return 0;
+
+  if (row) {
+    return toNumber(row.metricValues?.[index]?.value);
+  }
+
+  const values = (Array.isArray(fallbackRows) ? fallbackRows : []).map((item) => toNumber(item.metricValues?.[index]?.value));
+  if (options.average) {
+    const nonEmpty = values.filter((value) => value > 0);
+    return nonEmpty.reduce((acc, value) => acc + value, 0) / Math.max(nonEmpty.length, 1);
+  }
+
+  return values.reduce((acc, value) => acc + value, 0);
 }
 
 async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange }) {
@@ -2289,7 +2627,7 @@ function normalizeGoogleAdsLiveCampaignMetricRow(row) {
     impressions: toNumber(row.metrics?.impressions),
     clicks: toNumber(row.metrics?.clicks),
     conversions: toNumber(row.metrics?.conversions),
-    conversionValue: toNumber(row.metrics?.conversionsValue),
+    conversionValue: normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue),
   };
 }
 
@@ -2351,7 +2689,7 @@ function normalizeGoogleAdsLiveAdRow(row) {
   const impressions = toNumber(row.metrics?.impressions);
   const clicks = toNumber(row.metrics?.clicks);
   const conversions = toNumber(row.metrics?.conversions);
-  const conversionValue = toNumber(row.metrics?.conversionsValue);
+  const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
   const format = describeGoogleAdsAdType(row.adGroupAd?.ad?.type);
   const adGroupName = row.adGroup?.name || "";
   const campaignName = row.campaign?.name || `Campaign ${rawCampaignId}`;
@@ -2372,6 +2710,11 @@ function normalizeGoogleAdsLiveAdRow(row) {
   };
 }
 
+function normalizeGoogleAdsConversionValue(value) {
+  // Google Ads exposes metrics.conversions_value as a currency DOUBLE, unlike cost_micros.
+  return toNumber(value);
+}
+
 function normalizeLiveDateRange(payload = {}) {
   const requested = sanitizeGoogleAdsLiveDateRange(payload?.dateRange);
 
@@ -2390,12 +2733,15 @@ function normalizeLiveDateRange(payload = {}) {
     }
   }
 
+  const fallbackId = requested === "CUSTOM" ? "THIS_MONTH" : requested;
+  const window = getPresetDateWindow(fallbackId);
+
   return {
-    id: requested === "CUSTOM" ? "THIS_MONTH" : requested,
-    startDate: "",
-    endDate: "",
-    googleCondition: `  AND segments.date DURING ${requested === "CUSTOM" ? "THIS_MONTH" : requested}`,
-    dayCount: getGoogleAdsBudgetDayCount(requested === "CUSTOM" ? "THIS_MONTH" : requested),
+    id: fallbackId,
+    startDate: window.startDate,
+    endDate: window.endDate,
+    googleCondition: `  AND segments.date DURING ${fallbackId}`,
+    dayCount: getGoogleAdsBudgetDayCount(fallbackId),
   };
 }
 
@@ -2417,6 +2763,56 @@ function countInclusiveDays(startDate, endDate) {
   const end = new Date(`${endDate}T00:00:00Z`).getTime();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 1;
   return Math.max(1, Math.round((end - start) / 86_400_000) + 1);
+}
+
+function buildGa4ReportDateRange(dateRange) {
+  const startDate = sanitizeIsoDate(dateRange?.startDate);
+  const endDate = sanitizeIsoDate(dateRange?.endDate);
+  const fallback = getPresetDateWindow(dateRange?.id || "THIS_MONTH");
+
+  return {
+    startDate: startDate || fallback.startDate,
+    endDate: endDate || fallback.endDate,
+  };
+}
+
+function getPresetDateWindow(dateRange) {
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  let start = new Date(today);
+  let end = new Date(today);
+
+  switch (dateRange) {
+    case "LAST_7_DAYS":
+      start = addUtcDays(today, -6);
+      break;
+    case "LAST_30_DAYS":
+      start = addUtcDays(today, -29);
+      break;
+    case "LAST_MONTH":
+      start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1));
+      end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 0));
+      break;
+    case "THIS_MONTH":
+    default:
+      start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+      break;
+  }
+
+  return {
+    startDate: formatUtcDate(start),
+    endDate: formatUtcDate(end),
+  };
+}
+
+function addUtcDays(date, days) {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function formatUtcDate(date) {
+  return date.toISOString().slice(0, 10);
 }
 
 function getGoogleAdsBudgetDayCount(dateRange) {
@@ -2498,10 +2894,45 @@ async function getMetaAdsConnectionContext(connectionId) {
   };
 }
 
+async function getGa4ConnectionContext(connectionId) {
+  const store = readStore();
+  const connection = store.connections.find((item) => item.id === connectionId);
+
+  if (!connection) {
+    throw new Error("Connection not found.");
+  }
+
+  if (connection.platform !== "ga4") {
+    throw new Error("This endpoint is only available for GA4 connections.");
+  }
+
+  const refreshedTokens = await ensureProviderToken("ga4", connection, connection.tokens);
+  const tokenChanged = JSON.stringify(refreshedTokens || null) !== JSON.stringify(connection.tokens || null);
+  const hydratedConnection = tokenChanged
+    ? { ...connection, tokens: refreshedTokens, updatedAt: new Date().toISOString() }
+    : connection;
+
+  if (tokenChanged) {
+    upsertConnection(hydratedConnection);
+  }
+
+  return {
+    connection: hydratedConnection,
+    tokenBundle: refreshedTokens,
+  };
+}
+
 function assertMetaAdAccountAccess(connection, adAccountId) {
   const allowedAdAccountIds = new Set((connection.assets || []).map((asset) => sanitizeMetaAdAccountId(asset.externalId)).filter(Boolean));
   if (allowedAdAccountIds.size && !allowedAdAccountIds.has(adAccountId)) {
     throw new Error("This Meta ad account is not available under the selected connection.");
+  }
+}
+
+function assertGa4PropertyAccess(connection, propertyId) {
+  const allowedPropertyIds = new Set((connection.assets || []).map((asset) => sanitizeGoogleAdsId(asset.externalId)).filter(Boolean));
+  if (allowedPropertyIds.size && !allowedPropertyIds.has(propertyId)) {
+    throw new Error("This GA4 property is not available under the selected connection.");
   }
 }
 
@@ -2662,19 +3093,15 @@ function normalizeMetaAdInsightRow(row, adStatusMap) {
 }
 
 function extractMetaConversionCount(actions) {
-  return (Array.isArray(actions) ? actions : []).reduce((acc, action) => {
-    const type = String(action?.action_type || "").toLowerCase();
-    if (!isMetaConversionAction(type)) return acc;
-    return acc + toNumber(action.value);
-  }, 0);
+  const rows = Array.isArray(actions) ? actions : [];
+  const purchaseCount = pickMetaActionMetric(rows, META_PURCHASE_ACTION_PRIORITY);
+  if (purchaseCount > 0) return purchaseCount;
+
+  return pickMetaActionMetric(rows, META_LEAD_ACTION_PRIORITY);
 }
 
 function extractMetaConversionValue(actionValues, purchaseRoas, spend) {
-  const explicitValue = (Array.isArray(actionValues) ? actionValues : []).reduce((acc, action) => {
-    const type = String(action?.action_type || "").toLowerCase();
-    if (!type.includes("purchase")) return acc;
-    return acc + toNumber(action.value);
-  }, 0);
+  const explicitValue = pickMetaActionMetric(Array.isArray(actionValues) ? actionValues : [], META_PURCHASE_ACTION_PRIORITY);
 
   if (explicitValue > 0) return explicitValue;
 
@@ -2682,13 +3109,45 @@ function extractMetaConversionValue(actionValues, purchaseRoas, spend) {
   return roasValue > 0 ? roasValue * toNumber(spend) : 0;
 }
 
-function isMetaConversionAction(type) {
-  return type.includes("purchase")
-    || type.includes("lead")
-    || type.includes("complete_registration")
-    || type.includes("submit_application")
-    || type.includes("schedule")
-    || type.includes("contact");
+const META_PURCHASE_ACTION_PRIORITY = [
+  "omni_purchase",
+  "purchase",
+  "offsite_conversion.fb_pixel_purchase",
+  "onsite_web_purchase",
+  "web_in_store_purchase",
+  "catalog_segment_purchase",
+];
+
+const META_LEAD_ACTION_PRIORITY = [
+  "lead",
+  "onsite_conversion.lead_grouped",
+  "offsite_conversion.fb_pixel_lead",
+  "complete_registration",
+  "submit_application",
+  "schedule",
+  "contact",
+];
+
+function pickMetaActionMetric(actions, priority) {
+  const byType = (Array.isArray(actions) ? actions : []).reduce((acc, action) => {
+    const type = String(action?.action_type || "").toLowerCase();
+    if (!type) return acc;
+    acc.set(type, (acc.get(type) || 0) + toNumber(action.value));
+    return acc;
+  }, new Map());
+
+  for (const type of priority) {
+    const value = byType.get(type);
+    if (value > 0) return value;
+  }
+
+  for (const [type, value] of byType.entries()) {
+    if (priority.some((candidate) => type.includes(candidate)) && value > 0) {
+      return value;
+    }
+  }
+
+  return 0;
 }
 
 function mapMetaDatePreset(dateRange) {

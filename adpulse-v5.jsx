@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   disconnectIntegrationProfile,
+  fetchGa4LiveOverview,
   fetchGoogleAdsLiveOverview,
   fetchIntegrationSnapshot,
   fetchMetaAdsLiveOverview,
@@ -706,6 +707,16 @@ function createEmptyMetaAdsLiveState() {
   };
 }
 
+function createEmptyGa4LiveState() {
+  return {
+    loading: false,
+    error: "",
+    generatedAt: "",
+    properties: [],
+    errors: [],
+  };
+}
+
 function buildUsers() {
   return USER_BLUEPRINTS.map((blueprint) => ({
     ...blueprint,
@@ -1171,16 +1182,100 @@ function buildSeriesMap(clients, accounts, ga4) {
       };
     });
 
-    series[`ga4:${client.id}`] = Array.from({ length: 30 }, (_, index) => ({
-      label: `Apr ${String(index + 1).padStart(2, "0")}`,
-      sessions: sessionsSeries[index],
-      users: usersSeries[index],
-      revenue: revenueSeries[index],
-      conversions: conversionSeries[index],
-    }));
+    const liveGa4Series = Array.isArray(ga4[client.id]?.series) ? ga4[client.id].series : [];
+    series[`ga4:${client.id}`] = liveGa4Series.length
+      ? liveGa4Series.map((point) => ({
+        label: point.label || point.date || "",
+        sessions: Number(point.sessions) || 0,
+        users: Number(point.users) || 0,
+        revenue: Number(point.revenue) || 0,
+        conversions: Number(point.conversions) || 0,
+      }))
+      : Array.from({ length: 30 }, (_, index) => ({
+        label: `Apr ${String(index + 1).padStart(2, "0")}`,
+        sessions: sessionsSeries[index],
+        users: usersSeries[index],
+        revenue: revenueSeries[index],
+        conversions: conversionSeries[index],
+      }));
   });
 
   return series;
+}
+
+function buildLiveGa4Summary(client, reports, liveState) {
+  const propertyReports = Array.isArray(reports) ? reports : [];
+
+  if (!propertyReports.length) {
+    return {
+      propertyName: liveState?.loading ? "Loading linked GA4 properties" : "Linked GA4 property",
+      sessions: 0,
+      users: 0,
+      engagedRate: 0,
+      conversionRate: 0,
+      purchasesOrLeads: 0,
+      conversions: 0,
+      revenueCurrentPeriod: 0,
+      revenueLastYearPeriod: 0,
+      aov: 0,
+      channels: { Unassigned: 0 },
+      series: [],
+      insight: liveState?.error || "Waiting for live GA4 data from the linked property.",
+    };
+  }
+
+  const sessions = propertyReports.reduce((acc, item) => acc + (Number(item.sessions) || 0), 0);
+  const users = propertyReports.reduce((acc, item) => acc + (Number(item.users) || 0), 0);
+  const conversions = propertyReports.reduce((acc, item) => acc + (Number(item.conversions || item.purchasesOrLeads) || 0), 0);
+  const revenue = propertyReports.reduce((acc, item) => acc + (Number(item.revenueCurrentPeriod) || 0), 0);
+  const engagedRate = sessions
+    ? propertyReports.reduce((acc, item) => acc + (Number(item.engagedRate) || 0) * (Number(item.sessions) || 0), 0) / sessions
+    : 0;
+  const channelWeights = new Map();
+
+  propertyReports.forEach((report) => {
+    Object.entries(report.channels || {}).forEach(([channel, percent]) => {
+      const weightedSessions = (Number(report.sessions) || 0) * (Number(percent) || 0) / 100;
+      channelWeights.set(channel, (channelWeights.get(channel) || 0) + weightedSessions);
+    });
+  });
+
+  const channels = Object.fromEntries(Array.from(channelWeights.entries())
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 6)
+    .map(([channel, value]) => [channel, sessions ? Math.round(value / sessions * 100) : 0]));
+  const seriesByDate = new Map();
+
+  propertyReports.forEach((report) => {
+    (Array.isArray(report.series) ? report.series : []).forEach((point) => {
+      const key = point.date || point.label || "";
+      if (!key) return;
+      const current = seriesByDate.get(key) || { date: key, label: key, sessions: 0, users: 0, conversions: 0, revenue: 0 };
+      current.sessions += Number(point.sessions) || 0;
+      current.users += Number(point.users) || 0;
+      current.conversions += Number(point.conversions) || 0;
+      current.revenue += Number(point.revenue) || 0;
+      seriesByDate.set(key, current);
+    });
+  });
+
+  return {
+    propertyName: propertyReports.length === 1 ? propertyReports[0].propertyName : `${propertyReports.length} GA4 properties`,
+    sessions,
+    users,
+    engagedRate: +engagedRate.toFixed(1),
+    conversionRate: sessions ? +(conversions / sessions * 100).toFixed(2) : 0,
+    purchasesOrLeads: +conversions.toFixed(2),
+    conversions: +conversions.toFixed(2),
+    revenueCurrentPeriod: +revenue.toFixed(2),
+    revenueLastYearPeriod: 0,
+    aov: conversions ? +(revenue / conversions).toFixed(2) : 0,
+    channels: Object.keys(channels).length ? channels : { Unassigned: 0 },
+    series: Array.from(seriesByDate.values()).sort((left, right) => String(left.date).localeCompare(String(right.date))),
+    insight: liveState?.errors?.length
+      ? `GA4 is partially synced: ${liveState.errors[0].error}`
+      : `Live analytics from linked GA4 ${propertyReports.length === 1 ? "property" : "properties"}.`,
+  };
 }
 
 const CLIENTS_BASE = buildClients();
@@ -4952,6 +5047,7 @@ export default function AdPulse() {
   }));
   const [googleAdsLiveState, setGoogleAdsLiveState] = useState(() => createEmptyGoogleAdsLiveState());
   const [metaAdsLiveState, setMetaAdsLiveState] = useState(() => createEmptyMetaAdsLiveState());
+  const [ga4LiveState, setGa4LiveState] = useState(() => createEmptyGa4LiveState());
   const [integrationBusy, setIntegrationBusy] = useState({});
   const [currentUserId, setCurrentUserId] = useState(() => readStoredValue(STORAGE_KEYS.session, null));
   const [setupComplete, setSetupComplete] = useState(null);
@@ -5011,6 +5107,20 @@ export default function AdPulse() {
         ]))
     )
   ), [providerProfiles]);
+  const ga4AssetLookup = useMemo(() => (
+    new Map(
+      providerProfiles
+        .filter((profile) => profile.platform === "ga4")
+        .flatMap((profile) => (profile.assets || []).map((asset) => [
+          asset.id,
+          {
+            ...asset,
+            connectionId: profile.id,
+            connectionStatus: profile.status,
+          },
+        ]))
+    )
+  ), [providerProfiles]);
   const googleAdsLiveRequests = useMemo(() => (
     accessibleClients.flatMap((client) => {
       const linkedAssets = (client.linkedAssets?.google_ads || [])
@@ -5049,6 +5159,21 @@ export default function AdPulse() {
       }));
     })
   ), [accessibleClients, metaAdsAssetLookup]);
+  const ga4LiveRequests = useMemo(() => (
+    accessibleClients.flatMap((client) => {
+      const linkedAssets = (client.linkedAssets?.ga4 || [])
+        .map((assetId) => ga4AssetLookup.get(assetId))
+        .filter((asset) => asset && sanitizeGoogleAdsId(asset.externalId));
+
+      return linkedAssets.map((asset) => ({
+        key: `${client.id}:${asset.id}`,
+        clientId: client.id,
+        connectionId: asset.connectionId,
+        assetId: asset.id,
+        propertyId: sanitizeGoogleAdsId(asset.externalId),
+      }));
+    })
+  ), [accessibleClients, ga4AssetLookup]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -5233,6 +5358,49 @@ export default function AdPulse() {
   }, [accountsDateRangePayload, currentUser, metaAdsLiveRequests]);
 
   useEffect(() => {
+    if (!currentUser || !ga4LiveRequests.length) {
+      setGa4LiveState(createEmptyGa4LiveState());
+      return;
+    }
+
+    let cancelled = false;
+    setGa4LiveState((current) => ({
+      ...current,
+      loading: true,
+      error: "",
+    }));
+
+    fetchGa4LiveOverview({
+      ...accountsDateRangePayload,
+      requests: ga4LiveRequests,
+    })
+      .then((data) => {
+        if (cancelled) return;
+        setGa4LiveState({
+          loading: false,
+          error: "",
+          generatedAt: data?.generatedAt || "",
+          properties: Array.isArray(data?.properties) ? data.properties : [],
+          errors: Array.isArray(data?.errors) ? data.errors : [],
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setGa4LiveState({
+          loading: false,
+          error: error.message || "Could not load GA4 live data.",
+          generatedAt: "",
+          properties: [],
+          errors: [],
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accountsDateRangePayload, currentUser, ga4LiveRequests]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     if (currentUserId) {
       window.localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(currentUserId));
@@ -5297,16 +5465,19 @@ export default function AdPulse() {
       const liveMetaAccounts = metaAdsLiveState.accounts.filter((account) => account.clientId === client.id);
       const liveMetaCampaigns = metaAdsLiveState.campaigns.filter((campaign) => campaign.clientId === client.id);
       const liveMetaAds = metaAdsLiveState.ads.filter((ad) => ad.clientId === client.id);
+      const liveGa4Reports = ga4LiveState.properties.filter((property) => property.clientId === client.id);
       const hasLinkedGoogleAssets = Boolean(client.linkedAssets?.google_ads?.length);
       const hasLinkedMetaAssets = Boolean(client.linkedAssets?.meta_ads?.length);
+      const hasLinkedGa4Assets = Boolean(client.linkedAssets?.ga4?.length);
       const useLiveGoogle = hasLinkedGoogleAssets && Boolean(googleAdsLiveState.loading || googleAdsLiveState.generatedAt || googleAdsLiveState.error);
       const useLiveMeta = hasLinkedMetaAssets && Boolean(metaAdsLiveState.loading || metaAdsLiveState.generatedAt || metaAdsLiveState.error);
+      const useLiveGa4 = hasLinkedGa4Assets && Boolean(ga4LiveState.loading || ga4LiveState.generatedAt || ga4LiveState.error);
 
       // Effective connections: real-linked when OAuth connections exist, otherwise demo toggles
       const effectiveConnections = {
         google_ads: hasAnyProviders ? hasLinkedGoogleAssets : client.connections.google_ads,
         meta_ads: hasAnyProviders ? hasLinkedMetaAssets : client.connections.meta_ads,
-        ga4: hasAnyProviders ? Boolean(client.linkedAssets?.ga4?.length) : client.connections.ga4,
+        ga4: hasAnyProviders ? hasLinkedGa4Assets : client.connections.ga4,
       };
 
       const visibleAccounts = [
@@ -5324,18 +5495,16 @@ export default function AdPulse() {
         ...(useLiveGoogle ? liveGoogleAds : []),
         ...(useLiveMeta ? liveMetaAds : []),
       ];
-      const ga4 = effectiveConnections.ga4 ? GA4_BASE[client.id] : null;
+      const ga4 = effectiveConnections.ga4
+        ? useLiveGa4 ? buildLiveGa4Summary(client, liveGa4Reports, ga4LiveState) : GA4_BASE[client.id]
+        : null;
       const spend = visibleAccounts.reduce((acc, account) => acc + account.spend, 0);
       const clicks = visibleAccounts.reduce((acc, account) => acc + account.clicks, 0);
       const impressions = visibleAccounts.reduce((acc, account) => acc + account.impressions, 0);
       const conversions = visibleAccounts.reduce((acc, account) => acc + account.conversions, 0);
       const conversionValue = visibleAccounts.reduce((acc, account) => acc + getConversionValue(account), 0);
-      const googleBudget = useLiveGoogle
-        ? liveGoogleAccounts.reduce((acc, account) => acc + (account.monthlyBudget || 0), 0) || (effectiveConnections.google_ads ? client.budgets.google_ads : 0)
-        : (effectiveConnections.google_ads ? client.budgets.google_ads : 0);
-      const metaBudget = effectiveConnections.meta_ads
-        ? visibleAccounts.filter((account) => account.platform === "meta_ads").reduce((acc, account) => acc + (account.monthlyBudget || 0), 0) || client.budgets.meta_ads
-        : 0;
+      const googleBudget = effectiveConnections.google_ads ? client.budgets.google_ads : 0;
+      const metaBudget = effectiveConnections.meta_ads ? client.budgets.meta_ads : 0;
       const totalBudget = googleBudget + metaBudget;
       const roas = spend ? conversionValue / spend : 0;
       const activeCampaigns = visibleCampaigns.filter((campaign) => campaign.status !== "stopped").length;
@@ -5372,7 +5541,7 @@ export default function AdPulse() {
         health,
       };
     });
-  }, [accessibleClients, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.error, googleAdsLiveState.generatedAt, googleAdsLiveState.loading, metaAdsLiveState.accounts, metaAdsLiveState.ads, metaAdsLiveState.campaigns, metaAdsLiveState.error, metaAdsLiveState.generatedAt, metaAdsLiveState.loading, providerProfiles]);
+  }, [accessibleClients, ga4LiveState, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.error, googleAdsLiveState.generatedAt, googleAdsLiveState.loading, metaAdsLiveState.accounts, metaAdsLiveState.ads, metaAdsLiveState.campaigns, metaAdsLiveState.error, metaAdsLiveState.generatedAt, metaAdsLiveState.loading, providerProfiles]);
 
   const filteredClients = useMemo(() => {
     let list = enriched;
@@ -5406,7 +5575,11 @@ export default function AdPulse() {
   const gaVisibleClients = enriched.filter((client) => client.connections.ga4);
   const currentUserAssignedClients = currentUser?.role === "director" ? clients : clients.filter((client) => client.assignedUserIds?.includes(currentUser?.id));
   const chartAccounts = enriched.find((client) => client.id === chartForm.clientId)?.accounts || [];
-  const allDashboardAccounts = enriched.flatMap((client) => client.accounts || []);
+  const allDashboardAccounts = useMemo(() => enriched.flatMap((client) => client.accounts || []), [enriched]);
+  const dashboardGa4ByClient = useMemo(() => Object.fromEntries(enriched
+    .filter((client) => client.ga4)
+    .map((client) => [client.id, client.ga4])), [enriched]);
+  const dashboardSeriesMap = useMemo(() => buildSeriesMap(enriched, allDashboardAccounts, dashboardGa4ByClient), [allDashboardAccounts, dashboardGa4ByClient, enriched]);
   const gaClient = gaVisibleClients.find((client) => client.id === gaClientId) || gaVisibleClients[0] || null;
   const shellMaxWidth = viewportWidth >= 1880 ? 1740 : viewportWidth >= 1680 ? 1640 : viewportWidth >= 1440 ? 1540 : viewportWidth >= 1200 ? 1380 : 1120;
   const overviewColumns = viewportWidth >= 1680 ? "repeat(4, minmax(0, 1fr))" : viewportWidth >= 1220 ? "repeat(3, minmax(0, 1fr))" : viewportWidth >= 760 ? "repeat(2, minmax(0, 1fr))" : "1fr";
@@ -5966,7 +6139,7 @@ export default function AdPulse() {
               {charts.length ? (
                 <div style={{ display: "grid", gridTemplateColumns: chartColumns, gap: 18 }}>
                   {charts.map((chart) => (
-                    <ChartCard key={chart.id} chart={chart} clients={enriched} accounts={allDashboardAccounts} seriesMap={SERIES_BASE} onRemove={() => setCharts((current) => current.filter((item) => item.id !== chart.id))} />
+                    <ChartCard key={chart.id} chart={chart} clients={enriched} accounts={allDashboardAccounts} seriesMap={dashboardSeriesMap} onRemove={() => setCharts((current) => current.filter((item) => item.id !== chart.id))} />
                   ))}
                 </div>
               ) : (
