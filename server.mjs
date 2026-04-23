@@ -2651,6 +2651,7 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
       loginCustomerIds,
       query: [
         "SELECT",
+        "  segments.geo_target_most_specific_location,",
         "  segments.geo_target_country,",
         "  segments.geo_target_region,",
         "  segments.geo_target_city,",
@@ -2674,6 +2675,7 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
 
   let rows = [];
   let primaryError = null;
+  let secondaryError = null;
 
   try {
     rows = await fetchRows("geographic_view", "geo-target");
@@ -2685,8 +2687,22 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
     try {
       rows = await fetchRows("user_location_view", "user-location");
     } catch (error) {
-      if (primaryError) {
-        throw new Error(`${primaryError.message || "Geographic view failed."} | ${error.message || "User location view failed."}`);
+      secondaryError = error;
+    }
+  }
+
+  if (!rows.length) {
+    try {
+      rows = await fetchRows("customer", "customer-segments");
+    } catch (error) {
+      const messages = [
+        primaryError?.message || "",
+        secondaryError?.message || "",
+        error.message || "",
+      ].filter(Boolean);
+
+      if (messages.length) {
+        throw new Error(messages.join(" | "));
       }
       throw error;
     }
@@ -2696,7 +2712,7 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
     customerId,
     tokenBundle,
     loginCustomerIds,
-    resourceNames: Array.from(new Set(rows.flatMap((row) => [row.cityResource, row.regionResource, row.countryResource]).filter(Boolean))),
+    resourceNames: Array.from(new Set(rows.flatMap((row) => [row.mostSpecificResource, row.cityResource, row.regionResource, row.countryResource]).filter(Boolean))),
   });
 
   return rows.map((row) => ({
@@ -3181,6 +3197,7 @@ function normalizeGoogleAdsGeographyReportRow(row) {
 
   return {
     location: "",
+    mostSpecificResource: row.segments?.geoTargetMostSpecificLocation || "",
     countryResource: row.segments?.geoTargetCountry || "",
     regionResource: row.segments?.geoTargetRegion || "",
     cityResource: row.segments?.geoTargetCity || "",
@@ -3252,13 +3269,16 @@ function normalizeGoogleAdsRatioMetric(value) {
 }
 
 function formatGoogleAdsLocationName(row, names) {
+  const specificName = names.get(row.mostSpecificResource)?.name || "";
+  if (specificName) return specificName;
+
   const parts = [row.cityResource, row.regionResource, row.countryResource]
     .map((resourceName) => names.get(resourceName)?.name || "")
     .filter(Boolean);
 
   if (parts.length) return Array.from(new Set(parts)).join(", ");
 
-  const fallback = row.cityResource || row.regionResource || row.countryResource;
+  const fallback = row.mostSpecificResource || row.cityResource || row.regionResource || row.countryResource;
   return fallback ? `Geo target ${String(fallback).split("/").pop()}` : "Unknown location";
 }
 

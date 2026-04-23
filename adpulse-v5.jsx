@@ -3891,7 +3891,7 @@ function ReportLineChart({ title, series, metric, color, axisType = "number" }) 
   const values = (series || []).map((point) => Number(point[metric]) || 0);
   const width = 520;
   const height = 230;
-  const padLeft = axisType === "currency" ? 82 : 54;
+  const padLeft = axisType === "currency" ? 110 : 84;
   const padRight = 20;
   const padTop = 16;
   const padBottom = 34;
@@ -3915,7 +3915,7 @@ function ReportLineChart({ title, series, metric, color, axisType = "number" }) 
           return (
             <g key={tick}>
               <line x1={padLeft} x2={width - padRight} y1={y} y2={y} stroke="rgba(22,34,24,0.08)" />
-              <text x={padLeft - 10} y={y + 4} textAnchor="end" fontSize="10" fill={T.inkSoft}>
+              <text x="10" y={y + 4} textAnchor="start" fontSize="10" fill={T.inkSoft}>
                 {formatChartAxisValue(tick, axisType)}
               </text>
             </g>
@@ -3941,7 +3941,7 @@ function ReportLineChart({ title, series, metric, color, axisType = "number" }) 
 function ReportDualLineChart({ title, series, primaryMetric, secondaryMetric, primaryLabel, secondaryLabel, primaryColor, secondaryColor, axisType = "number" }) {
   const width = 980;
   const height = 420;
-  const padLeft = axisType === "currency" ? 86 : 58;
+  const padLeft = axisType === "currency" ? 120 : 96;
   const padRight = 28;
   const padTop = 20;
   const padBottom = 36;
@@ -3977,7 +3977,7 @@ function ReportDualLineChart({ title, series, primaryMetric, secondaryMetric, pr
           return (
             <g key={tick}>
               <line x1={padLeft} x2={width - padRight} y1={y} y2={y} stroke="rgba(22,34,24,0.08)" />
-              <text x={padLeft - 10} y={y + 4} textAnchor="end" fontSize="10" fill={T.inkSoft}>
+              <text x="12" y={y + 4} textAnchor="start" fontSize="10" fill={T.inkSoft}>
                 {formatChartAxisValue(tick, axisType)}
               </text>
             </g>
