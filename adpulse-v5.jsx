@@ -287,6 +287,14 @@ function getAccountDateRangePayload(value) {
   return { dateRange: preset };
 }
 
+function getAccountDateRangeLabel(value) {
+  if (value?.preset === "CUSTOM") {
+    return isValidAccountDateRange(value) ? `${value.startDate} - ${value.endDate}` : "Custom range";
+  }
+
+  return ACCOUNT_DATE_RANGE_OPTIONS.find((option) => option.value === value?.preset)?.label || "This month";
+}
+
 function formatSearchTermStatus(status) {
   if (status === "ADDED") return "Added";
   if (status === "ADDED_EXCLUDED") return "Added excluded";
@@ -3151,6 +3159,533 @@ function ChartCard({ chart, clients, accounts, seriesMap, onRemove }) {
   );
 }
 
+function summarizeReportMetrics(items) {
+  const spend = items.reduce((acc, item) => acc + (Number(item.spend) || 0), 0);
+  const impressions = items.reduce((acc, item) => acc + (Number(item.impressions) || 0), 0);
+  const clicks = items.reduce((acc, item) => acc + (Number(item.clicks) || 0), 0);
+  const conversions = items.reduce((acc, item) => acc + (Number(item.conversions) || 0), 0);
+  const conversionValue = items.reduce((acc, item) => acc + getConversionValue(item), 0);
+
+  return {
+    spend,
+    impressions,
+    clicks,
+    conversions,
+    conversionValue,
+    ctr: impressions ? clicks / impressions * 100 : 0,
+    cpc: clicks ? spend / clicks : 0,
+    costPerConversion: conversions ? spend / conversions : 0,
+    roas: spend ? conversionValue / spend : 0,
+  };
+}
+
+function formatReportCurrency(value, digits = 2) {
+  return `EUR ${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+}
+
+function formatReportNumber(value, digits = 0) {
+  return Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function formatReportPercent(value) {
+  return `${Number(value || 0).toFixed(2)}%`;
+}
+
+function getPlatformReportSeries(client, platform, seriesMap) {
+  const accountSeries = (client.accounts || [])
+    .filter((account) => account.platform === platform)
+    .map((account) => seriesMap[`account:${account.id}`] || [])
+    .filter((series) => series.length);
+  const length = Math.max(0, ...accountSeries.map((series) => series.length));
+
+  return Array.from({ length }, (_, index) => accountSeries.reduce((acc, series) => {
+    const point = series[index] || {};
+    return {
+      label: acc.label || point.label || "",
+      spend: acc.spend + (Number(point.spend) || 0),
+      clicks: acc.clicks + (Number(point.clicks) || 0),
+      impressions: acc.impressions + Math.round((Number(point.clicks) || 0) * 12),
+      conversions: acc.conversions + (Number(point.conversions) || 0),
+      conversionValue: acc.conversionValue + (Number(point.conversionValue) || Number(point.revenue) || 0),
+      revenue: acc.revenue + (Number(point.revenue) || 0),
+    };
+  }, { label: "", spend: 0, clicks: 0, impressions: 0, conversions: 0, conversionValue: 0, revenue: 0 }));
+}
+
+function getReportDateStamp() {
+  return new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function ReportPrintStyles() {
+  return (
+    <style>
+      {`
+        @media print {
+          @page { size: A4 landscape; margin: 0; }
+          body { background: #ffffff !important; }
+          body * { visibility: hidden !important; }
+          .report-print-root, .report-print-root * { visibility: visible !important; }
+          .report-print-root {
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 100% !important;
+            background: #ffffff !important;
+            color: #111111 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          .report-screen-controls { display: none !important; }
+          .report-page {
+            width: 297mm !important;
+            min-height: 210mm !important;
+            max-width: none !important;
+            margin: 0 !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            page-break-after: always !important;
+            break-after: page !important;
+          }
+          .report-page:last-child {
+            page-break-after: auto !important;
+            break-after: auto !important;
+          }
+        }
+      `}
+    </style>
+  );
+}
+
+function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, dateRangeLabel, dateRangeValue, onDateRangeChange }) {
+  const selectedClient = clients.find((client) => client.id === selectedClientId) || clients[0] || null;
+
+  function generatePdf() {
+    if (!selectedClient || typeof window === "undefined") return;
+
+    const previousTitle = document.title;
+    document.title = `${selectedClient.name} Campaign Report`;
+    window.requestAnimationFrame(() => {
+      window.print();
+      window.setTimeout(() => {
+        document.title = previousTitle;
+      }, 500);
+    });
+  }
+
+  if (!clients.length) {
+    return <EmptyState title="No clients available for reports" body="Create a client and link campaign assets before generating a PDF report." />;
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <ReportPrintStyles />
+      <div
+        className="report-screen-controls"
+        style={{
+          padding: 18,
+          borderRadius: 24,
+          background: T.surface,
+          border: `1px solid ${T.line}`,
+          boxShadow: T.shadow,
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 14,
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 800, fontFamily: T.heading }}>Campaign PDF reports</div>
+          <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>
+            Template follows the sample report: overview KPIs, channel charts, campaign tables, ad tables and metric definitions. Choose Save as PDF when the print dialog opens.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <select
+            value={selectedClient?.id || ""}
+            onChange={(event) => onSelectClient(event.target.value)}
+            style={{
+              width: 260,
+              maxWidth: "100%",
+              boxSizing: "border-box",
+              padding: "12px 13px",
+              borderRadius: 16,
+              border: `1px solid ${T.line}`,
+              background: T.surfaceStrong,
+              color: T.ink,
+              fontSize: 13,
+              fontWeight: 700,
+              fontFamily: T.font,
+            }}
+          >
+            {clients.map((client) => (
+              <option key={client.id} value={client.id}>{client.name}</option>
+            ))}
+          </select>
+          <Button onClick={generatePdf} tone="primary" disabled={!selectedClient}>Generate PDF</Button>
+        </div>
+      </div>
+
+      <div className="report-screen-controls">
+        <AccountDateRangeControl value={dateRangeValue} onChange={onDateRangeChange} />
+      </div>
+
+      {selectedClient ? (
+        <div className="report-print-root" style={{ display: "grid", gap: 18, justifyItems: "center" }}>
+          <CampaignReportDocument client={selectedClient} seriesMap={seriesMap} dateRangeLabel={dateRangeLabel} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CampaignReportDocument({ client, seriesMap, dateRangeLabel }) {
+  const googleAccounts = (client.accounts || []).filter((account) => account.platform === "google_ads");
+  const metaAccounts = (client.accounts || []).filter((account) => account.platform === "meta_ads");
+  const googleCampaigns = (client.campaigns || []).filter((campaign) => campaign.platform === "google_ads").sort((left, right) => right.spend - left.spend);
+  const metaCampaigns = (client.campaigns || []).filter((campaign) => campaign.platform === "meta_ads").sort((left, right) => right.spend - left.spend);
+  const metaAds = (client.ads || []).filter((ad) => ad.platform === "meta_ads").sort((left, right) => right.spend - left.spend);
+  const googleSummary = summarizeReportMetrics(googleAccounts);
+  const metaSummary = summarizeReportMetrics(metaAccounts);
+  const totalSummary = summarizeReportMetrics(client.accounts || []);
+  const googleSeries = getPlatformReportSeries(client, "google_ads", seriesMap);
+  const metaSeries = getPlatformReportSeries(client, "meta_ads", seriesMap);
+  const hasGoogle = googleAccounts.length > 0;
+  const hasMeta = metaAccounts.length > 0;
+
+  return (
+    <>
+      <ReportPage accent={T.ink}>
+        <div style={{ display: "grid", gridTemplateRows: "1fr auto", minHeight: 690 }}>
+          <div style={{ display: "grid", alignContent: "center", gap: 24 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+              <LogoMark client={client} size={68} />
+              <div>
+                <div style={{ fontSize: 48, lineHeight: 1, fontWeight: 800, fontFamily: T.heading, letterSpacing: "-0.07em" }}>{client.name}</div>
+                <div style={{ marginTop: 10, fontSize: 17, color: T.inkSoft }}>Campaign Performance Report</div>
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.9fr", gap: 24, alignItems: "stretch" }}>
+              <div style={{ padding: 28, borderRadius: 28, background: "linear-gradient(135deg, #162218, #214e40)", color: "#fff", display: "grid", gap: 18 }}>
+                <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.12em", opacity: 0.78, fontWeight: 800 }}>Reporting window</div>
+                <div style={{ fontSize: 38, fontFamily: T.heading, fontWeight: 800, letterSpacing: "-0.06em" }}>{dateRangeLabel}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.82 }}>
+                  Generated from linked dashboard campaign data. The report mirrors the monthly client report format with channel KPIs, campaign rankings, ad performance and metric definitions.
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <ReportKpiTile label="Spend" value={formatReportCurrency(totalSummary.spend)} />
+                <ReportKpiTile label="Clicks" value={formatReportNumber(totalSummary.clicks)} />
+                <ReportKpiTile label="Conversions" value={formatReportNumber(totalSummary.conversions, 2)} />
+                <ReportKpiTile label="ROAS" value={formatMetric("roas", totalSummary.roas)} />
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", color: T.inkSoft, fontSize: 12 }}>
+            <div>{[hasGoogle ? "Google Ads" : "", hasMeta ? "Meta Ads" : "", client.ga4 ? "GA4" : ""].filter(Boolean).join(" + ") || "No linked channels"}</div>
+            <div>Generated {getReportDateStamp()}</div>
+          </div>
+        </div>
+      </ReportPage>
+
+      <ReportChannelOverview
+        title="Google Ads Performance Overview"
+        platform="google_ads"
+        summary={googleSummary}
+        series={googleSeries}
+        campaigns={googleCampaigns}
+        empty={!hasGoogle}
+      />
+
+      <ReportCampaignTablePage
+        title="Google Campaign Performance"
+        platform="google_ads"
+        campaigns={googleCampaigns}
+        emptyLabel="No linked Google Ads campaigns were found for this client."
+      />
+
+      <ReportChannelOverview
+        title="Facebook Ads Performance Overview"
+        platform="meta_ads"
+        summary={metaSummary}
+        series={metaSeries}
+        campaigns={metaCampaigns}
+        empty={!hasMeta}
+      />
+
+      <ReportCampaignTablePage
+        title="Facebook Campaign Performance"
+        platform="meta_ads"
+        campaigns={metaCampaigns}
+        emptyLabel="No linked Meta Ads campaigns were found for this client."
+      />
+
+      <ReportAdsTablePage ads={metaAds} />
+
+      {client.ga4 ? <ReportAnalyticsPage client={client} ga4={client.ga4} /> : null}
+
+      <ReportDefinitionsPage />
+    </>
+  );
+}
+
+function ReportPage({ children, accent = T.accent }) {
+  return (
+    <section
+      className="report-page"
+      style={{
+        width: "100%",
+        maxWidth: 1120,
+        minHeight: 790,
+        boxSizing: "border-box",
+        padding: 34,
+        borderRadius: 30,
+        background: "#fbfaf6",
+        border: `1px solid ${T.line}`,
+        boxShadow: T.shadow,
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: `radial-gradient(circle at 92% 8%, ${accent}18, transparent 24%), radial-gradient(circle at 8% 98%, rgba(22, 34, 24, 0.06), transparent 24%)` }} />
+      <div style={{ position: "relative", zIndex: 1 }}>{children}</div>
+    </section>
+  );
+}
+
+function ReportHeader({ title, platform }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", marginBottom: 22 }}>
+      <div>
+        <div style={{ fontSize: 28, fontFamily: T.heading, fontWeight: 800, letterSpacing: "-0.06em" }}>{title}</div>
+        <div style={{ marginTop: 6, color: T.inkSoft, fontSize: 12 }}>Campaign report section</div>
+      </div>
+      {platform ? <PlatformChip platform={platform} /> : null}
+    </div>
+  );
+}
+
+function ReportKpiTile({ label, value, subValue }) {
+  return (
+    <div style={{ padding: 16, borderRadius: 20, background: "#fff", border: `1px solid ${T.line}`, display: "grid", alignContent: "start", minHeight: 106 }}>
+      <div style={{ fontSize: 10, color: T.inkMute, fontWeight: 900, letterSpacing: "0.12em", textTransform: "uppercase" }}>{label}</div>
+      <div style={{ marginTop: 8, fontSize: 28, fontFamily: T.heading, fontWeight: 800, color: T.ink, letterSpacing: "-0.06em", lineHeight: 1 }}>{value}</div>
+      {subValue ? <div style={{ marginTop: 6, fontSize: 11, color: T.inkSoft }}>{subValue}</div> : null}
+    </div>
+  );
+}
+
+function ReportChannelOverview({ title, platform, summary, series, campaigns, empty }) {
+  const campaignBars = campaigns.slice(0, 6).map((campaign) => ({
+    label: campaign.name,
+    value: Number(campaign.spend) || 0,
+  }));
+  const accent = PLATFORM_META[platform].color;
+
+  return (
+    <ReportPage accent={accent}>
+      <ReportHeader title={title} platform={platform} />
+      {empty ? (
+        <div style={{ padding: 24, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, color: T.inkSoft }}>
+          No linked {PLATFORM_META[platform].label} accounts were found for this client.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 10 }}>
+            <ReportKpiTile label="Impressions" value={formatReportNumber(summary.impressions)} />
+            <ReportKpiTile label="Clicks" value={formatReportNumber(summary.clicks)} />
+            <ReportKpiTile label="CTR (%)" value={formatReportPercent(summary.ctr)} />
+            <ReportKpiTile label="Cost" value={formatReportCurrency(summary.spend)} />
+            <ReportKpiTile label="Average CPC" value={formatReportCurrency(summary.cpc)} />
+            <ReportKpiTile label={platform === "meta_ads" ? "Purchases" : "Conversions"} value={formatReportNumber(summary.conversions, 2)} />
+            <ReportKpiTile label={platform === "meta_ads" ? "Cost / Purchase" : "Cost / Conversion"} value={formatReportCurrency(summary.costPerConversion)} />
+            <ReportKpiTile label={platform === "meta_ads" ? "Purchase Conv. Value" : "Total Conv. Value"} value={formatReportCurrency(summary.conversionValue)} />
+            <ReportKpiTile label="ROAS" value={formatMetric("roas", summary.roas)} />
+            <ReportKpiTile label="Campaigns" value={formatReportNumber(campaigns.length)} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+            <ReportLineChart title={platform === "meta_ads" ? "Click Performance" : "Conversion Performance"} series={series} metric={platform === "meta_ads" ? "clicks" : "conversions"} color={accent} />
+            <ReportBarChart title="Top campaigns by spend" items={campaignBars} color={accent} />
+          </div>
+        </div>
+      )}
+    </ReportPage>
+  );
+}
+
+function ReportCampaignTablePage({ title, platform, campaigns, emptyLabel }) {
+  const columns = [
+    { label: "Campaign", render: (row) => row.name },
+    { label: "Impressions", align: "right", render: (row) => formatReportNumber(row.impressions) },
+    { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
+    { label: "CTR (%)", align: "right", render: (row) => formatReportPercent(row.impressions ? row.clicks / row.impressions * 100 : 0) },
+    { label: "Cost", align: "right", render: (row) => formatReportCurrency(row.spend) },
+    { label: "Avg CPC", align: "right", render: (row) => formatReportCurrency(row.clicks ? row.spend / row.clicks : 0) },
+    { label: platform === "meta_ads" ? "Purchases" : "Conversions", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
+    { label: "Conv. Value", align: "right", render: (row) => formatReportCurrency(row.conversionValue || 0) },
+    { label: "Cost / Conv.", align: "right", render: (row) => formatReportCurrency(row.conversions ? row.spend / row.conversions : 0) },
+  ];
+
+  return (
+    <ReportPage accent={PLATFORM_META[platform].color}>
+      <ReportHeader title={title} platform={platform} />
+      <ReportTable columns={columns} rows={campaigns.slice(0, 12)} emptyLabel={emptyLabel} />
+    </ReportPage>
+  );
+}
+
+function ReportAdsTablePage({ ads }) {
+  const columns = [
+    { label: "Ad name", render: (row) => row.name },
+    { label: "Impressions", align: "right", render: (row) => formatReportNumber(row.impressions) },
+    { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
+    { label: "Purchases", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
+    { label: "Cost / Purchase", align: "right", render: (row) => formatReportCurrency(row.conversions ? row.spend / row.conversions : 0) },
+    { label: "Purchase Value", align: "right", render: (row) => formatReportCurrency(row.conversionValue || 0) },
+    { label: "ROAS", align: "right", render: (row) => formatMetric("roas", row.spend ? (row.conversionValue || 0) / row.spend : 0) },
+    { label: "Spend", align: "right", render: (row) => formatReportCurrency(row.spend) },
+  ];
+
+  return (
+    <ReportPage accent={PLATFORM_META.meta_ads.color}>
+      <ReportHeader title="Ads Performance" platform="meta_ads" />
+      <ReportTable columns={columns} rows={ads.slice(0, 14)} emptyLabel="No Meta ad-level rows were found for this client." />
+    </ReportPage>
+  );
+}
+
+function ReportAnalyticsPage({ client, ga4 }) {
+  const channels = Object.entries(ga4.channels || {}).map(([label, value]) => ({ label, value }));
+
+  return (
+    <ReportPage accent={PLATFORM_META.ga4.color}>
+      <ReportHeader title="Analytics Performance" platform="ga4" />
+      <div style={{ display: "grid", gap: 20 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 10 }}>
+          <ReportKpiTile label="Sessions" value={formatReportNumber(ga4.sessions)} />
+          <ReportKpiTile label="Users" value={formatReportNumber(ga4.users)} />
+          <ReportKpiTile label="Engaged Rate" value={formatReportPercent(ga4.engagedRate)} />
+          <ReportKpiTile label="Conv. Rate" value={formatReportPercent(ga4.conversionRate)} />
+          <ReportKpiTile label={client.category === "eshop" ? "Revenue" : "Leads"} value={client.category === "eshop" ? formatReportCurrency(ga4.revenueCurrentPeriod) : formatReportNumber(ga4.purchasesOrLeads, 2)} />
+        </div>
+        <ReportBarChart title="Traffic mix" items={channels} color={PLATFORM_META.ga4.color} />
+      </div>
+    </ReportPage>
+  );
+}
+
+function ReportDefinitionsPage() {
+  const definitions = [
+    ["Clicks", "The number of people who clicked an ad and moved toward the website or landing page."],
+    ["Impressions", "The number of times ads were shown."],
+    ["CTR", "Clicks divided by impressions. It shows how often an impression becomes a click."],
+    ["Average CPC", "Total ad cost divided by clicks."],
+    ["Cost", "Total media spend during the selected reporting period."],
+    ["Conversions / Purchases", "Valuable actions attributed to the ads, such as leads, purchases or other configured conversion events."],
+    ["Cost / Conversion", "Total spend divided by conversions."],
+    ["Conversion Value", "Revenue or value attributed to conversion actions."],
+    ["ROAS", "Conversion value divided by spend."],
+    ["Reach", "For Meta, the number of people who saw the ad at least once when reach is available."],
+  ];
+
+  return (
+    <ReportPage accent={T.ink}>
+      <ReportHeader title="Metric Definitions" />
+      <ReportTable
+        columns={[
+          { label: "Metric", render: (row) => row[0] },
+          { label: "Description", render: (row) => row[1] },
+        ]}
+        rows={definitions}
+        emptyLabel=""
+      />
+    </ReportPage>
+  );
+}
+
+function ReportLineChart({ title, series, metric, color }) {
+  const values = (series || []).map((point) => Number(point[metric]) || 0);
+  const width = 520;
+  const height = 230;
+  const pad = 28;
+  const max = Math.max(...values, 1);
+  const points = values.map((value, index) => ({
+    x: pad + (index / Math.max(values.length - 1, 1)) * (width - pad * 2),
+    y: height - pad - (value / max) * (height - pad * 2),
+  }));
+  const path = points.length ? points.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ") : "";
+
+  return (
+    <div style={{ padding: 18, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}` }}>
+      <div style={{ fontSize: 15, fontWeight: 800, fontFamily: T.heading, marginBottom: 12 }}>{title}</div>
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", display: "block" }}>
+        <line x1={pad} x2={width - pad} y1={height - pad} y2={height - pad} stroke="rgba(22,34,24,0.12)" />
+        <line x1={pad} x2={pad} y1={pad} y2={height - pad} stroke="rgba(22,34,24,0.12)" />
+        <path d={path} fill="none" stroke={color} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+        {points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r="3.8" fill={color} />)}
+        <text x={pad} y={height - 8} fontSize="11" fill={T.inkSoft}>Start</text>
+        <text x={width - pad} y={height - 8} fontSize="11" fill={T.inkSoft} textAnchor="end">End</text>
+      </svg>
+    </div>
+  );
+}
+
+function ReportBarChart({ title, items, color }) {
+  const rows = (items || []).filter((item) => Number(item.value) > 0).slice(0, 8);
+  const max = Math.max(...rows.map((item) => Number(item.value) || 0), 1);
+
+  return (
+    <div style={{ padding: 18, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+      <div style={{ fontSize: 15, fontWeight: 800, fontFamily: T.heading }}>{title}</div>
+      {rows.length ? rows.map((item) => (
+        <div key={item.label} style={{ display: "grid", gap: 5 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11 }}>
+            <span style={{ color: T.ink, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
+            <span style={{ color: T.inkSoft, fontFamily: T.mono }}>{formatReportNumber(item.value, item.value < 100 ? 1 : 0)}</span>
+          </div>
+          <div style={{ height: 10, borderRadius: 999, background: "rgba(22,34,24,0.08)", overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${Math.max(4, (Number(item.value) || 0) / max * 100)}%`, borderRadius: 999, background: color }} />
+          </div>
+        </div>
+      )) : (
+        <div style={{ padding: 18, borderRadius: 18, background: T.bgSoft, color: T.inkSoft, fontSize: 12 }}>No chart data available.</div>
+      )}
+    </div>
+  );
+}
+
+function ReportTable({ columns, rows, emptyLabel }) {
+  return (
+    <div style={{ overflow: "hidden", borderRadius: 20, border: `1px solid ${T.line}`, background: "#fff" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+        <thead>
+          <tr style={{ background: "#f1eee7" }}>
+            {columns.map((column) => (
+              <th key={column.label} style={{ padding: "12px 10px", textAlign: column.align || "left", color: T.ink, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>{column.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length ? rows.map((row, rowIndex) => (
+            <tr key={row.id || row.name || rowIndex}>
+              {columns.map((column) => (
+                <td key={column.label} style={{ padding: "11px 10px", borderTop: `1px solid ${T.line}`, textAlign: column.align || "left", color: T.ink, fontWeight: column.align === "right" ? 700 : 600, verticalAlign: "top" }}>
+                  {column.render(row)}
+                </td>
+              ))}
+            </tr>
+          )) : (
+            <tr>
+              <td colSpan={columns.length} style={{ padding: 24, color: T.inkSoft, textAlign: "center" }}>{emptyLabel}</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function AlertLane({ title, description, items, ok, onOpenAccounts, onEdit, users }) {
   return (
     <div
@@ -5066,6 +5601,7 @@ export default function AdPulse() {
   });
   const [charts, setCharts] = useState([]);
   const [gaClientId, setGaClientId] = useState(CLIENTS_BASE.find((client) => client.connections.ga4)?.id || CLIENTS_BASE[0]?.id || "");
+  const [reportClientId, setReportClientId] = useState(CLIENTS_BASE[0]?.id || "");
   const [studioDraft, setStudioDraft] = useState(CLIENTS_BASE[0] || null);
   const currentUser = users.find((user) => user.id === currentUserId) || null;
   const isDirector = currentUser?.role === "director";
@@ -5434,6 +5970,13 @@ export default function AdPulse() {
   }, [accessibleClients, gaClientId]);
 
   useEffect(() => {
+    if (!accessibleClients.length) return;
+    if (!accessibleClients.some((client) => client.id === reportClientId)) {
+      setReportClientId(accessibleClients[0].id);
+    }
+  }, [accessibleClients, reportClientId]);
+
+  useEffect(() => {
     if (chartForm.scope !== "account") return;
     const currentClient = accessibleClients.find((client) => client.id === chartForm.clientId);
     const availableAccounts = ACCOUNTS_BASE.filter((account) => account.clientId === chartForm.clientId && currentClient?.connections[account.platform]);
@@ -5580,6 +6123,7 @@ export default function AdPulse() {
     .filter((client) => client.ga4)
     .map((client) => [client.id, client.ga4])), [enriched]);
   const dashboardSeriesMap = useMemo(() => buildSeriesMap(enriched, allDashboardAccounts, dashboardGa4ByClient), [allDashboardAccounts, dashboardGa4ByClient, enriched]);
+  const reportDateRangeLabel = getAccountDateRangeLabel(accountsDateRange);
   const gaClient = gaVisibleClients.find((client) => client.id === gaClientId) || gaVisibleClients[0] || null;
   const shellMaxWidth = viewportWidth >= 1880 ? 1740 : viewportWidth >= 1680 ? 1640 : viewportWidth >= 1440 ? 1540 : viewportWidth >= 1200 ? 1380 : 1120;
   const overviewColumns = viewportWidth >= 1680 ? "repeat(4, minmax(0, 1fr))" : viewportWidth >= 1220 ? "repeat(3, minmax(0, 1fr))" : viewportWidth >= 760 ? "repeat(2, minmax(0, 1fr))" : "1fr";
@@ -5593,6 +6137,7 @@ export default function AdPulse() {
     { key: "accounts", label: "Accounts" },
     { key: "search_terms", label: "Search Terms" },
     { key: "analytics", label: "Analytics" },
+    { key: "reports", label: "Reports" },
     { key: "alerts", label: "Alerts" },
     { key: "studio", label: "Client Studio" },
     ...(isDirector ? [{ key: "connections", label: "Connections" }] : []),
@@ -6146,6 +6691,18 @@ export default function AdPulse() {
                 <EmptyState title="No custom graphs yet" body="Use the builder above to pin client, account or GA4 KPI graphs." />
               )}
             </div>
+          ) : null}
+
+          {view === "reports" ? (
+            <ReportCenter
+              clients={enriched}
+              selectedClientId={reportClientId}
+              onSelectClient={setReportClientId}
+              seriesMap={dashboardSeriesMap}
+              dateRangeLabel={reportDateRangeLabel}
+              dateRangeValue={accountsDateRange}
+              onDateRangeChange={setAccountsDateRange}
+            />
           ) : null}
 
           {view === "alerts" ? (
