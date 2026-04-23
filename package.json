@@ -1,0 +1,21 @@
+{
+  "name": "adpulse-preview",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:vite": "vite",
+    "api": "node server.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  }
+}

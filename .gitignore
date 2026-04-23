@@ -1,0 +1,10 @@
+.adpulse-data/
+.env.local
+.env
+node_modules/
+dist/
+.edge-profile/
+*.log
+*.err
+*.png
+edge.dom.html
