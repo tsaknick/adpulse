@@ -765,6 +765,8 @@ function createEmptyClientDirectoryState() {
     savingKey: "",
     error: "",
     notice: "",
+    lastSavedToken: "",
+    lastSavedClientId: "",
   };
 }
 
@@ -2446,21 +2448,23 @@ function UserAdminPanel({ users, clients, currentUserId, state, onCreateUser, on
   );
 }
 
-function Button({ children, onClick, active, tone = "soft", disabled = false }) {
+function Button({ children, onClick, active, tone = "soft", disabled = false, buttonRef = null, emphasize = false }) {
   const isPrimary = tone === "primary";
   const isDanger = tone === "danger";
+  const isSuccess = tone === "success";
 
   return (
     <button
+      ref={buttonRef}
       type="button"
       onClick={onClick}
       disabled={disabled}
       style={{
         padding: "10px 14px",
         borderRadius: 12,
-        border: isPrimary || isDanger ? "none" : `1px solid ${active ? T.lineStrong : T.line}`,
-        background: disabled ? T.bgSoft : isPrimary ? T.ink : isDanger ? T.coral : active ? T.accentSoft : T.surfaceStrong,
-        color: disabled ? T.inkMute : isPrimary || isDanger ? "#fff" : active ? T.accent : T.inkSoft,
+        border: isPrimary || isDanger || isSuccess ? "none" : `1px solid ${active ? T.lineStrong : T.line}`,
+        background: disabled ? T.bgSoft : isSuccess ? T.accent : isPrimary ? T.ink : isDanger ? T.coral : active ? T.accentSoft : T.surfaceStrong,
+        color: disabled ? T.inkMute : isPrimary || isDanger || isSuccess ? "#fff" : active ? T.accent : T.inkSoft,
         fontSize: 12,
         fontWeight: 800,
         cursor: disabled ? "not-allowed" : "pointer",
@@ -2468,6 +2472,9 @@ function Button({ children, onClick, active, tone = "soft", disabled = false }) 
         maxWidth: "100%",
         whiteSpace: "nowrap",
         opacity: disabled ? 0.7 : 1,
+        transform: emphasize ? "translateY(-1px) scale(1.02)" : "translateY(0) scale(1)",
+        boxShadow: emphasize ? `0 14px 30px ${isSuccess ? "rgba(15, 143, 102, 0.28)" : "rgba(22, 34, 24, 0.12)"}` : "none",
+        transition: "transform 180ms ease, box-shadow 220ms ease, background 220ms ease, color 220ms ease, border-color 220ms ease, opacity 220ms ease",
       }}
     >
       {children}
@@ -2561,6 +2568,82 @@ function ToastStack({ items, onDismiss }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function formatInlineList(items) {
+  if (!items.length) return "";
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+function getClientLinkedPlatforms(client) {
+  return Object.entries(client?.linkedAssetCounts || {})
+    .filter(([, count]) => count > 0)
+    .map(([platform]) => platform);
+}
+
+function getClientSummaryText(client, { includeAds = false } = {}) {
+  const parts = [client.focus].filter(Boolean);
+
+  if (client.accounts.length) {
+    parts.push(`${client.accounts.length} account${client.accounts.length === 1 ? "" : "s"}`);
+    parts.push(`${client.activeCampaigns} live campaign${client.activeCampaigns === 1 ? "" : "s"}`);
+    if (includeAds) parts.push(`${client.liveAds} live ad${client.liveAds === 1 ? "" : "s"}`);
+    return parts.join(" | ");
+  }
+
+  if (client.linkedAssetCount) {
+    parts.push(`${client.linkedAssetCount} linked asset${client.linkedAssetCount === 1 ? "" : "s"}`);
+    parts.push(client.syncingPlatforms?.length ? "syncing live data" : "waiting for live data");
+    return parts.join(" | ");
+  }
+
+  parts.push("no linked assets yet");
+  return parts.join(" | ");
+}
+
+function getClientLiveDataMessage(client) {
+  const linkedAssetCount = client.linkedAssetCount || 0;
+  if (!linkedAssetCount) return "";
+
+  const platformLabels = formatInlineList(
+    (client.syncingPlatforms?.length ? client.syncingPlatforms : getClientLinkedPlatforms(client))
+      .map((platform) => PLATFORM_META[platform]?.label || platform)
+      .filter(Boolean)
+  );
+  const assetLabel = `${linkedAssetCount} linked asset${linkedAssetCount === 1 ? "" : "s"}`;
+  const verb = linkedAssetCount === 1 ? "is" : "are";
+
+  if (client.syncingPlatforms?.length) {
+    return `${assetLabel} ${verb} syncing${platformLabels ? ` from ${platformLabels}` : ""}. The client board will fill in as live data arrives.`;
+  }
+
+  return `${assetLabel} ${verb} connected${platformLabels ? ` from ${platformLabels}` : ""}, but no live rows have arrived yet for this date range.`;
+}
+
+function LiveDataCue({ client, compact = false }) {
+  const message = getClientLiveDataMessage(client);
+  if (!message) return null;
+
+  if (compact) {
+    return (
+      <ActionCue tone="info">
+        {client.syncingPlatforms?.length
+          ? `${client.linkedAssetCount} linked asset${client.linkedAssetCount === 1 ? "" : "s"} syncing`
+          : `${client.linkedAssetCount} linked asset${client.linkedAssetCount === 1 ? "" : "s"} connected`}
+      </ActionCue>
+    );
+  }
+
+  return (
+    <div style={{ padding: "16px 16px", borderRadius: 16, background: "rgba(45, 108, 223, 0.08)", border: "1px solid rgba(45, 108, 223, 0.14)" }}>
+      <div style={{ fontSize: 13, fontWeight: 800, color: T.sky }}>
+        {client.syncingPlatforms?.length ? "Live data is syncing" : "Linked assets are ready"}
+      </div>
+      <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>{message}</div>
     </div>
   );
 }
@@ -2890,6 +2973,9 @@ function KpiSelector({ selected, onChange, available }) {
 }
 
 function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
+  const noConnections = Object.values(client.connections).every((value) => !value);
+  const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
+
   return (
     <div
       style={{
@@ -2911,12 +2997,13 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
               <CategoryChip category={client.category} />
             </div>
             <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft }}>
-              {client.focus} | {client.accounts.length} accounts | {client.activeCampaigns} live campaigns
+              {getClientSummaryText(client)}
             </div>
             <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
               {Object.keys(client.connections).filter((platform) => client.connections[platform]).map((platform) => (
                 <PlatformChip key={platform} platform={platform} />
               ))}
+              {client.accounts.length > 0 && client.syncingPlatforms?.length ? <LiveDataCue client={client} compact /> : null}
             </div>
           </div>
         </div>
@@ -2933,21 +3020,27 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
         <MetricTile label={client.category === "eshop" ? "Revenue" : "Conversions"} value={client.category === "eshop" ? formatCurrency(client.ga4?.revenueCurrentPeriod || 0) : formatNumber(client.conversions)} subValue={client.category === "eshop" ? CALENDAR.revenueRangeLabel : "Client-level conversion volume"} />
       </div>
 
-      <div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Budget pace</div>
-          <div style={{ fontSize: 11, color: T.inkSoft }}>{CALENDAR.spendRangeLabel}</div>
-        </div>
-        <ProgressRail current={client.spend} target={client.totalBudget * CALENDAR.spendProgress} />
-      </div>
+      {!awaitingLiveData ? (
+        <>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Budget pace</div>
+              <div style={{ fontSize: 11, color: T.inkSoft }}>{CALENDAR.spendRangeLabel}</div>
+            </div>
+            <ProgressRail current={client.spend} target={client.totalBudget * CALENDAR.spendProgress} />
+          </div>
 
-      <AlertList health={client.health} />
+          <AlertList health={client.health} />
+        </>
+      ) : null}
 
-      {Object.values(client.connections).every((v) => !v) ? (
+      {noConnections ? (
         <div style={{ padding: "18px 16px", borderRadius: 16, background: T.amberSoft, border: `1px solid ${T.amber}22`, textAlign: "center" }}>
           <div style={{ fontSize: 13, fontWeight: 800, color: T.amber }}>No accounts linked</div>
           <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft }}>Connect this client's ad accounts in Client Studio to see live data.</div>
         </div>
+      ) : client.linkedAssetCount && !client.accounts.length ? (
+        <LiveDataCue client={client} />
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
           {client.accounts.slice(0, 3).map((account) => (
@@ -2995,6 +3088,9 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
 }
 
 function OverviewRow({ client, users, onOpenAccounts, onEdit }) {
+  const noConnections = Object.values(client.connections).every((value) => !value);
+  const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
+
   return (
     <div
       style={{
@@ -3017,12 +3113,13 @@ function OverviewRow({ client, users, onOpenAccounts, onEdit }) {
               <StatusPill ok={client.health.ok} />
             </div>
             <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft }}>
-              {client.focus} | {client.accounts.length} accounts | {client.activeCampaigns} live campaigns | {client.liveAds} live ads
+              {getClientSummaryText(client, { includeAds: true })}
             </div>
             <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
               {Object.keys(client.connections).filter((platform) => client.connections[platform]).map((platform) => (
                 <PlatformChip key={platform} platform={platform} />
               ))}
+              {client.accounts.length > 0 && client.syncingPlatforms?.length ? <LiveDataCue client={client} compact /> : null}
             </div>
           </div>
         </div>
@@ -3036,17 +3133,19 @@ function OverviewRow({ client, users, onOpenAccounts, onEdit }) {
         </div>
       </div>
 
-      {!Object.values(client.connections).every((v) => !v) && (
+      {!noConnections && !awaitingLiveData && (
         <ProgressRail current={client.spend} target={client.totalBudget * CALENDAR.spendProgress} />
       )}
 
       <AssignedUsersStrip client={client} users={users} />
 
-      {Object.values(client.connections).every((v) => !v) ? (
+      {noConnections ? (
         <div style={{ padding: "14px 16px", borderRadius: 14, background: T.amberSoft, border: `1px solid ${T.amber}22` }}>
           <div style={{ fontSize: 12, fontWeight: 800, color: T.amber }}>No accounts linked</div>
           <div style={{ marginTop: 3, fontSize: 11, color: T.inkSoft }}>Connect this client's ad accounts in Client Studio to see live data.</div>
         </div>
+      ) : client.linkedAssetCount && !client.accounts.length ? (
+        <LiveDataCue client={client} />
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
           {(client.health.ok ? [{ label: "Healthy", detail: "No red flags triggered for this client." }] : client.health.flags).slice(0, 2).map((flag) => (
@@ -3089,6 +3188,8 @@ function campaignMatchesStatusFilter(campaign, filter) {
 function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
   const [campaignFilter, setCampaignFilter] = useState("all");
   const filterMeta = CAMPAIGN_STATUS_FILTERS.find((option) => option.id === campaignFilter) || CAMPAIGN_STATUS_FILTERS[2];
+  const noConnections = Object.values(client.connections).every((value) => !value);
+  const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
   const groupedCampaigns = useMemo(
     () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, ads.filter((ad) => ad.campaignId === campaign.id)])),
     [ads, campaigns]
@@ -3138,7 +3239,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
                 <StatusPill ok={client.health.ok} />
               </div>
               <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft }}>
-                {client.accounts.length} connected accounts | {client.activeCampaigns} active campaigns | {client.liveAds} live ads
+                {getClientSummaryText(client, { includeAds: true })}
               </div>
             </div>
           </div>
@@ -3146,7 +3247,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
             <MetricTile label="Budget" value={formatCurrency(client.totalBudget)} />
             <MetricTile label="Spend" value={formatCurrency(client.spend)} />
             <MetricTile label="Conv. Value" value={formatCurrency(client.conversionValue)} />
-            <MetricTile label="Accounts" value={client.accounts.length} />
+            <MetricTile label={client.accounts.length ? "Accounts" : "Linked Assets"} value={client.accounts.length || client.linkedAssetCount} />
             <MetricTile label={open[client.id] ? "Collapse" : "Expand"} value={open[client.id] ? "-" : "+"} />
           </div>
         </div>
@@ -3159,12 +3260,13 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
               {Object.keys(client.connections).filter((platform) => client.connections[platform]).map((platform) => (
                 <PlatformChip key={platform} platform={platform} />
               ))}
+              {client.syncingPlatforms?.length ? <LiveDataCue client={client} compact /> : null}
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {!Object.values(client.connections).every((v) => !v) && (
+              {!noConnections && !awaitingLiveData && (
                 <ToneBadge tone={client.health.ok ? "positive" : "danger"}>{client.health.ok ? "All checks passed" : `${client.health.flags.length} issue${client.health.flags.length === 1 ? "" : "s"}`}</ToneBadge>
               )}
-              <ToneBadge tone="neutral">{client.accounts.length} accounts</ToneBadge>
+              <ToneBadge tone="neutral">{client.accounts.length || client.linkedAssetCount} {client.accounts.length ? "accounts" : "linked assets"}</ToneBadge>
               <ToneBadge tone="neutral">{client.activeCampaigns} active campaigns</ToneBadge>
               {campaignFilter !== "all" ? <ToneBadge tone="neutral">{visibleCampaigns.length} shown</ToneBadge> : null}
             </div>
@@ -3203,11 +3305,13 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
             </div>
           </div>
 
-          {Object.values(client.connections).every((v) => !v) ? (
+          {noConnections ? (
             <div style={{ padding: "20px 16px", borderRadius: 16, background: T.amberSoft, border: `1px solid ${T.amber}22`, textAlign: "center" }}>
               <div style={{ fontSize: 13, fontWeight: 800, color: T.amber }}>No accounts linked for this client</div>
               <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>Go to Client Studio and link ad accounts from your connected OAuth sessions to populate live data here.</div>
             </div>
+          ) : awaitingLiveData ? (
+            <LiveDataCue client={client} />
           ) : (
             <>
               <AlertList health={client.health} />
@@ -3218,8 +3322,14 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
           <div style={{ display: "grid", gap: 12 }}>
             {visibleAccounts.length === 0 ? (
               <div style={{ padding: "18px 16px", borderRadius: 16, background: T.bgSoft, border: `1px dashed ${T.lineStrong}`, textAlign: "center" }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{filterMeta.emptyTitle}</div>
-                <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>{filterMeta.emptyBody}</div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>
+                  {client.linkedAssetCount && !client.accounts.length ? "Waiting for live account rows" : filterMeta.emptyTitle}
+                </div>
+                <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>
+                  {client.linkedAssetCount && !client.accounts.length
+                    ? "The linked assets are saved. This section will populate as soon as the connected platforms return live account data."
+                    : filterMeta.emptyBody}
+                </div>
               </div>
             ) : visibleAccounts.map((account) => {
               const accountCampaigns = campaigns.filter((campaign) => campaign.accountId === account.id);
@@ -4737,7 +4847,10 @@ function AccountDateRangeControl({ value, onChange }) {
 
 function ClientStudio({ clients, accounts, users, providerProfiles, selectedClientId, setSelectedClientId, draft, setDraft, onSave, onCreateClient, onDeleteClient, layoutColumns, canManageAssignments, canEditCoreSettings, onOpenConnections, state }) {
   const logoInputRef = useRef(null);
+  const saveButtonRef = useRef(null);
+  const seenSaveTokenRef = useRef("");
   const [logoError, setLogoError] = useState("");
+  const [saveCelebrating, setSaveCelebrating] = useState(false);
 
   if (!draft) {
     return (
@@ -4861,6 +4974,25 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
     reader.readAsDataURL(file);
   };
 
+  useEffect(() => {
+    if (!state?.lastSavedToken || state.lastSavedToken === seenSaveTokenRef.current) return undefined;
+    if (state.lastSavedClientId !== draft.id) return undefined;
+
+    seenSaveTokenRef.current = state.lastSavedToken;
+    setSaveCelebrating(true);
+    saveButtonRef.current?.animate?.([
+      { transform: "translateY(0) scale(1)", boxShadow: "0 0 0 rgba(15, 143, 102, 0)" },
+      { transform: "translateY(-2px) scale(1.06)", boxShadow: "0 18px 34px rgba(15, 143, 102, 0.24)" },
+      { transform: "translateY(0) scale(1)", boxShadow: "0 0 0 rgba(15, 143, 102, 0)" },
+    ], {
+      duration: 760,
+      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+    });
+
+    const timer = window.setTimeout(() => setSaveCelebrating(false), 1100);
+    return () => window.clearTimeout(timer);
+  }, [draft.id, state?.lastSavedClientId, state?.lastSavedToken]);
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: layoutColumns, gap: 18 }}>
       <div
@@ -4947,8 +5079,8 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
                   {state?.savingKey === `delete:${draft.id}` ? "Deleting..." : "Delete client"}
                 </Button>
               ) : null}
-              <Button onClick={onSave} tone="primary" disabled={state?.savingKey === draft.id}>
-                {state?.savingKey === draft.id ? "Saving..." : canEditCoreSettings ? "Save client" : "Save settings"}
+              <Button onClick={onSave} tone={saveCelebrating ? "success" : "primary"} disabled={state?.savingKey === draft.id} buttonRef={saveButtonRef} emphasize={saveCelebrating}>
+                {state?.savingKey === draft.id ? "Saving..." : saveCelebrating ? "Saved" : canEditCoreSettings ? "Save client" : "Save settings"}
               </Button>
               <StatusPill ok={Object.values(draft.connections).filter(Boolean).length > 1} label="Connection stack" />
             </div>
@@ -7020,18 +7152,29 @@ export default function AdPulse() {
       const liveMetaCampaigns = metaAdsLiveState.campaigns.filter((campaign) => campaign.clientId === client.id);
       const liveMetaAds = metaAdsLiveState.ads.filter((ad) => ad.clientId === client.id);
       const liveGa4Reports = ga4LiveState.properties.filter((property) => property.clientId === client.id);
-      const hasLinkedGoogleAssets = Boolean(client.linkedAssets?.google_ads?.length);
-      const hasLinkedMetaAssets = Boolean(client.linkedAssets?.meta_ads?.length);
-      const hasLinkedGa4Assets = Boolean(client.linkedAssets?.ga4?.length);
-      const useLiveGoogle = hasLinkedGoogleAssets && Boolean(googleAdsLiveState.loading || googleAdsLiveState.generatedAt || googleAdsLiveState.error);
-      const useLiveMeta = hasLinkedMetaAssets && Boolean(metaAdsLiveState.loading || metaAdsLiveState.generatedAt || metaAdsLiveState.error);
-      const useLiveGa4 = hasLinkedGa4Assets && Boolean(ga4LiveState.loading || ga4LiveState.generatedAt || ga4LiveState.error);
+      const linkedAssetCounts = {
+        google_ads: Array.isArray(client.linkedAssets?.google_ads) ? client.linkedAssets.google_ads.length : 0,
+        meta_ads: Array.isArray(client.linkedAssets?.meta_ads) ? client.linkedAssets.meta_ads.length : 0,
+        ga4: Array.isArray(client.linkedAssets?.ga4) ? client.linkedAssets.ga4.length : 0,
+      };
+      const hasLinkedGoogleAssets = linkedAssetCounts.google_ads > 0;
+      const hasLinkedMetaAssets = linkedAssetCounts.meta_ads > 0;
+      const hasLinkedGa4Assets = linkedAssetCounts.ga4 > 0;
+      const hasStoredLinkedAssets = hasLinkedGoogleAssets || hasLinkedMetaAssets || hasLinkedGa4Assets;
+      const useLiveGoogle = hasLinkedGoogleAssets;
+      const useLiveMeta = hasLinkedMetaAssets;
+      const useLiveGa4 = hasLinkedGa4Assets;
+      const syncingPlatforms = [
+        hasLinkedGoogleAssets && googleAdsLiveState.loading ? "google_ads" : "",
+        hasLinkedMetaAssets && metaAdsLiveState.loading ? "meta_ads" : "",
+        hasLinkedGa4Assets && ga4LiveState.loading ? "ga4" : "",
+      ].filter(Boolean);
 
       // Effective connections: real-linked when OAuth connections exist, otherwise demo toggles
       const effectiveConnections = {
-        google_ads: hasAnyProviders ? hasLinkedGoogleAssets : client.connections.google_ads,
-        meta_ads: hasAnyProviders ? hasLinkedMetaAssets : client.connections.meta_ads,
-        ga4: hasAnyProviders ? hasLinkedGa4Assets : client.connections.ga4,
+        google_ads: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedGoogleAssets : client.connections.google_ads,
+        meta_ads: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedMetaAssets : client.connections.meta_ads,
+        ga4: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedGa4Assets : client.connections.ga4,
       };
 
       const visibleAccounts = [
@@ -7064,14 +7207,17 @@ export default function AdPulse() {
       const activeCampaigns = visibleCampaigns.filter((campaign) => campaign.status !== "stopped").length;
       const stoppedCampaigns = visibleCampaigns.filter((campaign) => campaign.status === "stopped").length;
       const liveAds = visibleAds.filter((ad) => ad.status === "live" || ad.status === "learning").length;
-      const health = evaluateHealth({
-        ...client,
-        budgets: {
-          ...client.budgets,
-          google_ads: googleBudget,
-          meta_ads: metaBudget,
-        },
-      }, visibleAccounts, visibleCampaigns, ga4);
+      const shouldPauseHealthChecks = (effectiveConnections.google_ads || effectiveConnections.meta_ads) && visibleAccounts.length === 0;
+      const health = shouldPauseHealthChecks
+        ? { ok: true, flags: [], score: 0 }
+        : evaluateHealth({
+          ...client,
+          budgets: {
+            ...client.budgets,
+            google_ads: googleBudget,
+            meta_ads: metaBudget,
+          },
+        }, visibleAccounts, visibleCampaigns, ga4);
 
       return {
         ...client,
@@ -7080,6 +7226,9 @@ export default function AdPulse() {
         campaigns: visibleCampaigns,
         ads: visibleAds,
         ga4,
+        linkedAssetCounts,
+        linkedAssetCount: Object.values(linkedAssetCounts).reduce((acc, count) => acc + count, 0),
+        syncingPlatforms,
         spend,
         clicks,
         impressions,
@@ -7095,7 +7244,7 @@ export default function AdPulse() {
         health,
       };
     });
-  }, [accessibleClients, ga4LiveState, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.error, googleAdsLiveState.generatedAt, googleAdsLiveState.loading, metaAdsLiveState.accounts, metaAdsLiveState.ads, metaAdsLiveState.campaigns, metaAdsLiveState.error, metaAdsLiveState.generatedAt, metaAdsLiveState.loading, providerProfiles]);
+  }, [accessibleClients, ga4LiveState, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.loading, metaAdsLiveState.accounts, metaAdsLiveState.ads, metaAdsLiveState.campaigns, metaAdsLiveState.loading, providerProfiles]);
 
   const filteredClients = useMemo(() => {
     let list = enriched;
@@ -7377,12 +7526,23 @@ export default function AdPulse() {
       };
     }
 
+    const optimisticClient = hydrateClients([nextClient])[0] || nextClient;
+    mergeClientRecord(optimisticClient);
+    setStudioDraft(optimisticClient);
+
     try {
-      const payload = await saveClientRecord(nextClient.id, nextClient);
-      const savedClient = payload?.client ? hydrateClients([payload.client])[0] : nextClient;
+      const payload = await saveClientRecord(optimisticClient.id, optimisticClient);
+      const savedClient = payload?.client ? hydrateClients([payload.client])[0] : optimisticClient;
       mergeClientRecord(savedClient);
       setStudioDraft(savedClient);
-      setClientDirectoryState((current) => ({ ...current, savingKey: "", error: "", notice: `${savedClient.name} saved.` }));
+      setClientDirectoryState((current) => ({
+        ...current,
+        savingKey: "",
+        error: "",
+        notice: `${savedClient.name} saved.`,
+        lastSavedToken: `${savedClient.id}:${Date.now()}`,
+        lastSavedClientId: savedClient.id,
+      }));
       pushToast(`${savedClient.name} saved successfully.`, "success", "Clients");
     } catch (error) {
       setClientDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not save the client.", notice: "" }));
