@@ -3202,6 +3202,38 @@ function formatReportPercent(value) {
   return `${Number(value || 0).toFixed(2)}%`;
 }
 
+function buildChartTicks(max, steps = 4, fixedMax = null) {
+  const safeMax = fixedMax == null ? Math.max(Number(max) || 0, 1) : Math.max(Number(fixedMax) || 0, 1);
+  const digits = safeMax <= 5 ? 2 : safeMax <= 25 ? 1 : 0;
+
+  return Array.from({ length: steps + 1 }, (_, index) => +(safeMax * index / steps).toFixed(digits));
+}
+
+function formatChartAxisValue(value, axisType = "number") {
+  const numeric = Number(value || 0);
+
+  if (axisType === "currency") {
+    return formatReportCurrency(numeric, Math.abs(numeric) >= 100 ? 0 : 2);
+  }
+
+  if (axisType === "percent") {
+    return `${numeric.toFixed(Math.abs(numeric) >= 10 ? 0 : 1)}%`;
+  }
+
+  return formatReportNumber(numeric, Math.abs(numeric) < 10 ? 1 : 0);
+}
+
+function getSeriesAxisLabels(series) {
+  const items = Array.isArray(series) ? series : [];
+  if (!items.length) return [];
+
+  const indices = Array.from(new Set([0, Math.floor((items.length - 1) / 2), items.length - 1]));
+  return indices.map((index) => ({
+    index,
+    label: String(items[index]?.label || items[index]?.date || `Point ${index + 1}`),
+  }));
+}
+
 function escapeHtml(value) {
   return String(value || "")
     .replaceAll("&", "&amp;")
@@ -3650,8 +3682,14 @@ function ReportChannelOverview({ title, platform, summary, series, campaigns, em
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-            <ReportLineChart title={platform === "meta_ads" ? "Click Performance" : "Conversion Performance"} series={series} metric={platform === "meta_ads" ? "clicks" : "conversions"} color={accent} />
-            <ReportBarChart title="Top campaigns by spend" items={campaignBars} color={accent} />
+            <ReportLineChart
+              title={platform === "meta_ads" ? "Click Performance" : "Conversion Performance"}
+              series={series}
+              metric={platform === "meta_ads" ? "clicks" : "conversions"}
+              color={accent}
+              axisType="number"
+            />
+            <ReportBarChart title="Top campaigns by spend" items={campaignBars} color={accent} axisType="currency" />
           </div>
         </div>
       )}
@@ -3683,6 +3721,7 @@ function ReportCampaignTablePage({ title, platform, campaigns, emptyLabel }) {
 
 function ReportGoogleGeographyPage({ details, loading }) {
   const rows = details?.geographies || [];
+  const geographyError = (details?.errors || []).find((error) => /geo|location/i.test(String(error)));
 
   return (
     <ReportPage accent={PLATFORM_META.google_ads.color}>
@@ -3696,7 +3735,7 @@ function ReportGoogleGeographyPage({ details, loading }) {
           { label: "Total Conversion Value", align: "right", render: (row) => formatReportCurrency(row.conversionValue) },
         ]}
         rows={rows.slice(0, 12)}
-        emptyLabel={loading ? "Loading geographic performance..." : "Geographic performance is unavailable for the selected Google Ads account."}
+        emptyLabel={loading ? "Loading geographic performance..." : geographyError || "No geographic rows were returned by Google Ads for the selected account and date range."}
       />
     </ReportPage>
   );
@@ -3710,7 +3749,7 @@ function ReportGoogleDevicePage({ details, loading }) {
     <ReportPage accent={PLATFORM_META.google_ads.color}>
       <ReportHeader title="Device Performance" platform="google_ads" />
       <div style={{ display: "grid", gridTemplateColumns: "0.85fr 1.15fr", gap: 18 }}>
-        <ReportBarChart title="Conversions by device" items={bars} color={PLATFORM_META.google_ads.color} />
+        <ReportBarChart title="Conversions by device" items={bars} color={PLATFORM_META.google_ads.color} axisType="number" />
         <ReportTable
           columns={[
             { label: "Device", render: (row) => row.device },
@@ -3743,6 +3782,7 @@ function ReportGoogleImpressionSharePage({ details, loading }) {
           secondaryLabel="Search Budget Lost IS"
           primaryColor={PLATFORM_META.google_ads.color}
           secondaryColor={T.amber}
+          axisType="percent"
         />
       ) : (
         <div style={{ padding: 24, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, color: T.inkSoft }}>
@@ -3812,7 +3852,7 @@ function ReportAnalyticsPage({ client, ga4 }) {
           <ReportKpiTile label="Conv. Rate" value={formatReportPercent(ga4.conversionRate)} />
           <ReportKpiTile label={client.category === "eshop" ? "Revenue" : "Leads"} value={client.category === "eshop" ? formatReportCurrency(ga4.revenueCurrentPeriod) : formatReportNumber(ga4.purchasesOrLeads, 2)} />
         </div>
-        <ReportBarChart title="Traffic mix" items={channels} color={PLATFORM_META.ga4.color} />
+        <ReportBarChart title="Traffic mix" items={channels} color={PLATFORM_META.ga4.color} axisType="percent" />
       </div>
     </ReportPage>
   );
@@ -3847,15 +3887,22 @@ function ReportDefinitionsPage() {
   );
 }
 
-function ReportLineChart({ title, series, metric, color }) {
+function ReportLineChart({ title, series, metric, color, axisType = "number" }) {
   const values = (series || []).map((point) => Number(point[metric]) || 0);
   const width = 520;
   const height = 230;
-  const pad = 28;
+  const padLeft = axisType === "currency" ? 82 : 54;
+  const padRight = 20;
+  const padTop = 16;
+  const padBottom = 34;
   const max = Math.max(...values, 1);
+  const ticks = buildChartTicks(max);
+  const axisLabels = getSeriesAxisLabels(series);
+  const chartWidth = width - padLeft - padRight;
+  const chartHeight = height - padTop - padBottom;
   const points = values.map((value, index) => ({
-    x: pad + (index / Math.max(values.length - 1, 1)) * (width - pad * 2),
-    y: height - pad - (value / max) * (height - pad * 2),
+    x: padLeft + (index / Math.max(values.length - 1, 1)) * chartWidth,
+    y: height - padBottom - (value / max) * chartHeight,
   }));
   const path = points.length ? points.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ") : "";
 
@@ -3863,27 +3910,52 @@ function ReportLineChart({ title, series, metric, color }) {
     <div style={{ padding: 18, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}` }}>
       <div style={{ fontSize: 15, fontWeight: 800, fontFamily: T.heading, marginBottom: 12 }}>{title}</div>
       <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", display: "block" }}>
-        <line x1={pad} x2={width - pad} y1={height - pad} y2={height - pad} stroke="rgba(22,34,24,0.12)" />
-        <line x1={pad} x2={pad} y1={pad} y2={height - pad} stroke="rgba(22,34,24,0.12)" />
+        {ticks.map((tick) => {
+          const y = height - padBottom - (tick / max) * chartHeight;
+          return (
+            <g key={tick}>
+              <line x1={padLeft} x2={width - padRight} y1={y} y2={y} stroke="rgba(22,34,24,0.08)" />
+              <text x={padLeft - 10} y={y + 4} textAnchor="end" fontSize="10" fill={T.inkSoft}>
+                {formatChartAxisValue(tick, axisType)}
+              </text>
+            </g>
+          );
+        })}
+        <line x1={padLeft} x2={width - padRight} y1={height - padBottom} y2={height - padBottom} stroke="rgba(22,34,24,0.12)" />
+        <line x1={padLeft} x2={padLeft} y1={padTop} y2={height - padBottom} stroke="rgba(22,34,24,0.12)" />
         <path d={path} fill="none" stroke={color} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
         {points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r="3.8" fill={color} />)}
-        <text x={pad} y={height - 8} fontSize="11" fill={T.inkSoft}>Start</text>
-        <text x={width - pad} y={height - 8} fontSize="11" fill={T.inkSoft} textAnchor="end">End</text>
+        {axisLabels.map(({ index, label }) => {
+          const x = padLeft + (index / Math.max(values.length - 1, 1)) * chartWidth;
+          return (
+            <text key={`${title}-${index}`} x={x} y={height - 8} fontSize="10" fill={T.inkSoft} textAnchor={index === 0 ? "start" : index === values.length - 1 ? "end" : "middle"}>
+              {label}
+            </text>
+          );
+        })}
       </svg>
     </div>
   );
 }
 
-function ReportDualLineChart({ title, series, primaryMetric, secondaryMetric, primaryLabel, secondaryLabel, primaryColor, secondaryColor }) {
+function ReportDualLineChart({ title, series, primaryMetric, secondaryMetric, primaryLabel, secondaryLabel, primaryColor, secondaryColor, axisType = "number" }) {
   const width = 980;
   const height = 420;
-  const pad = 42;
+  const padLeft = axisType === "currency" ? 86 : 58;
+  const padRight = 28;
+  const padTop = 20;
+  const padBottom = 36;
   const values = (series || []).flatMap((point) => [Number(point[primaryMetric]) || 0, Number(point[secondaryMetric]) || 0]);
   const max = Math.max(...values, 1);
+  const axisMax = axisType === "percent" ? 100 : max;
+  const ticks = buildChartTicks(axisMax, 4, axisType === "percent" ? 100 : null);
+  const axisLabels = getSeriesAxisLabels(series);
+  const chartWidth = width - padLeft - padRight;
+  const chartHeight = height - padTop - padBottom;
   const buildPath = (metric) => (series || []).map((point, index) => {
     const value = Number(point[metric]) || 0;
-    const x = pad + (index / Math.max(series.length - 1, 1)) * (width - pad * 2);
-    const y = height - pad - (value / max) * (height - pad * 2);
+    const x = padLeft + (index / Math.max(series.length - 1, 1)) * chartWidth;
+    const y = height - padBottom - (value / axisMax) * chartHeight;
     return { x, y };
   });
   const primaryPoints = buildPath(primaryMetric);
@@ -3900,12 +3972,14 @@ function ReportDualLineChart({ title, series, primaryMetric, secondaryMetric, pr
         </div>
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", display: "block" }}>
-        {[0, 25, 50, 75, 100].map((tick) => {
-          const y = height - pad - (tick / Math.max(max, 100)) * (height - pad * 2);
+        {ticks.map((tick) => {
+          const y = height - padBottom - (tick / axisMax) * chartHeight;
           return (
             <g key={tick}>
-              <line x1={pad} x2={width - pad} y1={y} y2={y} stroke="rgba(22,34,24,0.08)" />
-              <text x={pad - 10} y={y + 4} textAnchor="end" fontSize="10" fill={T.inkSoft}>{tick}</text>
+              <line x1={padLeft} x2={width - padRight} y1={y} y2={y} stroke="rgba(22,34,24,0.08)" />
+              <text x={padLeft - 10} y={y + 4} textAnchor="end" fontSize="10" fill={T.inkSoft}>
+                {formatChartAxisValue(tick, axisType)}
+              </text>
             </g>
           );
         })}
@@ -3913,31 +3987,68 @@ function ReportDualLineChart({ title, series, primaryMetric, secondaryMetric, pr
         <path d={toPath(secondaryPoints)} fill="none" stroke={secondaryColor} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
         {primaryPoints.map((point, index) => <circle key={`p-${index}`} cx={point.x} cy={point.y} r="3.6" fill={primaryColor} />)}
         {secondaryPoints.map((point, index) => <circle key={`s-${index}`} cx={point.x} cy={point.y} r="3.6" fill={secondaryColor} />)}
-        <text x={pad} y={height - 10} fontSize="11" fill={T.inkSoft}>Start</text>
-        <text x={width - pad} y={height - 10} fontSize="11" fill={T.inkSoft} textAnchor="end">End</text>
+        {axisLabels.map(({ index, label }) => {
+          const x = padLeft + (index / Math.max(series.length - 1, 1)) * chartWidth;
+          return (
+            <text key={`${title}-${index}`} x={x} y={height - 10} fontSize="10" fill={T.inkSoft} textAnchor={index === 0 ? "start" : index === series.length - 1 ? "end" : "middle"}>
+              {label}
+            </text>
+          );
+        })}
       </svg>
     </div>
   );
 }
 
-function ReportBarChart({ title, items, color }) {
+function ReportBarChart({ title, items, color, axisType = "number" }) {
   const rows = (items || []).filter((item) => Number(item.value) > 0).slice(0, 8);
   const max = Math.max(...rows.map((item) => Number(item.value) || 0), 1);
+  const axisMax = axisType === "percent" ? 100 : max;
+  const ticks = buildChartTicks(axisMax, 4, axisType === "percent" ? 100 : null);
 
   return (
     <div style={{ padding: 18, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
       <div style={{ fontSize: 15, fontWeight: 800, fontFamily: T.heading }}>{title}</div>
-      {rows.length ? rows.map((item) => (
-        <div key={item.label} style={{ display: "grid", gap: 5 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11 }}>
-            <span style={{ color: T.ink, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
-            <span style={{ color: T.inkSoft, fontFamily: T.mono }}>{formatReportNumber(item.value, item.value < 100 ? 1 : 0)}</span>
+      {rows.length ? (
+        <>
+          {rows.map((item) => {
+            const value = Number(item.value) || 0;
+            const width = axisMax ? value / axisMax * 100 : 0;
+
+            return (
+              <div key={item.label} style={{ display: "grid", gap: 5 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11 }}>
+                  <span style={{ color: T.ink, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
+                  <span style={{ color: T.inkSoft, fontFamily: T.mono }}>{formatChartAxisValue(value, axisType)}</span>
+                </div>
+                <div style={{ position: "relative", height: 12, borderRadius: 999, background: "rgba(22,34,24,0.08)", overflow: "hidden" }}>
+                  {ticks.slice(1, -1).map((tick) => (
+                    <div
+                      key={`${item.label}-${tick}`}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        bottom: 0,
+                        left: `${tick / axisMax * 100}%`,
+                        width: 1,
+                        background: "rgba(22,34,24,0.12)",
+                      }}
+                    />
+                  ))}
+                  <div style={{ height: "100%", width: `${Math.max(4, width)}%`, borderRadius: 999, background: color }} />
+                </div>
+              </div>
+            );
+          })}
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${ticks.length}, minmax(0, 1fr))`, gap: 6, fontSize: 10, color: T.inkSoft, fontFamily: T.mono }}>
+            {ticks.map((tick, index) => (
+              <div key={`${title}-tick-${tick}`} style={{ textAlign: index === 0 ? "left" : index === ticks.length - 1 ? "right" : "center" }}>
+                {formatChartAxisValue(tick, axisType)}
+              </div>
+            ))}
           </div>
-          <div style={{ height: 10, borderRadius: 999, background: "rgba(22,34,24,0.08)", overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${Math.max(4, (Number(item.value) || 0) / max * 100)}%`, borderRadius: 999, background: color }} />
-          </div>
-        </div>
-      )) : (
+        </>
+      ) : (
         <div style={{ padding: 18, borderRadius: 18, background: T.bgSoft, color: T.inkSoft, fontSize: 12 }}>No chart data available.</div>
       )}
     </div>

@@ -1602,7 +1602,9 @@ async function fetchGoogleAdsLiveOverview(payload) {
       impressions: toNumber(report?.account?.impressions),
       clicks: toNumber(report?.account?.clicks),
       conversions: toNumber(report?.account?.conversions),
+      allConversions: toNumber(report?.account?.allConversions),
       conversionValue: toNumber(report?.account?.conversionValue),
+      allConversionValue: toNumber(report?.account?.allConversionValue),
       ctr: toNumber(report?.account?.ctr),
       cpc: toNumber(report?.account?.cpc),
       cpm: toNumber(report?.account?.cpm),
@@ -1633,7 +1635,9 @@ async function fetchGoogleAdsLiveOverview(payload) {
         impressions: campaign.impressions,
         clicks: campaign.clicks,
         conversions: campaign.conversions,
+        allConversions: campaign.allConversions,
         conversionValue: campaign.conversionValue,
+        allConversionValue: campaign.allConversionValue,
         cpc: campaign.cpc,
         cpm: campaign.cpm,
         channelType: campaign.channelType,
@@ -1660,7 +1664,9 @@ async function fetchGoogleAdsLiveOverview(payload) {
         clicks: ad.clicks,
         impressions: ad.impressions,
         conversions: ad.conversions,
+        allConversions: ad.allConversions,
         conversionValue: ad.conversionValue,
+        allConversionValue: ad.allConversionValue,
         ctr: ad.ctr,
         requestKey: request.key,
         connectionId: request.connectionId,
@@ -2353,8 +2359,20 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
     asset,
   });
   const errors = [];
+  let accountSummary = null;
   let campaignMetricsResponse = null;
   let adMetricsResponse = null;
+
+  try {
+    accountSummary = await fetchGoogleAdsAccountSummary({
+      customerId,
+      tokenBundle,
+      loginCustomerIds,
+      dateRange,
+    });
+  } catch (error) {
+    errors.push(error.message || `Could not fetch account totals for ${customerId}.`);
+  }
 
   try {
     campaignMetricsResponse = await fetchGoogleAdsRowsWithLoginFallback({
@@ -2372,7 +2390,9 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
         "  metrics.impressions,",
         "  metrics.clicks,",
         "  metrics.conversions,",
+        "  metrics.all_conversions,",
         "  metrics.conversions_value,",
+        "  metrics.all_conversions_value,",
         "  metrics.cost_micros",
         "FROM campaign",
         "WHERE campaign.status != REMOVED",
@@ -2403,7 +2423,9 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
         "  metrics.impressions,",
         "  metrics.clicks,",
         "  metrics.conversions,",
+        "  metrics.all_conversions,",
         "  metrics.conversions_value,",
+        "  metrics.all_conversions_value,",
         "  metrics.cost_micros",
         "FROM ad_group_ad",
         "WHERE ad_group_ad.status != REMOVED",
@@ -2453,14 +2475,18 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
       impressions: 0,
       clicks: 0,
       conversions: 0,
+      allConversions: 0,
       conversionValue: 0,
+      allConversionValue: 0,
     };
 
     current.spend += ad.spend;
     current.impressions += ad.impressions;
     current.clicks += ad.clicks;
     current.conversions += ad.conversions;
+    current.allConversions += ad.allConversions;
     current.conversionValue += ad.conversionValue;
+    current.allConversionValue += ad.allConversionValue;
     if (ad.status !== "paused") {
       current.status = "active";
     }
@@ -2488,11 +2514,20 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
     budgetKeys.add(budgetKey);
     return acc + dailyBudget * budgetDayCount;
   }, 0);
-  const spend = campaigns.reduce((acc, campaign) => acc + campaign.spend, 0);
-  const impressions = campaigns.reduce((acc, campaign) => acc + campaign.impressions, 0);
-  const clicks = campaigns.reduce((acc, campaign) => acc + campaign.clicks, 0);
-  const conversions = campaigns.reduce((acc, campaign) => acc + campaign.conversions, 0);
-  const conversionValue = campaigns.reduce((acc, campaign) => acc + campaign.conversionValue, 0);
+  const fallbackSpend = campaigns.reduce((acc, campaign) => acc + campaign.spend, 0);
+  const fallbackImpressions = campaigns.reduce((acc, campaign) => acc + campaign.impressions, 0);
+  const fallbackClicks = campaigns.reduce((acc, campaign) => acc + campaign.clicks, 0);
+  const fallbackConversions = campaigns.reduce((acc, campaign) => acc + campaign.conversions, 0);
+  const fallbackAllConversions = campaigns.reduce((acc, campaign) => acc + toNumber(campaign.allConversions), 0);
+  const fallbackConversionValue = campaigns.reduce((acc, campaign) => acc + campaign.conversionValue, 0);
+  const fallbackAllConversionValue = campaigns.reduce((acc, campaign) => acc + toNumber(campaign.allConversionValue), 0);
+  const spend = accountSummary ? toNumber(accountSummary.spend) : fallbackSpend;
+  const impressions = accountSummary ? toNumber(accountSummary.impressions) : fallbackImpressions;
+  const clicks = accountSummary ? toNumber(accountSummary.clicks) : fallbackClicks;
+  const conversions = accountSummary ? toNumber(accountSummary.conversions) : fallbackConversions;
+  const allConversions = accountSummary ? toNumber(accountSummary.allConversions) : fallbackAllConversions;
+  const conversionValue = accountSummary ? toNumber(accountSummary.conversionValue) : fallbackConversionValue;
+  const allConversionValue = accountSummary ? toNumber(accountSummary.allConversionValue) : fallbackAllConversionValue;
   const activeCampaigns = campaigns.filter((campaign) => campaign.status !== "stopped").length;
   const dataStatus = errors.length ? (campaigns.length || ads.length ? "partial" : "error") : "ready";
 
@@ -2509,7 +2544,9 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
       impressions,
       clicks,
       conversions: +conversions.toFixed(2),
+      allConversions: +allConversions.toFixed(2),
       conversionValue: +conversionValue.toFixed(2),
+      allConversionValue: +allConversionValue.toFixed(2),
       ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
       cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
       cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
@@ -2520,6 +2557,30 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
     campaigns,
     ads,
   };
+}
+
+async function fetchGoogleAdsAccountSummary({ customerId, tokenBundle, loginCustomerIds, dateRange }) {
+  const response = await fetchGoogleAdsRowsWithLoginFallback({
+    customerId,
+    tokenBundle,
+    loginCustomerIds,
+    query: [
+      "SELECT",
+      "  metrics.impressions,",
+      "  metrics.clicks,",
+      "  metrics.conversions,",
+      "  metrics.all_conversions,",
+      "  metrics.conversions_value,",
+      "  metrics.all_conversions_value,",
+      "  metrics.cost_micros",
+      "FROM customer",
+      getGoogleAdsDateWhereClause(dateRange),
+      "LIMIT 1",
+    ].join(" "),
+    label: `Google Ads account totals ${customerId}`,
+  });
+
+  return normalizeGoogleAdsAccountSummaryRow(response.results?.[0] || null);
 }
 
 async function fetchGoogleAdsReportDetailForCustomer({ context, customerId, dateRange }) {
@@ -2566,7 +2627,9 @@ async function fetchGoogleAdsDeviceReport({ customerId, tokenBundle, loginCustom
       "  metrics.impressions,",
       "  metrics.clicks,",
       "  metrics.conversions,",
+      "  metrics.all_conversions,",
       "  metrics.conversions_value,",
+      "  metrics.all_conversions_value,",
       "  metrics.cost_micros",
       "FROM customer",
       "WHERE metrics.impressions > 0",
@@ -2581,28 +2644,54 @@ async function fetchGoogleAdsDeviceReport({ customerId, tokenBundle, loginCustom
 }
 
 async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCustomerIds, dateRange }) {
-  const response = await fetchGoogleAdsRowsWithLoginFallback({
-    customerId,
-    tokenBundle,
-    loginCustomerIds,
-    query: [
-      "SELECT",
-      "  segments.geo_target_country,",
-      "  segments.geo_target_region,",
-      "  segments.geo_target_city,",
-      "  metrics.clicks,",
-      "  metrics.conversions,",
-      "  metrics.conversions_value,",
-      "  metrics.cost_micros",
-      "FROM geographic_view",
-      "WHERE metrics.clicks > 0",
-      dateRange.googleCondition,
-      "ORDER BY metrics.conversions DESC",
-      "LIMIT 20",
-    ].join(" "),
-    label: `Google Ads geography report ${customerId}`,
-  });
-  const rows = (response.results || []).map(normalizeGoogleAdsGeographyReportRow).filter(Boolean);
+  const fetchRows = async (viewName, labelSuffix) => {
+    const response = await fetchGoogleAdsRowsWithLoginFallback({
+      customerId,
+      tokenBundle,
+      loginCustomerIds,
+      query: [
+        "SELECT",
+        "  segments.geo_target_country,",
+        "  segments.geo_target_region,",
+        "  segments.geo_target_city,",
+        "  metrics.clicks,",
+        "  metrics.conversions,",
+        "  metrics.all_conversions,",
+        "  metrics.conversions_value,",
+        "  metrics.all_conversions_value,",
+        "  metrics.cost_micros",
+        `FROM ${viewName}`,
+        "WHERE metrics.clicks > 0",
+        dateRange.googleCondition,
+        "ORDER BY metrics.conversions DESC",
+        "LIMIT 20",
+      ].join(" "),
+      label: `Google Ads geography report ${labelSuffix} ${customerId}`,
+    });
+
+    return (response.results || []).map(normalizeGoogleAdsGeographyReportRow).filter(Boolean);
+  };
+
+  let rows = [];
+  let primaryError = null;
+
+  try {
+    rows = await fetchRows("geographic_view", "geo-target");
+  } catch (error) {
+    primaryError = error;
+  }
+
+  if (!rows.length) {
+    try {
+      rows = await fetchRows("user_location_view", "user-location");
+    } catch (error) {
+      if (primaryError) {
+        throw new Error(`${primaryError.message || "Geographic view failed."} | ${error.message || "User location view failed."}`);
+      }
+      throw error;
+    }
+  }
+
   const names = await fetchGoogleAdsGeoTargetNames({
     customerId,
     tokenBundle,
@@ -2630,7 +2719,9 @@ async function fetchGoogleAdsKeywordReport({ customerId, tokenBundle, loginCusto
       "  metrics.average_cpc,",
       "  metrics.ctr,",
       "  metrics.conversions,",
+      "  metrics.all_conversions,",
       "  metrics.conversions_value,",
+      "  metrics.all_conversions_value,",
       "  metrics.cost_micros",
       "FROM keyword_view",
       "WHERE ad_group_criterion.status != REMOVED",
@@ -2934,7 +3025,9 @@ function createGoogleAdsLiveCatalogCampaign(campaign) {
     impressions: 0,
     clicks: 0,
     conversions: 0,
+    allConversions: 0,
     conversionValue: 0,
+    allConversionValue: 0,
   };
 }
 
@@ -2954,7 +3047,9 @@ function normalizeGoogleAdsLiveCampaignMetricRow(row) {
     impressions: toNumber(row.metrics?.impressions),
     clicks: toNumber(row.metrics?.clicks),
     conversions: toNumber(row.metrics?.conversions),
+    allConversions: toNumber(row.metrics?.allConversions),
     conversionValue: normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue),
+    allConversionValue: normalizeGoogleAdsConversionValue(row.metrics?.allConversionsValue),
   };
 }
 
@@ -2976,7 +3071,9 @@ function mergeGoogleAdsLiveCampaign(base, overlay) {
     impressions: toNumber(overlay.impressions),
     clicks: toNumber(overlay.clicks),
     conversions: toNumber(overlay.conversions),
+    allConversions: toNumber(overlay.allConversions),
     conversionValue: toNumber(overlay.conversionValue),
+    allConversionValue: toNumber(overlay.allConversionValue),
   };
 }
 
@@ -2985,7 +3082,9 @@ function buildGoogleAdsLiveCampaign(campaign, budgetDayCount) {
   const impressions = toNumber(campaign.impressions);
   const clicks = toNumber(campaign.clicks);
   const conversions = toNumber(campaign.conversions);
+  const allConversions = toNumber(campaign.allConversions);
   const conversionValue = toNumber(campaign.conversionValue);
+  const allConversionValue = toNumber(campaign.allConversionValue);
   const dailyBudget = toNumber(campaign.dailyBudget);
 
   return {
@@ -3001,7 +3100,9 @@ function buildGoogleAdsLiveCampaign(campaign, budgetDayCount) {
     impressions,
     clicks,
     conversions: +conversions.toFixed(2),
+    allConversions: +allConversions.toFixed(2),
     conversionValue: +conversionValue.toFixed(2),
+    allConversionValue: +allConversionValue.toFixed(2),
     cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
     cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
   };
@@ -3016,7 +3117,9 @@ function normalizeGoogleAdsLiveAdRow(row) {
   const impressions = toNumber(row.metrics?.impressions);
   const clicks = toNumber(row.metrics?.clicks);
   const conversions = toNumber(row.metrics?.conversions);
+  const allConversions = toNumber(row.metrics?.allConversions);
   const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
+  const allConversionValue = normalizeGoogleAdsConversionValue(row.metrics?.allConversionsValue);
   const format = describeGoogleAdsAdType(row.adGroupAd?.ad?.type);
   const adGroupName = row.adGroup?.name || "";
   const campaignName = row.campaign?.name || `Campaign ${rawCampaignId}`;
@@ -3032,7 +3135,9 @@ function normalizeGoogleAdsLiveAdRow(row) {
     impressions,
     clicks,
     conversions: +conversions.toFixed(2),
+    allConversions: +allConversions.toFixed(2),
     conversionValue: +conversionValue.toFixed(2),
+    allConversionValue: +allConversionValue.toFixed(2),
     ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
   };
 }
@@ -3049,7 +3154,9 @@ function normalizeGoogleAdsDeviceReportRow(row) {
   const clicks = toNumber(row.metrics?.clicks);
   const cost = toNumber(row.metrics?.costMicros) / 1_000_000;
   const conversions = toNumber(row.metrics?.conversions);
+  const allConversions = toNumber(row.metrics?.allConversions);
   const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
+  const allConversionValue = normalizeGoogleAdsConversionValue(row.metrics?.allConversionsValue);
 
   return {
     device: formatGoogleAdsEnum(row.segments?.device),
@@ -3058,7 +3165,9 @@ function normalizeGoogleAdsDeviceReportRow(row) {
     ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
     cost: +cost.toFixed(2),
     conversions: +conversions.toFixed(2),
+    allConversions: +allConversions.toFixed(2),
     conversionValue: +conversionValue.toFixed(2),
+    allConversionValue: +allConversionValue.toFixed(2),
   };
 }
 
@@ -3066,7 +3175,9 @@ function normalizeGoogleAdsGeographyReportRow(row) {
   const clicks = toNumber(row.metrics?.clicks);
   const cost = toNumber(row.metrics?.costMicros) / 1_000_000;
   const conversions = toNumber(row.metrics?.conversions);
+  const allConversions = toNumber(row.metrics?.allConversions);
   const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
+  const allConversionValue = normalizeGoogleAdsConversionValue(row.metrics?.allConversionsValue);
 
   return {
     location: "",
@@ -3075,8 +3186,10 @@ function normalizeGoogleAdsGeographyReportRow(row) {
     cityResource: row.segments?.geoTargetCity || "",
     clicks,
     conversions: +conversions.toFixed(2),
+    allConversions: +allConversions.toFixed(2),
     cost: +cost.toFixed(2),
     conversionValue: +conversionValue.toFixed(2),
+    allConversionValue: +allConversionValue.toFixed(2),
     costPerConversion: conversions ? +(cost / conversions).toFixed(2) : 0,
   };
 }
@@ -3086,7 +3199,9 @@ function normalizeGoogleAdsKeywordReportRow(row) {
   const impressions = toNumber(row.metrics?.impressions);
   const cost = toNumber(row.metrics?.costMicros) / 1_000_000;
   const conversions = toNumber(row.metrics?.conversions);
+  const allConversions = toNumber(row.metrics?.allConversions);
   const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
+  const allConversionValue = normalizeGoogleAdsConversionValue(row.metrics?.allConversionsValue);
 
   return {
     keyword: row.adGroupCriterion?.keyword?.text || "Keyword",
@@ -3097,15 +3212,37 @@ function normalizeGoogleAdsKeywordReportRow(row) {
     ctr: toNumber(row.metrics?.ctr) * 100,
     cost: +cost.toFixed(2),
     conversions: +conversions.toFixed(2),
+    allConversions: +allConversions.toFixed(2),
     costPerConversion: conversions ? +(cost / conversions).toFixed(2) : 0,
     valuePerConversion: conversions ? +(conversionValue / conversions).toFixed(2) : 0,
     conversionValue: +conversionValue.toFixed(2),
+    allConversionValue: +allConversionValue.toFixed(2),
   };
 }
 
 function normalizeGoogleAdsConversionValue(value) {
   // Google Ads exposes metrics.conversions_value as a currency DOUBLE, unlike cost_micros.
   return toNumber(value);
+}
+
+function normalizeGoogleAdsAccountSummaryRow(row) {
+  const spend = toNumber(row?.metrics?.costMicros) / 1_000_000;
+  const impressions = toNumber(row?.metrics?.impressions);
+  const clicks = toNumber(row?.metrics?.clicks);
+  const conversions = toNumber(row?.metrics?.conversions);
+  const allConversions = toNumber(row?.metrics?.allConversions);
+  const conversionValue = normalizeGoogleAdsConversionValue(row?.metrics?.conversionsValue);
+  const allConversionValue = normalizeGoogleAdsConversionValue(row?.metrics?.allConversionsValue);
+
+  return {
+    spend: +spend.toFixed(2),
+    impressions,
+    clicks,
+    conversions: +conversions.toFixed(2),
+    allConversions: +allConversions.toFixed(2),
+    conversionValue: +conversionValue.toFixed(2),
+    allConversionValue: +allConversionValue.toFixed(2),
+  };
 }
 
 function normalizeGoogleAdsRatioMetric(value) {
@@ -3153,6 +3290,10 @@ function normalizeLiveDateRange(payload = {}) {
     googleCondition: `  AND segments.date DURING ${fallbackId}`,
     dayCount: getGoogleAdsBudgetDayCount(fallbackId),
   };
+}
+
+function getGoogleAdsDateWhereClause(dateRange) {
+  return String(dateRange?.googleCondition || "").replace(/^\s*AND\s+/i, "WHERE ");
 }
 
 function sanitizeGoogleAdsLiveDateRange(value) {
