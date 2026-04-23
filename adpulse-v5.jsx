@@ -151,6 +151,7 @@ const KPI_LIBRARY = {
   spend: { label: "Spend", color: "#0f8f66", type: "currency" },
   clicks: { label: "Clicks", color: "#2d6cdf", type: "number" },
   conversions: { label: "Conversions", color: "#d75d42", type: "number" },
+  conversionValue: { label: "Conv. Value", color: "#b86b22", type: "currency" },
   cpc: { label: "CPC", color: "#9966e8", type: "currency" },
   cpm: { label: "CPM", color: "#c79321", type: "currency" },
   roas: { label: "ROAS", color: "#1d5b4a", type: "ratio" },
@@ -174,7 +175,7 @@ const CONNECTION_GUIDE = {
   },
 };
 
-const ADDITIVE_METRICS = new Set(["spend", "clicks", "conversions", "revenue", "sessions", "users"]);
+const ADDITIVE_METRICS = new Set(["spend", "clicks", "conversions", "conversionValue", "revenue", "sessions", "users"]);
 
 const CLIENT_BLUEPRINTS = [
   { id: "cl01", name: "Client 01", category: "eshop", focus: "Fashion retail", accent: "#d7654b", accent2: "#f2b07c", healthMode: "overspend" },
@@ -238,6 +239,15 @@ function formatMetric(metricKey, value) {
   if (spec.type === "currency") return `EUR ${value.toFixed(value >= 100 ? 0 : 2)}`;
   if (spec.type === "ratio") return `${value.toFixed(1)}x`;
   return formatNumber(value);
+}
+
+function getConversionValue(item) {
+  const value = Number(item?.conversionValue);
+  if (Number.isFinite(value) && value > 0) return value;
+
+  const spend = Number(item?.spend) || 0;
+  const roas = Number(item?.roas) || 0;
+  return spend > 0 && roas > 0 ? spend * roas : 0;
 }
 
 function formatPercent(value, decimals = 2) {
@@ -814,6 +824,7 @@ function buildAccounts(clients) {
       const impressions = Math.max(clicks * 9, Math.round((spend / Math.max(cpm, 0.6)) * 1000));
       const conversions = Math.max(12, Math.round(clicks * (client.category === "lead_gen" ? 0.075 : client.category === "b2b" ? 0.048 : 0.11)));
       const roas = client.category === "eshop" ? +(2.6 + seedUnit(client.id, slot + 30) * 2.1).toFixed(2) : +(1.2 + seedUnit(client.id, slot + 30) * 1.8).toFixed(2);
+      const conversionValue = Math.round(spend * roas);
 
       accounts.push({
         id: `${client.id}-g${slot + 1}`,
@@ -826,6 +837,7 @@ function buildAccounts(clients) {
         impressions,
         clicks,
         conversions,
+        conversionValue,
         ctr: +(clicks / impressions * 100).toFixed(2),
         cpc,
         cpm,
@@ -845,6 +857,7 @@ function buildAccounts(clients) {
       const impressions = Math.max(clicks * 10, Math.round((spend / Math.max(cpm, 0.6)) * 1000));
       const conversions = Math.max(10, Math.round(clicks * (client.category === "lead_gen" ? 0.062 : client.category === "b2b" ? 0.034 : 0.095)));
       const roas = client.category === "eshop" ? +(2.1 + seedUnit(client.id, slot + 80) * 1.9).toFixed(2) : +(1.1 + seedUnit(client.id, slot + 80) * 1.4).toFixed(2);
+      const conversionValue = Math.round(spend * roas);
 
       accounts.push({
         id: `${client.id}-m${slot + 1}`,
@@ -857,6 +870,7 @@ function buildAccounts(clients) {
         impressions,
         clicks,
         conversions,
+        conversionValue,
         ctr: +(clicks / impressions * 100).toFixed(2),
         cpc,
         cpm,
@@ -878,12 +892,14 @@ function buildCampaigns(accounts, clients) {
     const count = account.platform === "google_ads" ? 3 : 2 + (index % 2);
     const budgets = splitTotal(Math.round(account.monthlyBudget * 0.95), count, `${account.id}-campaign-budget`);
     const spends = splitTotal(account.spend, count, `${account.id}-campaign-spend`);
+    const conversionValues = splitTotal(Math.round(getConversionValue(account)), count, `${account.id}-campaign-value`);
 
     Array.from({ length: count }).forEach((_, slot) => {
       const shouldStop = client.healthMode === "stopped_campaign" && slot === 0 && account.id.endsWith("1");
       const objectiveNames = account.platform === "google_ads" ? GOOGLE_CAMPAIGNS : META_CAMPAIGNS;
       const budget = budgets[slot];
       const spend = shouldStop ? 0 : spends[slot];
+      const conversionValue = shouldStop ? 0 : conversionValues[slot];
       const clicks = shouldStop ? 0 : Math.max(35, Math.round(account.clicks * (spend / Math.max(account.spend, 1))));
       const impressions = shouldStop ? 0 : Math.max(650, Math.round(account.impressions * (spend / Math.max(account.spend, 1))));
       const conversions = shouldStop ? 0 : Math.max(4, Math.round(account.conversions * (spend / Math.max(account.spend, 1))));
@@ -901,6 +917,7 @@ function buildCampaigns(accounts, clients) {
         impressions,
         clicks,
         conversions,
+        conversionValue,
         cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
         cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
       });
@@ -916,9 +933,11 @@ function buildAds(campaigns) {
   campaigns.forEach((campaign, index) => {
     const count = campaign.platform === "google_ads" ? 3 : 2 + (index % 2);
     const spends = splitTotal(Math.max(campaign.spend, 0), count, `${campaign.id}-ad-spend`);
+    const conversionValues = splitTotal(Math.round(campaign.conversionValue || 0), count, `${campaign.id}-ad-value`);
 
     Array.from({ length: count }).forEach((_, slot) => {
       const spend = campaign.status === "stopped" ? 0 : spends[slot];
+      const conversionValue = campaign.status === "stopped" ? 0 : conversionValues[slot];
       const clicks = campaign.status === "stopped" ? 0 : Math.max(12, Math.round(campaign.clicks * (spend / Math.max(campaign.spend, 1))));
       const impressions = campaign.status === "stopped" ? 0 : Math.max(220, Math.round(campaign.impressions * (spend / Math.max(campaign.spend, 1))));
       const conversions = campaign.status === "stopped" ? 0 : Math.max(1, Math.round(campaign.conversions * (spend / Math.max(campaign.spend, 1))));
@@ -936,6 +955,7 @@ function buildAds(campaigns) {
         clicks,
         impressions,
         conversions,
+        conversionValue,
         ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
       });
     });
@@ -1018,11 +1038,13 @@ function buildSeriesMap(clients, accounts, ga4) {
     const spend = allocateSeries(account.spend, `${account.id}-spend`);
     const clicks = allocateSeries(account.clicks, `${account.id}-clicks`);
     const conversions = allocateSeries(account.conversions, `${account.id}-conversions`);
+    const conversionValue = allocateSeries(getConversionValue(account), `${account.id}-conversion-value`);
 
     series[`account:${account.id}`] = Array.from({ length: 30 }, (_, index) => {
       const valueSpend = spend[index];
       const valueClicks = clicks[index];
       const valueConversions = conversions[index];
+      const valueConversionValue = conversionValue[index];
       const cpc = valueClicks ? +(valueSpend / valueClicks).toFixed(2) : 0;
       const impressions = Math.max(valueClicks * 8, Math.round((valueSpend / Math.max(account.cpm, 0.5)) * 1000));
       const cpm = impressions ? +(valueSpend / impressions * 1000).toFixed(2) : 0;
@@ -1033,6 +1055,7 @@ function buildSeriesMap(clients, accounts, ga4) {
         spend: valueSpend,
         clicks: valueClicks,
         conversions: valueConversions,
+        conversionValue: valueConversionValue,
         cpc,
         cpm,
         roas,
@@ -1046,6 +1069,7 @@ function buildSeriesMap(clients, accounts, ga4) {
     const spend = clientAccounts.reduce((acc, item) => acc + item.spend, 0);
     const clicks = clientAccounts.reduce((acc, item) => acc + item.clicks, 0);
     const conversions = clientAccounts.reduce((acc, item) => acc + item.conversions, 0);
+    const conversionValue = clientAccounts.reduce((acc, item) => acc + getConversionValue(item), 0);
     const revenue = ga4[client.id]?.revenueCurrentPeriod || Math.round(spend * (1.8 + seedUnit(client.id, 160) * 1.8));
     const sessions = ga4[client.id]?.sessions || seededInt(`${client.id}-chart-sessions`, 9000, 35000);
     const users = ga4[client.id]?.users || Math.round(sessions * 0.77);
@@ -1053,6 +1077,7 @@ function buildSeriesMap(clients, accounts, ga4) {
     const spendSeries = allocateSeries(spend, `${client.id}-client-spend`);
     const clicksSeries = allocateSeries(clicks, `${client.id}-client-clicks`);
     const conversionSeries = allocateSeries(conversions, `${client.id}-client-conversions`);
+    const conversionValueSeries = allocateSeries(conversionValue, `${client.id}-client-conversion-value`);
     const revenueSeries = allocateSeries(revenue, `${client.id}-client-revenue`);
     const sessionsSeries = allocateSeries(sessions, `${client.id}-client-sessions`);
     const usersSeries = allocateSeries(users, `${client.id}-client-users`);
@@ -1061,6 +1086,7 @@ function buildSeriesMap(clients, accounts, ga4) {
       const valueSpend = spendSeries[index];
       const valueClicks = clicksSeries[index];
       const valueConversions = conversionSeries[index];
+      const valueConversionValue = conversionValueSeries[index];
       const valueRevenue = revenueSeries[index];
       const impressions = Math.max(valueClicks * 8, Math.round(valueSpend * 150));
       const cpc = valueClicks ? +(valueSpend / valueClicks).toFixed(2) : 0;
@@ -1072,6 +1098,7 @@ function buildSeriesMap(clients, accounts, ga4) {
         spend: valueSpend,
         clicks: valueClicks,
         conversions: valueConversions,
+        conversionValue: valueConversionValue,
         cpc,
         cpm,
         roas,
@@ -2354,6 +2381,7 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
       <div style={{ display: "grid", gridTemplateColumns: fitCols(128), gap: 10 }}>
         <MetricTile label="Monthly Budget" value={formatCurrency(client.totalBudget)} />
         <MetricTile label="Spend MTD" value={formatCurrency(client.spend)} />
+        <MetricTile label="Conv. Value" value={formatCurrency(client.conversionValue)} />
         <MetricTile label="ROAS" value={formatMetric("roas", client.roas)} accent={client.roas >= 3 ? T.accent : T.coral} />
         <MetricTile label={client.category === "eshop" ? "Revenue" : "Conversions"} value={client.category === "eshop" ? formatCurrency(client.ga4?.revenueCurrentPeriod || 0) : formatNumber(client.conversions)} subValue={client.category === "eshop" ? CALENDAR.revenueRangeLabel : "Client-level conversion volume"} />
       </div>
@@ -2455,6 +2483,7 @@ function OverviewRow({ client, users, onOpenAccounts, onEdit }) {
         <div style={{ display: "grid", gridTemplateColumns: fitCols(108), gap: 10, flex: "1 1 420px" }}>
           <MetricTile label="Budget" value={formatCurrency(client.totalBudget)} />
           <MetricTile label="Spend" value={formatCurrency(client.spend)} />
+          <MetricTile label="Conv. Value" value={formatCurrency(client.conversionValue)} />
           <MetricTile label="Conv." value={formatNumber(client.conversions)} />
           <MetricTile label="ROAS" value={formatMetric("roas", client.roas)} accent={client.roas >= 3 ? T.accent : T.coral} />
         </div>
@@ -2569,6 +2598,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
           <div style={{ display: "grid", gridTemplateColumns: fitCols(108), gap: 10, flex: "1 1 420px" }}>
             <MetricTile label="Budget" value={formatCurrency(client.totalBudget)} />
             <MetricTile label="Spend" value={formatCurrency(client.spend)} />
+            <MetricTile label="Conv. Value" value={formatCurrency(client.conversionValue)} />
             <MetricTile label="Accounts" value={client.accounts.length} />
             <MetricTile label={open[client.id] ? "Collapse" : "Expand"} value={open[client.id] ? "-" : "+"} />
           </div>
@@ -2701,6 +2731,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
                       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", flex: "1 1 420px", justifyContent: "flex-end" }}>
                         <LedgerMetric label="Budget" value={formatCurrency(account.monthlyBudget)} />
                         <LedgerMetric label="Spend" value={formatCurrency(account.spend)} />
+                        <LedgerMetric label="Value" value={formatCurrency(getConversionValue(account))} />
                         <LedgerMetric label="Pace" value={`${Math.round(accountPaceRatio * 100)}%`} tone={paceTone === "danger" ? T.coral : T.accent} />
                         <LedgerMetric label="ROAS" value={formatMetric("roas", account.roas)} tone={account.roas >= 3 ? T.accent : T.ink} />
                         <LedgerMetric label="CPC" value={formatMetric("cpc", account.cpc)} tone={account.cpc > client.rules.cpcMax ? T.coral : T.ink} />
@@ -2764,6 +2795,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
                                 </div>
                                 <div style={{ display: "flex", gap: 16, flexWrap: "wrap", flex: "1 1 360px", justifyContent: "flex-end" }}>
                                   <LedgerMetric label="Spend" value={formatCurrency(campaign.spend)} compact />
+                                  <LedgerMetric label="Value" value={formatCurrency(campaign.conversionValue || 0)} compact />
                                   <LedgerMetric label="Conv." value={formatNumber(campaign.conversions)} compact />
                                   <LedgerMetric label="CPC" value={formatMetric("cpc", campaign.cpc)} tone={campaign.cpc > client.rules.cpcMax ? T.coral : T.ink} compact />
                                   <LedgerMetric label="CPM" value={formatMetric("cpm", campaign.cpm)} tone={campaign.cpm > client.rules.cpmMax ? T.coral : T.ink} compact />
@@ -2807,6 +2839,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
                                     <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginLeft: "auto" }}>
                                       <LedgerMetric label="CTR" value={`${ad.ctr.toFixed(2)}%`} compact />
                                       <LedgerMetric label="Spend" value={formatCurrency(ad.spend)} compact />
+                                      <LedgerMetric label="Value" value={formatCurrency(ad.conversionValue || 0)} compact />
                                       <LedgerMetric label="Conv." value={formatNumber(ad.conversions)} compact />
                                     </div>
                                   </div>
@@ -5126,6 +5159,7 @@ export default function AdPulse() {
       const clicks = visibleAccounts.reduce((acc, account) => acc + account.clicks, 0);
       const impressions = visibleAccounts.reduce((acc, account) => acc + account.impressions, 0);
       const conversions = visibleAccounts.reduce((acc, account) => acc + account.conversions, 0);
+      const conversionValue = visibleAccounts.reduce((acc, account) => acc + getConversionValue(account), 0);
       const googleBudget = useLiveGoogle
         ? liveGoogleAccounts.reduce((acc, account) => acc + (account.monthlyBudget || 0), 0) || (effectiveConnections.google_ads ? client.budgets.google_ads : 0)
         : (effectiveConnections.google_ads ? client.budgets.google_ads : 0);
@@ -5133,7 +5167,7 @@ export default function AdPulse() {
         ? visibleAccounts.filter((account) => account.platform === "meta_ads").reduce((acc, account) => acc + (account.monthlyBudget || 0), 0) || client.budgets.meta_ads
         : 0;
       const totalBudget = googleBudget + metaBudget;
-      const roas = spend ? visibleAccounts.reduce((acc, account) => acc + account.roas * account.spend, 0) / spend : 0;
+      const roas = spend ? conversionValue / spend : 0;
       const activeCampaigns = visibleCampaigns.filter((campaign) => campaign.status !== "stopped").length;
       const stoppedCampaigns = visibleCampaigns.filter((campaign) => campaign.status === "stopped").length;
       const liveAds = visibleAds.filter((ad) => ad.status === "live" || ad.status === "learning").length;
@@ -5157,6 +5191,7 @@ export default function AdPulse() {
         clicks,
         impressions,
         conversions,
+        conversionValue,
         ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
         cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
         roas: +roas.toFixed(2),
@@ -5736,7 +5771,7 @@ export default function AdPulse() {
                       <KpiSelector
                         selected={chartForm.metrics}
                         onChange={(metrics) => setChartForm((current) => ({ ...current, metrics }))}
-                        available={chartForm.scope === "ga4" ? ["sessions", "users", "conversions", "revenue"] : ["spend", "clicks", "conversions", "cpc", "cpm", "roas", "revenue"]}
+                        available={chartForm.scope === "ga4" ? ["sessions", "users", "conversions", "revenue"] : ["spend", "clicks", "conversions", "conversionValue", "cpc", "cpm", "roas", "revenue"]}
                       />
                     </div>
 

@@ -1571,6 +1571,7 @@ async function fetchGoogleAdsLiveOverview(payload) {
       impressions: toNumber(report?.account?.impressions),
       clicks: toNumber(report?.account?.clicks),
       conversions: toNumber(report?.account?.conversions),
+      conversionValue: toNumber(report?.account?.conversionValue),
       ctr: toNumber(report?.account?.ctr),
       cpc: toNumber(report?.account?.cpc),
       cpm: toNumber(report?.account?.cpm),
@@ -1601,6 +1602,7 @@ async function fetchGoogleAdsLiveOverview(payload) {
         impressions: campaign.impressions,
         clicks: campaign.clicks,
         conversions: campaign.conversions,
+        conversionValue: campaign.conversionValue,
         cpc: campaign.cpc,
         cpm: campaign.cpm,
         channelType: campaign.channelType,
@@ -1627,6 +1629,7 @@ async function fetchGoogleAdsLiveOverview(payload) {
         clicks: ad.clicks,
         impressions: ad.impressions,
         conversions: ad.conversions,
+        conversionValue: ad.conversionValue,
         ctr: ad.ctr,
         requestKey: request.key,
         connectionId: request.connectionId,
@@ -1746,6 +1749,7 @@ async function fetchMetaAdsLiveOverview(payload) {
       impressions: toNumber(report?.account?.impressions),
       clicks: toNumber(report?.account?.clicks),
       conversions: toNumber(report?.account?.conversions),
+      conversionValue: toNumber(report?.account?.conversionValue),
       ctr: toNumber(report?.account?.ctr),
       cpc: toNumber(report?.account?.cpc),
       cpm: toNumber(report?.account?.cpm),
@@ -1776,6 +1780,7 @@ async function fetchMetaAdsLiveOverview(payload) {
         impressions: campaign.impressions,
         clicks: campaign.clicks,
         conversions: campaign.conversions,
+        conversionValue: campaign.conversionValue,
         cpc: campaign.cpc,
         cpm: campaign.cpm,
         requestKey: request.key,
@@ -1801,6 +1806,7 @@ async function fetchMetaAdsLiveOverview(payload) {
         clicks: ad.clicks,
         impressions: ad.impressions,
         conversions: ad.conversions,
+        conversionValue: ad.conversionValue,
         ctr: ad.ctr,
         requestKey: request.key,
         connectionId: request.connectionId,
@@ -1925,6 +1931,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
         "  metrics.impressions,",
         "  metrics.clicks,",
         "  metrics.conversions,",
+        "  metrics.conversions_value,",
         "  metrics.cost_micros",
         "FROM ad_group_ad",
         "WHERE ad_group_ad.status != REMOVED",
@@ -1981,6 +1988,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
     current.impressions += ad.impressions;
     current.clicks += ad.clicks;
     current.conversions += ad.conversions;
+    current.conversionValue += ad.conversionValue;
     if (ad.status !== "paused") {
       current.status = "active";
     }
@@ -2029,6 +2037,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
       impressions,
       clicks,
       conversions: +conversions.toFixed(2),
+      conversionValue: +conversionValue.toFixed(2),
       ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
       cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
       cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
@@ -2103,7 +2112,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
 
   try {
     adInsightRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/insights`, {
-      fields: "ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,actions",
+      fields: "ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,actions,action_values",
       level: "ad",
       date_preset: datePreset,
       limit: String(META_ADS_LIVE_AD_LIMIT),
@@ -2162,6 +2171,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
     current.impressions += ad.impressions;
     current.clicks += ad.clicks;
     current.conversions += ad.conversions;
+    current.conversionValue += ad.conversionValue;
     if (ad.status !== "paused") {
       current.status = "active";
     }
@@ -2200,6 +2210,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
       impressions,
       clicks,
       conversions: +conversions.toFixed(2),
+      conversionValue: +conversionValue.toFixed(2),
       ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
       cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
       cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
@@ -2331,6 +2342,7 @@ function normalizeGoogleAdsLiveAdRow(row) {
   const impressions = toNumber(row.metrics?.impressions);
   const clicks = toNumber(row.metrics?.clicks);
   const conversions = toNumber(row.metrics?.conversions);
+  const conversionValue = toNumber(row.metrics?.conversionsValue);
   const format = describeGoogleAdsAdType(row.adGroupAd?.ad?.type);
   const adGroupName = row.adGroup?.name || "";
   const campaignName = row.campaign?.name || `Campaign ${rawCampaignId}`;
@@ -2346,6 +2358,7 @@ function normalizeGoogleAdsLiveAdRow(row) {
     impressions,
     clicks,
     conversions: +conversions.toFixed(2),
+    conversionValue: +conversionValue.toFixed(2),
     ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
   };
 }
@@ -2577,6 +2590,7 @@ function normalizeMetaAdInsightRow(row, adStatusMap) {
   const impressions = toNumber(row.impressions);
   const clicks = toNumber(row.clicks);
   const conversions = extractMetaConversionCount(row.actions);
+  const conversionValue = extractMetaConversionValue(row.action_values, null, spend);
 
   return {
     rawAdId,
@@ -2589,6 +2603,7 @@ function normalizeMetaAdInsightRow(row, adStatusMap) {
     impressions,
     clicks,
     conversions: +conversions.toFixed(2),
+    conversionValue: +conversionValue.toFixed(2),
     ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
   };
 }
