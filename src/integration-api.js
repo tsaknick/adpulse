@@ -89,6 +89,14 @@ export function fetchGoogleAdsLiveOverview(payload) {
   });
 }
 
+export function fetchGoogleAdsReportDetails(payload) {
+  return request("/google-ads/report-details", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchMetaAdsLiveOverview(payload) {
   return request("/meta-ads/live-overview", {
     method: "POST",

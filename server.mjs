@@ -134,6 +134,19 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/google-ads/report-details") {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const payload = await fetchGoogleAdsReportDetails(parsed);
+      sendJson(response, 200, payload);
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/meta-ads/live-overview") {
       const body = await readRequestBody(request);
       let parsed;
@@ -1669,6 +1682,116 @@ async function fetchGoogleAdsLiveOverview(payload) {
   return response;
 }
 
+async function fetchGoogleAdsReportDetails(payload) {
+  const dateRange = normalizeLiveDateRange(payload);
+  const requests = Array.isArray(payload?.requests)
+    ? payload.requests.map(normalizeGoogleAdsLiveRequest).filter(Boolean)
+    : [];
+
+  if (!requests.length) {
+    return {
+      generatedAt: new Date().toISOString(),
+      dateRange: dateRange.id,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      details: [],
+      errors: [],
+    };
+  }
+
+  const connectionIds = Array.from(new Set(requests.map((item) => item.connectionId)));
+  const contextEntries = await Promise.all(connectionIds.map(async (connectionId) => ([
+    connectionId,
+    await getGoogleAdsConnectionContext(connectionId),
+  ])));
+  const contextMap = new Map(contextEntries);
+  const uniqueTargets = [];
+  const targetKeys = new Set();
+
+  requests.forEach((request) => {
+    const targetKey = `${request.connectionId}:${request.customerId}`;
+    if (targetKeys.has(targetKey)) return;
+    targetKeys.add(targetKey);
+    uniqueTargets.push({
+      connectionId: request.connectionId,
+      customerId: request.customerId,
+    });
+  });
+
+  const settledTargets = await Promise.allSettled(uniqueTargets.map(async (target) => {
+    const context = contextMap.get(target.connectionId);
+    return {
+      targetKey: `${target.connectionId}:${target.customerId}`,
+      report: await fetchGoogleAdsReportDetailForCustomer({
+        context,
+        customerId: target.customerId,
+        dateRange,
+      }),
+    };
+  }));
+  const reportMap = new Map();
+
+  settledTargets.forEach((result, index) => {
+    const target = uniqueTargets[index];
+    const targetKey = `${target.connectionId}:${target.customerId}`;
+
+    if (result.status === "fulfilled") {
+      reportMap.set(targetKey, result.value.report);
+      return;
+    }
+
+    reportMap.set(targetKey, {
+      customerId: target.customerId,
+      dataStatus: "error",
+      dataError: result.reason?.message || "Could not fetch Google Ads report details.",
+      devices: [],
+      geographies: [],
+      keywords: [],
+      impressionShare: [],
+      errors: [result.reason?.message || "Could not fetch Google Ads report details."],
+    });
+  });
+
+  const response = {
+    generatedAt: new Date().toISOString(),
+    dateRange: dateRange.id,
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+    details: [],
+    errors: [],
+  };
+
+  requests.forEach((request) => {
+    const targetKey = `${request.connectionId}:${request.customerId}`;
+    const report = reportMap.get(targetKey) || null;
+
+    response.details.push({
+      requestKey: request.key,
+      clientId: request.clientId,
+      connectionId: request.connectionId,
+      assetId: request.assetId,
+      customerId: request.customerId,
+      dataStatus: report?.dataStatus || "ready",
+      dataError: report?.dataError || "",
+      devices: Array.isArray(report?.devices) ? report.devices : [],
+      geographies: Array.isArray(report?.geographies) ? report.geographies : [],
+      keywords: Array.isArray(report?.keywords) ? report.keywords : [],
+      impressionShare: Array.isArray(report?.impressionShare) ? report.impressionShare : [],
+    });
+
+    (report?.errors || []).forEach((error) => {
+      response.errors.push({
+        requestKey: request.key,
+        connectionId: request.connectionId,
+        customerId: request.customerId,
+        error,
+      });
+    });
+  });
+
+  return response;
+}
+
 async function fetchMetaAdsLiveOverview(payload) {
   const dateRange = normalizeLiveDateRange(payload);
   const requests = Array.isArray(payload?.requests)
@@ -1803,6 +1926,7 @@ async function fetchMetaAdsLiveOverview(payload) {
         clicks: campaign.clicks,
         conversions: campaign.conversions,
         conversionValue: campaign.conversionValue,
+        reach: campaign.reach,
         cpc: campaign.cpc,
         cpm: campaign.cpm,
         requestKey: request.key,
@@ -1829,6 +1953,7 @@ async function fetchMetaAdsLiveOverview(payload) {
         impressions: ad.impressions,
         conversions: ad.conversions,
         conversionValue: ad.conversionValue,
+        reach: ad.reach,
         ctr: ad.ctr,
         requestKey: request.key,
         connectionId: request.connectionId,
@@ -2397,6 +2522,204 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
   };
 }
 
+async function fetchGoogleAdsReportDetailForCustomer({ context, customerId, dateRange }) {
+  if (!context?.connection) {
+    throw new Error("Google Ads connection context is missing.");
+  }
+
+  const { connection, tokenBundle, loginCustomerIds } = context;
+  assertGoogleAdsCustomerAccess(connection, customerId);
+
+  const errors = [];
+  const [deviceResult, geographyResult, keywordResult, impressionShareResult] = await Promise.allSettled([
+    fetchGoogleAdsDeviceReport({ customerId, tokenBundle, loginCustomerIds, dateRange }),
+    fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCustomerIds, dateRange }),
+    fetchGoogleAdsKeywordReport({ customerId, tokenBundle, loginCustomerIds, dateRange }),
+    fetchGoogleAdsImpressionShareReport({ customerId, tokenBundle, loginCustomerIds, dateRange }),
+  ]);
+
+  if (deviceResult.status === "rejected") errors.push(deviceResult.reason?.message || "Could not fetch device performance.");
+  if (geographyResult.status === "rejected") errors.push(geographyResult.reason?.message || "Could not fetch geographic performance.");
+  if (keywordResult.status === "rejected") errors.push(keywordResult.reason?.message || "Could not fetch keyword performance.");
+  if (impressionShareResult.status === "rejected") errors.push(impressionShareResult.reason?.message || "Could not fetch impression share performance.");
+
+  return {
+    customerId,
+    dataStatus: errors.length ? "partial" : "ready",
+    dataError: errors.join(" | "),
+    devices: deviceResult.status === "fulfilled" ? deviceResult.value : [],
+    geographies: geographyResult.status === "fulfilled" ? geographyResult.value : [],
+    keywords: keywordResult.status === "fulfilled" ? keywordResult.value : [],
+    impressionShare: impressionShareResult.status === "fulfilled" ? impressionShareResult.value : [],
+    errors,
+  };
+}
+
+async function fetchGoogleAdsDeviceReport({ customerId, tokenBundle, loginCustomerIds, dateRange }) {
+  const response = await fetchGoogleAdsRowsWithLoginFallback({
+    customerId,
+    tokenBundle,
+    loginCustomerIds,
+    query: [
+      "SELECT",
+      "  segments.device,",
+      "  metrics.impressions,",
+      "  metrics.clicks,",
+      "  metrics.conversions,",
+      "  metrics.conversions_value,",
+      "  metrics.cost_micros",
+      "FROM customer",
+      "WHERE metrics.impressions > 0",
+      dateRange.googleCondition,
+      "ORDER BY metrics.impressions DESC",
+      "LIMIT 10",
+    ].join(" "),
+    label: `Google Ads device report ${customerId}`,
+  });
+
+  return (response.results || []).map(normalizeGoogleAdsDeviceReportRow).filter(Boolean);
+}
+
+async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCustomerIds, dateRange }) {
+  const response = await fetchGoogleAdsRowsWithLoginFallback({
+    customerId,
+    tokenBundle,
+    loginCustomerIds,
+    query: [
+      "SELECT",
+      "  segments.geo_target_country,",
+      "  segments.geo_target_region,",
+      "  segments.geo_target_city,",
+      "  metrics.clicks,",
+      "  metrics.conversions,",
+      "  metrics.conversions_value,",
+      "  metrics.cost_micros",
+      "FROM geographic_view",
+      "WHERE metrics.clicks > 0",
+      dateRange.googleCondition,
+      "ORDER BY metrics.conversions DESC",
+      "LIMIT 20",
+    ].join(" "),
+    label: `Google Ads geography report ${customerId}`,
+  });
+  const rows = (response.results || []).map(normalizeGoogleAdsGeographyReportRow).filter(Boolean);
+  const names = await fetchGoogleAdsGeoTargetNames({
+    customerId,
+    tokenBundle,
+    loginCustomerIds,
+    resourceNames: Array.from(new Set(rows.flatMap((row) => [row.cityResource, row.regionResource, row.countryResource]).filter(Boolean))),
+  });
+
+  return rows.map((row) => ({
+    ...row,
+    location: formatGoogleAdsLocationName(row, names),
+  }));
+}
+
+async function fetchGoogleAdsKeywordReport({ customerId, tokenBundle, loginCustomerIds, dateRange }) {
+  const response = await fetchGoogleAdsRowsWithLoginFallback({
+    customerId,
+    tokenBundle,
+    loginCustomerIds,
+    query: [
+      "SELECT",
+      "  ad_group_criterion.keyword.text,",
+      "  ad_group_criterion.keyword.match_type,",
+      "  metrics.clicks,",
+      "  metrics.impressions,",
+      "  metrics.average_cpc,",
+      "  metrics.ctr,",
+      "  metrics.conversions,",
+      "  metrics.conversions_value,",
+      "  metrics.cost_micros",
+      "FROM keyword_view",
+      "WHERE ad_group_criterion.status != REMOVED",
+      "  AND metrics.clicks > 0",
+      dateRange.googleCondition,
+      "ORDER BY metrics.clicks DESC",
+      "LIMIT 10",
+    ].join(" "),
+    label: `Google Ads keyword report ${customerId}`,
+  });
+
+  return (response.results || []).map(normalizeGoogleAdsKeywordReportRow).filter(Boolean);
+}
+
+async function fetchGoogleAdsImpressionShareReport({ customerId, tokenBundle, loginCustomerIds, dateRange }) {
+  const response = await fetchGoogleAdsRowsWithLoginFallback({
+    customerId,
+    tokenBundle,
+    loginCustomerIds,
+    query: [
+      "SELECT",
+      "  segments.date,",
+      "  metrics.search_impression_share,",
+      "  metrics.search_budget_lost_impression_share",
+      "FROM campaign",
+      "WHERE campaign.status != REMOVED",
+      "  AND campaign.advertising_channel_type = SEARCH",
+      dateRange.googleCondition,
+      "ORDER BY segments.date ASC",
+      "LIMIT 500",
+    ].join(" "),
+    label: `Google Ads impression share report ${customerId}`,
+  });
+
+  const dateMap = new Map();
+  (response.results || []).forEach((row) => {
+    const date = String(row.segments?.date || "").trim();
+    if (!date) return;
+    const current = dateMap.get(date) || { date, searchImpressionShare: 0, searchBudgetLostImpressionShare: 0, count: 0 };
+    current.searchImpressionShare += normalizeGoogleAdsRatioMetric(row.metrics?.searchImpressionShare);
+    current.searchBudgetLostImpressionShare += normalizeGoogleAdsRatioMetric(row.metrics?.searchBudgetLostImpressionShare);
+    current.count += 1;
+    dateMap.set(date, current);
+  });
+
+  return Array.from(dateMap.values()).map((row) => ({
+    date: row.date,
+    label: row.date.slice(5),
+    searchImpressionShare: row.count ? +(row.searchImpressionShare / row.count).toFixed(2) : 0,
+    searchBudgetLostImpressionShare: row.count ? +(row.searchBudgetLostImpressionShare / row.count).toFixed(2) : 0,
+  }));
+}
+
+async function fetchGoogleAdsGeoTargetNames({ customerId, tokenBundle, loginCustomerIds, resourceNames }) {
+  if (!resourceNames.length) return new Map();
+
+  const quoted = resourceNames.map((name) => `'${String(name).replaceAll("'", "\\'")}'`).join(", ");
+
+  try {
+    const response = await fetchGoogleAdsRowsWithLoginFallback({
+      customerId,
+      tokenBundle,
+      loginCustomerIds,
+      query: [
+        "SELECT",
+        "  geo_target_constant.resource_name,",
+        "  geo_target_constant.name,",
+        "  geo_target_constant.country_code,",
+        "  geo_target_constant.target_type",
+        "FROM geo_target_constant",
+        `WHERE geo_target_constant.resource_name IN (${quoted})`,
+        "LIMIT 200",
+      ].join(" "),
+      label: `Google Ads geo target names ${customerId}`,
+    });
+
+    return new Map((response.results || []).map((row) => [
+      row.geoTargetConstant?.resourceName,
+      {
+        name: row.geoTargetConstant?.name || "",
+        countryCode: row.geoTargetConstant?.countryCode || "",
+        targetType: row.geoTargetConstant?.targetType || "",
+      },
+    ]));
+  } catch (error) {
+    return new Map();
+  }
+}
+
 async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }) {
   if (!context?.connection) {
     throw new Error("Meta Ads connection context is missing.");
@@ -2437,7 +2760,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
 
   try {
     campaignInsightRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/insights`, {
-      fields: "campaign_id,campaign_name,impressions,clicks,spend,actions,action_values,purchase_roas",
+      fields: "campaign_id,campaign_name,reach,impressions,clicks,spend,actions,action_values,purchase_roas",
       level: "campaign",
       ...metaDateParams,
       limit: String(META_ADS_LIVE_CAMPAIGN_LIMIT),
@@ -2459,7 +2782,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
 
   try {
     adInsightRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/insights`, {
-      fields: "ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,actions,action_values",
+      fields: "ad_id,ad_name,campaign_id,campaign_name,reach,impressions,clicks,spend,actions,action_values",
       level: "ad",
       ...metaDateParams,
       limit: String(META_ADS_LIVE_AD_LIMIT),
@@ -2507,6 +2830,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
       status: ad.status === "paused" ? "stopped" : "active",
       objective: "Meta Ads",
       budget: 0,
+      reach: 0,
       spend: 0,
       impressions: 0,
       clicks: 0,
@@ -2515,6 +2839,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
     };
 
     current.spend += ad.spend;
+    current.reach += ad.reach;
     current.impressions += ad.impressions;
     current.clicks += ad.clicks;
     current.conversions += ad.conversions;
@@ -2539,6 +2864,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
   const spend = campaigns.reduce((acc, campaign) => acc + campaign.spend, 0);
   const impressions = campaigns.reduce((acc, campaign) => acc + campaign.impressions, 0);
   const clicks = campaigns.reduce((acc, campaign) => acc + campaign.clicks, 0);
+  const reach = campaigns.reduce((acc, campaign) => acc + (campaign.reach || 0), 0);
   const conversions = campaigns.reduce((acc, campaign) => acc + campaign.conversions, 0);
   const conversionValue = campaigns.reduce((acc, campaign) => acc + campaign.conversionValue, 0);
   const activeCampaigns = campaigns.filter((campaign) => campaign.status !== "stopped").length;
@@ -2554,6 +2880,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
       status: mapMetaAccountStatus(accountDetails?.account_status, activeCampaigns),
       monthlyBudget: +monthlyBudget.toFixed(2),
       spend: +spend.toFixed(2),
+      reach,
       impressions,
       clicks,
       conversions: +conversions.toFixed(2),
@@ -2710,9 +3037,92 @@ function normalizeGoogleAdsLiveAdRow(row) {
   };
 }
 
+function formatGoogleAdsEnum(value) {
+  return String(value || "Unknown")
+    .replaceAll("_", " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function normalizeGoogleAdsDeviceReportRow(row) {
+  const impressions = toNumber(row.metrics?.impressions);
+  const clicks = toNumber(row.metrics?.clicks);
+  const cost = toNumber(row.metrics?.costMicros) / 1_000_000;
+  const conversions = toNumber(row.metrics?.conversions);
+  const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
+
+  return {
+    device: formatGoogleAdsEnum(row.segments?.device),
+    impressions,
+    clicks,
+    ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
+    cost: +cost.toFixed(2),
+    conversions: +conversions.toFixed(2),
+    conversionValue: +conversionValue.toFixed(2),
+  };
+}
+
+function normalizeGoogleAdsGeographyReportRow(row) {
+  const clicks = toNumber(row.metrics?.clicks);
+  const cost = toNumber(row.metrics?.costMicros) / 1_000_000;
+  const conversions = toNumber(row.metrics?.conversions);
+  const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
+
+  return {
+    location: "",
+    countryResource: row.segments?.geoTargetCountry || "",
+    regionResource: row.segments?.geoTargetRegion || "",
+    cityResource: row.segments?.geoTargetCity || "",
+    clicks,
+    conversions: +conversions.toFixed(2),
+    cost: +cost.toFixed(2),
+    conversionValue: +conversionValue.toFixed(2),
+    costPerConversion: conversions ? +(cost / conversions).toFixed(2) : 0,
+  };
+}
+
+function normalizeGoogleAdsKeywordReportRow(row) {
+  const clicks = toNumber(row.metrics?.clicks);
+  const impressions = toNumber(row.metrics?.impressions);
+  const cost = toNumber(row.metrics?.costMicros) / 1_000_000;
+  const conversions = toNumber(row.metrics?.conversions);
+  const conversionValue = normalizeGoogleAdsConversionValue(row.metrics?.conversionsValue);
+
+  return {
+    keyword: row.adGroupCriterion?.keyword?.text || "Keyword",
+    matchType: formatGoogleAdsEnum(row.adGroupCriterion?.keyword?.matchType),
+    clicks,
+    impressions,
+    averageCpc: toNumber(row.metrics?.averageCpc) / 1_000_000,
+    ctr: toNumber(row.metrics?.ctr) * 100,
+    cost: +cost.toFixed(2),
+    conversions: +conversions.toFixed(2),
+    costPerConversion: conversions ? +(cost / conversions).toFixed(2) : 0,
+    valuePerConversion: conversions ? +(conversionValue / conversions).toFixed(2) : 0,
+    conversionValue: +conversionValue.toFixed(2),
+  };
+}
+
 function normalizeGoogleAdsConversionValue(value) {
   // Google Ads exposes metrics.conversions_value as a currency DOUBLE, unlike cost_micros.
   return toNumber(value);
+}
+
+function normalizeGoogleAdsRatioMetric(value) {
+  const raw = toNumber(value);
+  if (raw <= 0) return 0;
+  return raw <= 1 ? raw * 100 : raw;
+}
+
+function formatGoogleAdsLocationName(row, names) {
+  const parts = [row.cityResource, row.regionResource, row.countryResource]
+    .map((resourceName) => names.get(resourceName)?.name || "")
+    .filter(Boolean);
+
+  if (parts.length) return Array.from(new Set(parts)).join(", ");
+
+  const fallback = row.cityResource || row.regionResource || row.countryResource;
+  return fallback ? `Geo target ${String(fallback).split("/").pop()}` : "Unknown location";
 }
 
 function normalizeLiveDateRange(payload = {}) {
@@ -2974,6 +3384,7 @@ function normalizeMetaCampaignRow(row, currency, dateRange) {
     status: mapMetaDeliveryStatus(row.effective_status || row.status),
     objective: describeMetaObjective(row.objective),
     budget: dailyBudget > 0 ? dailyBudget * getGoogleAdsBudgetDayCount(dateRange) : lifetimeBudget,
+    reach: 0,
     spend: 0,
     impressions: 0,
     clicks: 0,
@@ -2987,6 +3398,7 @@ function normalizeMetaCampaignInsightRow(row) {
   if (!rawCampaignId) return null;
 
   const spend = toNumber(row.spend);
+  const reach = toNumber(row.reach);
   const impressions = toNumber(row.impressions);
   const clicks = toNumber(row.clicks);
   const conversions = extractMetaConversionCount(row.actions);
@@ -2998,6 +3410,7 @@ function normalizeMetaCampaignInsightRow(row) {
     status: "",
     objective: "Meta Ads",
     budget: 0,
+    reach,
     spend,
     impressions,
     clicks,
@@ -3018,6 +3431,7 @@ function mergeMetaLiveCampaign(base, overlay) {
     status: overlay.status || base.status,
     objective: base.objective && base.objective !== "Meta Ads" ? base.objective : overlay.objective,
     budget: toNumber(base.budget) || toNumber(overlay.budget),
+    reach: toNumber(overlay.reach) || toNumber(base.reach),
     spend: toNumber(overlay.spend),
     impressions: toNumber(overlay.impressions),
     clicks: toNumber(overlay.clicks),
@@ -3028,6 +3442,7 @@ function mergeMetaLiveCampaign(base, overlay) {
 
 function buildMetaLiveCampaign(campaign) {
   const spend = toNumber(campaign.spend);
+  const reach = toNumber(campaign.reach);
   const impressions = toNumber(campaign.impressions);
   const clicks = toNumber(campaign.clicks);
   const conversions = toNumber(campaign.conversions);
@@ -3041,6 +3456,7 @@ function buildMetaLiveCampaign(campaign) {
     objective: campaign.objective || "Meta Ads",
     budget: +budget.toFixed(2),
     spend: +spend.toFixed(2),
+    reach,
     impressions,
     clicks,
     conversions: +conversions.toFixed(2),
@@ -3071,6 +3487,7 @@ function normalizeMetaAdInsightRow(row, adStatusMap) {
 
   const statusRecord = adStatusMap.get(rawAdId) || {};
   const spend = toNumber(row.spend);
+  const reach = toNumber(row.reach);
   const impressions = toNumber(row.impressions);
   const clicks = toNumber(row.clicks);
   const conversions = extractMetaConversionCount(row.actions);
@@ -3084,6 +3501,7 @@ function normalizeMetaAdInsightRow(row, adStatusMap) {
     format: statusRecord.format || "Ad",
     status: statusRecord.status || "live",
     spend: +spend.toFixed(2),
+    reach,
     impressions,
     clicks,
     conversions: +conversions.toFixed(2),

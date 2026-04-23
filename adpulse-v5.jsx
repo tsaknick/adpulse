@@ -3,6 +3,7 @@ import {
   disconnectIntegrationProfile,
   fetchGa4LiveOverview,
   fetchGoogleAdsLiveOverview,
+  fetchGoogleAdsReportDetails,
   fetchIntegrationSnapshot,
   fetchMetaAdsLiveOverview,
   fetchSearchTermHierarchy,
@@ -699,6 +700,16 @@ function createEmptyGoogleAdsLiveState() {
     accounts: [],
     campaigns: [],
     ads: [],
+    errors: [],
+  };
+}
+
+function createEmptyGoogleAdsReportState() {
+  return {
+    loading: false,
+    error: "",
+    generatedAt: "",
+    details: [],
     errors: [],
   };
 }
@@ -3191,6 +3202,15 @@ function formatReportPercent(value) {
   return `${Number(value || 0).toFixed(2)}%`;
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function getPlatformReportSeries(client, platform, seriesMap) {
   const accountSeries = (client.accounts || [])
     .filter((account) => account.platform === platform)
@@ -3212,6 +3232,84 @@ function getPlatformReportSeries(client, platform, seriesMap) {
   }, { label: "", spend: 0, clicks: 0, impressions: 0, conversions: 0, conversionValue: 0, revenue: 0 }));
 }
 
+function aggregateReportRows(rows, keyField, numericFields, sorterField = "cost") {
+  const map = new Map();
+
+  (rows || []).forEach((row) => {
+    const key = String(row[keyField] || "Unknown").trim() || "Unknown";
+    const current = map.get(key) || { ...row, [keyField]: key };
+    numericFields.forEach((field) => {
+      if (!map.has(key)) current[field] = 0;
+      current[field] = (Number(current[field]) || 0) + (Number(row[field]) || 0);
+    });
+    map.set(key, current);
+  });
+
+  return Array.from(map.values())
+    .map((row) => ({
+      ...row,
+      ctr: Number(row.impressions) ? Number(row.clicks || 0) / Number(row.impressions) * 100 : Number(row.ctr) || 0,
+      costPerConversion: Number(row.conversions) ? Number(row.cost || row.spend || 0) / Number(row.conversions) : 0,
+      averageCpc: Number(row.clicks) ? Number(row.cost || row.spend || 0) / Number(row.clicks) : Number(row.averageCpc) || 0,
+      valuePerConversion: Number(row.conversions) ? Number(row.conversionValue || 0) / Number(row.conversions) : Number(row.valuePerConversion) || 0,
+    }))
+    .sort((left, right) => (Number(right[sorterField]) || 0) - (Number(left[sorterField]) || 0));
+}
+
+function aggregateGoogleReportDetails(details, clientId) {
+  const clientDetails = (details || []).filter((detail) => detail.clientId === clientId);
+  const devices = aggregateReportRows(
+    clientDetails.flatMap((detail) => detail.devices || []),
+    "device",
+    ["impressions", "clicks", "cost", "conversions", "conversionValue"],
+    "impressions"
+  );
+  const geographies = aggregateReportRows(
+    clientDetails.flatMap((detail) => detail.geographies || []),
+    "location",
+    ["clicks", "cost", "conversions", "conversionValue"],
+    "conversions"
+  );
+  const keywords = aggregateReportRows(
+    clientDetails.flatMap((detail) => detail.keywords || []),
+    "keyword",
+    ["impressions", "clicks", "cost", "conversions", "conversionValue"],
+    "clicks"
+  );
+  const impressionShare = aggregateImpressionShareRows(clientDetails.flatMap((detail) => detail.impressionShare || []));
+
+  return {
+    devices,
+    geographies,
+    keywords,
+    impressionShare,
+    errors: clientDetails.map((detail) => detail.dataError).filter(Boolean),
+  };
+}
+
+function aggregateImpressionShareRows(rows) {
+  const map = new Map();
+
+  (rows || []).forEach((row) => {
+    const key = row.date || row.label || "";
+    if (!key) return;
+    const current = map.get(key) || { date: key, label: row.label || key, searchImpressionShare: 0, searchBudgetLostImpressionShare: 0, count: 0 };
+    current.searchImpressionShare += Number(row.searchImpressionShare) || 0;
+    current.searchBudgetLostImpressionShare += Number(row.searchBudgetLostImpressionShare) || 0;
+    current.count += 1;
+    map.set(key, current);
+  });
+
+  return Array.from(map.values())
+    .map((row) => ({
+      date: row.date,
+      label: row.label,
+      searchImpressionShare: row.count ? row.searchImpressionShare / row.count : 0,
+      searchBudgetLostImpressionShare: row.count ? row.searchBudgetLostImpressionShare / row.count : 0,
+    }))
+    .sort((left, right) => String(left.date).localeCompare(String(right.date)));
+}
+
 function getReportDateStamp() {
   return new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
@@ -3223,19 +3321,8 @@ function ReportPrintStyles() {
         @media print {
           @page { size: A4 landscape; margin: 0; }
           body { background: #ffffff !important; }
-          body * { visibility: hidden !important; }
-          .report-print-root, .report-print-root * { visibility: visible !important; }
-          .report-print-root {
-            position: absolute !important;
-            left: 0 !important;
-            top: 0 !important;
-            width: 100% !important;
-            background: #ffffff !important;
-            color: #111111 !important;
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
-          }
           .report-screen-controls { display: none !important; }
+          .report-print-root { display: block !important; background: #ffffff !important; }
           .report-page {
             width: 297mm !important;
             min-height: 210mm !important;
@@ -3256,20 +3343,68 @@ function ReportPrintStyles() {
   );
 }
 
-function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, dateRangeLabel, dateRangeValue, onDateRangeChange }) {
+function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, dateRangeLabel, dateRangeValue, onDateRangeChange, googleReportState }) {
   const selectedClient = clients.find((client) => client.id === selectedClientId) || clients[0] || null;
+  const googleDetails = selectedClient ? aggregateGoogleReportDetails(googleReportState.details, selectedClient.id) : null;
 
   function generatePdf() {
     if (!selectedClient || typeof window === "undefined") return;
 
-    const previousTitle = document.title;
-    document.title = `${selectedClient.name} Campaign Report`;
-    window.requestAnimationFrame(() => {
+    const reportNode = document.querySelector(".report-print-root");
+    if (!reportNode) return;
+
+    const printWindow = window.open("", "_blank", "width=1280,height=900");
+    if (!printWindow) {
       window.print();
-      window.setTimeout(() => {
-        document.title = previousTitle;
-      }, 500);
-    });
+      return;
+    }
+
+    printWindow.document.write(`
+      <!doctype html>
+      <html>
+        <head>
+          <title>${escapeHtml(selectedClient.name)} Campaign Report</title>
+          <style>
+            @page { size: A4 landscape; margin: 0; }
+            * { box-sizing: border-box; }
+            body {
+              margin: 0;
+              background: #ffffff;
+              color: #162218;
+              font-family: ${T.font};
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
+            .report-print-root {
+              display: block;
+              width: 297mm;
+              margin: 0 auto;
+              background: #ffffff;
+            }
+            .report-page {
+              width: 297mm !important;
+              min-height: 210mm !important;
+              max-width: none !important;
+              margin: 0 !important;
+              border-radius: 0 !important;
+              box-shadow: none !important;
+              page-break-after: always;
+              break-after: page;
+            }
+            .report-page:last-child {
+              page-break-after: auto;
+              break-after: auto;
+            }
+          </style>
+        </head>
+        <body>${reportNode.outerHTML}</body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.setTimeout(() => {
+      printWindow.print();
+    }, 350);
   }
 
   if (!clients.length) {
@@ -3332,14 +3467,14 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
 
       {selectedClient ? (
         <div className="report-print-root" style={{ display: "grid", gap: 18, justifyItems: "center" }}>
-          <CampaignReportDocument client={selectedClient} seriesMap={seriesMap} dateRangeLabel={dateRangeLabel} />
+          <CampaignReportDocument client={selectedClient} seriesMap={seriesMap} dateRangeLabel={dateRangeLabel} googleDetails={googleDetails} googleReportState={googleReportState} />
         </div>
       ) : null}
     </div>
   );
 }
 
-function CampaignReportDocument({ client, seriesMap, dateRangeLabel }) {
+function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetails, googleReportState }) {
   const googleAccounts = (client.accounts || []).filter((account) => account.platform === "google_ads");
   const metaAccounts = (client.accounts || []).filter((account) => account.platform === "meta_ads");
   const googleCampaigns = (client.campaigns || []).filter((campaign) => campaign.platform === "google_ads").sort((left, right) => right.spend - left.spend);
@@ -3394,8 +3529,16 @@ function CampaignReportDocument({ client, seriesMap, dateRangeLabel }) {
         summary={googleSummary}
         series={googleSeries}
         campaigns={googleCampaigns}
+        details={googleDetails}
+        detailLoading={googleReportState.loading}
         empty={!hasGoogle}
       />
+
+      <ReportGoogleGeographyPage details={googleDetails} loading={googleReportState.loading} />
+
+      <ReportGoogleDevicePage details={googleDetails} loading={googleReportState.loading} />
+
+      <ReportGoogleImpressionSharePage details={googleDetails} loading={googleReportState.loading} />
 
       <ReportCampaignTablePage
         title="Google Campaign Performance"
@@ -3403,6 +3546,8 @@ function CampaignReportDocument({ client, seriesMap, dateRangeLabel }) {
         campaigns={googleCampaigns}
         emptyLabel="No linked Google Ads campaigns were found for this client."
       />
+
+      <ReportGoogleKeywordPage details={googleDetails} loading={googleReportState.loading} />
 
       <ReportChannelOverview
         title="Facebook Ads Performance Overview"
@@ -3519,6 +3664,7 @@ function ReportCampaignTablePage({ title, platform, campaigns, emptyLabel }) {
     { label: "Campaign", render: (row) => row.name },
     { label: "Impressions", align: "right", render: (row) => formatReportNumber(row.impressions) },
     { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
+    ...(platform === "meta_ads" ? [{ label: "Reach", align: "right", render: (row) => formatReportNumber(row.reach) }] : []),
     { label: "CTR (%)", align: "right", render: (row) => formatReportPercent(row.impressions ? row.clicks / row.impressions * 100 : 0) },
     { label: "Cost", align: "right", render: (row) => formatReportCurrency(row.spend) },
     { label: "Avg CPC", align: "right", render: (row) => formatReportCurrency(row.clicks ? row.spend / row.clicks : 0) },
@@ -3535,11 +3681,108 @@ function ReportCampaignTablePage({ title, platform, campaigns, emptyLabel }) {
   );
 }
 
+function ReportGoogleGeographyPage({ details, loading }) {
+  const rows = details?.geographies || [];
+
+  return (
+    <ReportPage accent={PLATFORM_META.google_ads.color}>
+      <ReportHeader title="Geographic Performance" platform="google_ads" />
+      <ReportTable
+        columns={[
+          { label: "Location", render: (row) => row.location },
+          { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
+          { label: "Conversions", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
+          { label: "Conversion Cost", align: "right", render: (row) => formatReportCurrency(row.costPerConversion) },
+          { label: "Total Conversion Value", align: "right", render: (row) => formatReportCurrency(row.conversionValue) },
+        ]}
+        rows={rows.slice(0, 12)}
+        emptyLabel={loading ? "Loading geographic performance..." : "Geographic performance is unavailable for the selected Google Ads account."}
+      />
+    </ReportPage>
+  );
+}
+
+function ReportGoogleDevicePage({ details, loading }) {
+  const rows = details?.devices || [];
+  const bars = rows.map((row) => ({ label: row.device, value: row.conversions || row.clicks || row.impressions }));
+
+  return (
+    <ReportPage accent={PLATFORM_META.google_ads.color}>
+      <ReportHeader title="Device Performance" platform="google_ads" />
+      <div style={{ display: "grid", gridTemplateColumns: "0.85fr 1.15fr", gap: 18 }}>
+        <ReportBarChart title="Conversions by device" items={bars} color={PLATFORM_META.google_ads.color} />
+        <ReportTable
+          columns={[
+            { label: "Device", render: (row) => row.device },
+            { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
+            { label: "Impressions", align: "right", render: (row) => formatReportNumber(row.impressions) },
+            { label: "CTR (%)", align: "right", render: (row) => formatReportPercent(row.ctr) },
+            { label: "Conversions", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
+          ]}
+          rows={rows.slice(0, 8)}
+          emptyLabel={loading ? "Loading device performance..." : "Device performance is unavailable for the selected Google Ads account."}
+        />
+      </div>
+    </ReportPage>
+  );
+}
+
+function ReportGoogleImpressionSharePage({ details, loading }) {
+  const rows = details?.impressionShare || [];
+
+  return (
+    <ReportPage accent={PLATFORM_META.google_ads.color}>
+      <ReportHeader title="Impression Share Performance" platform="google_ads" />
+      {rows.length ? (
+        <ReportDualLineChart
+          title="Search IS vs Search Budget Lost IS"
+          series={rows}
+          primaryMetric="searchImpressionShare"
+          secondaryMetric="searchBudgetLostImpressionShare"
+          primaryLabel="Search IS"
+          secondaryLabel="Search Budget Lost IS"
+          primaryColor={PLATFORM_META.google_ads.color}
+          secondaryColor={T.amber}
+        />
+      ) : (
+        <div style={{ padding: 24, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, color: T.inkSoft }}>
+          {loading ? "Loading impression share performance..." : "Search impression share is unavailable for this account or date range."}
+        </div>
+      )}
+    </ReportPage>
+  );
+}
+
+function ReportGoogleKeywordPage({ details, loading }) {
+  const rows = details?.keywords || [];
+
+  return (
+    <ReportPage accent={PLATFORM_META.google_ads.color}>
+      <ReportHeader title="Keyword Performance (Top 10)" platform="google_ads" />
+      <ReportTable
+        columns={[
+          { label: "Keyword", render: (row) => row.keyword },
+          { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
+          { label: "Average CPC", align: "right", render: (row) => formatReportCurrency(row.averageCpc) },
+          { label: "CTR (%)", align: "right", render: (row) => formatReportPercent(row.ctr) },
+          { label: "Cost", align: "right", render: (row) => formatReportCurrency(row.cost) },
+          { label: "Conversions", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
+          { label: "Cost / Conversion", align: "right", render: (row) => formatReportCurrency(row.costPerConversion) },
+          { label: "Value / Conv.", align: "right", render: (row) => formatReportCurrency(row.valuePerConversion) },
+        ]}
+        rows={rows.slice(0, 10)}
+        emptyLabel={loading ? "Loading keyword performance..." : "Keyword performance is unavailable for this Google Ads account."}
+      />
+    </ReportPage>
+  );
+}
+
 function ReportAdsTablePage({ ads }) {
   const columns = [
     { label: "Ad name", render: (row) => row.name },
     { label: "Impressions", align: "right", render: (row) => formatReportNumber(row.impressions) },
     { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
+    { label: "Reach", align: "right", render: (row) => formatReportNumber(row.reach) },
     { label: "Purchases", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
     { label: "Cost / Purchase", align: "right", render: (row) => formatReportCurrency(row.conversions ? row.spend / row.conversions : 0) },
     { label: "Purchase Value", align: "right", render: (row) => formatReportCurrency(row.conversionValue || 0) },
@@ -3626,6 +3869,52 @@ function ReportLineChart({ title, series, metric, color }) {
         {points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r="3.8" fill={color} />)}
         <text x={pad} y={height - 8} fontSize="11" fill={T.inkSoft}>Start</text>
         <text x={width - pad} y={height - 8} fontSize="11" fill={T.inkSoft} textAnchor="end">End</text>
+      </svg>
+    </div>
+  );
+}
+
+function ReportDualLineChart({ title, series, primaryMetric, secondaryMetric, primaryLabel, secondaryLabel, primaryColor, secondaryColor }) {
+  const width = 980;
+  const height = 420;
+  const pad = 42;
+  const values = (series || []).flatMap((point) => [Number(point[primaryMetric]) || 0, Number(point[secondaryMetric]) || 0]);
+  const max = Math.max(...values, 1);
+  const buildPath = (metric) => (series || []).map((point, index) => {
+    const value = Number(point[metric]) || 0;
+    const x = pad + (index / Math.max(series.length - 1, 1)) * (width - pad * 2);
+    const y = height - pad - (value / max) * (height - pad * 2);
+    return { x, y };
+  });
+  const primaryPoints = buildPath(primaryMetric);
+  const secondaryPoints = buildPath(secondaryMetric);
+  const toPath = (points) => points.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
+
+  return (
+    <div style={{ padding: 20, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, fontFamily: T.heading }}>{title}</div>
+        <div style={{ display: "flex", gap: 12, fontSize: 11, color: T.inkSoft, fontWeight: 800 }}>
+          <span style={{ color: primaryColor }}>{primaryLabel}</span>
+          <span style={{ color: secondaryColor }}>{secondaryLabel}</span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", display: "block" }}>
+        {[0, 25, 50, 75, 100].map((tick) => {
+          const y = height - pad - (tick / Math.max(max, 100)) * (height - pad * 2);
+          return (
+            <g key={tick}>
+              <line x1={pad} x2={width - pad} y1={y} y2={y} stroke="rgba(22,34,24,0.08)" />
+              <text x={pad - 10} y={y + 4} textAnchor="end" fontSize="10" fill={T.inkSoft}>{tick}</text>
+            </g>
+          );
+        })}
+        <path d={toPath(primaryPoints)} fill="none" stroke={primaryColor} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+        <path d={toPath(secondaryPoints)} fill="none" stroke={secondaryColor} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+        {primaryPoints.map((point, index) => <circle key={`p-${index}`} cx={point.x} cy={point.y} r="3.6" fill={primaryColor} />)}
+        {secondaryPoints.map((point, index) => <circle key={`s-${index}`} cx={point.x} cy={point.y} r="3.6" fill={secondaryColor} />)}
+        <text x={pad} y={height - 10} fontSize="11" fill={T.inkSoft}>Start</text>
+        <text x={width - pad} y={height - 10} fontSize="11" fill={T.inkSoft} textAnchor="end">End</text>
       </svg>
     </div>
   );
@@ -5581,6 +5870,7 @@ export default function AdPulse() {
     error: "",
   }));
   const [googleAdsLiveState, setGoogleAdsLiveState] = useState(() => createEmptyGoogleAdsLiveState());
+  const [googleAdsReportState, setGoogleAdsReportState] = useState(() => createEmptyGoogleAdsReportState());
   const [metaAdsLiveState, setMetaAdsLiveState] = useState(() => createEmptyMetaAdsLiveState());
   const [ga4LiveState, setGa4LiveState] = useState(() => createEmptyGa4LiveState());
   const [integrationBusy, setIntegrationBusy] = useState({});
@@ -5802,11 +6092,17 @@ export default function AdPulse() {
   useEffect(() => {
     if (!currentUser || !googleAdsLiveRequests.length) {
       setGoogleAdsLiveState(createEmptyGoogleAdsLiveState());
+      setGoogleAdsReportState(createEmptyGoogleAdsReportState());
       return;
     }
 
     let cancelled = false;
     setGoogleAdsLiveState((current) => ({
+      ...current,
+      loading: true,
+      error: "",
+    }));
+    setGoogleAdsReportState((current) => ({
       ...current,
       loading: true,
       error: "",
@@ -5837,6 +6133,31 @@ export default function AdPulse() {
           accounts: [],
           campaigns: [],
           ads: [],
+          errors: [],
+        });
+      });
+
+    fetchGoogleAdsReportDetails({
+      ...accountsDateRangePayload,
+      requests: googleAdsLiveRequests,
+    })
+      .then((data) => {
+        if (cancelled) return;
+        setGoogleAdsReportState({
+          loading: false,
+          error: "",
+          generatedAt: data?.generatedAt || "",
+          details: Array.isArray(data?.details) ? data.details : [],
+          errors: Array.isArray(data?.errors) ? data.errors : [],
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setGoogleAdsReportState({
+          loading: false,
+          error: error.message || "Could not load Google Ads report details.",
+          generatedAt: "",
+          details: [],
           errors: [],
         });
       });
@@ -6702,6 +7023,7 @@ export default function AdPulse() {
               dateRangeLabel={reportDateRangeLabel}
               dateRangeValue={accountsDateRange}
               onDateRangeChange={setAccountsDateRange}
+              googleReportState={googleAdsReportState}
             />
           ) : null}
 
