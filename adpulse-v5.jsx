@@ -3989,10 +3989,16 @@ function ReportCampaignTablePage({ title, platform, campaigns, emptyLabel }) {
 function ReportGoogleGeographyPage({ details, loading }) {
   const rows = details?.geographies || [];
   const geographyError = (details?.errors || []).find((error) => /geo|location/i.test(String(error)));
+  const usingLocationViewFallback = rows.some((row) => row.source === "location_view");
 
   return (
     <ReportPage accent={PLATFORM_META.google_ads.color}>
       <ReportHeader title="Geographic Performance" platform="google_ads" />
+      {usingLocationViewFallback ? (
+        <div style={{ marginBottom: 14, padding: "10px 12px", borderRadius: 16, background: "rgba(66, 133, 244, 0.08)", color: T.inkSoft, fontSize: 12 }}>
+          Google Ads did not return visitor geography for this account, so this table is using targeted location performance from the account&apos;s location criteria.
+        </div>
+      ) : null}
       <ReportTable
         columns={[
           { label: "Location", render: (row) => row.location },

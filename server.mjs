@@ -3104,6 +3104,33 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
     return (response.results || []).map(normalizeGoogleAdsGeographyReportRow).filter(Boolean);
   };
 
+  const fetchLocationViewRows = async () => {
+    const response = await fetchGoogleAdsRowsWithLoginFallback({
+      customerId,
+      tokenBundle,
+      loginCustomerIds,
+      query: [
+        "SELECT",
+        "  campaign_criterion.location.geo_target_constant,",
+        "  metrics.clicks,",
+        "  metrics.conversions,",
+        "  metrics.all_conversions,",
+        "  metrics.conversions_value,",
+        "  metrics.all_conversions_value,",
+        "  metrics.cost_micros",
+        "FROM location_view",
+        "WHERE campaign.status != REMOVED",
+        "  AND metrics.clicks > 0",
+        dateRange.googleCondition,
+        "ORDER BY metrics.conversions DESC",
+        "LIMIT 50",
+      ].join(" "),
+      label: `Google Ads geography report location-view ${customerId}`,
+    });
+
+    return (response.results || []).map(normalizeGoogleAdsLocationViewReportRow).filter(Boolean);
+  };
+
   const attempts = [
     { viewName: "geographic_view", labelSuffix: "geo-target", extraConditions: [] },
     { viewName: "user_location_view", labelSuffix: "user-location", extraConditions: [] },
@@ -3119,6 +3146,14 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
       if (rows.length) break;
     } catch (error) {
       messages.push(error.message || `Could not fetch ${attempt.labelSuffix} geography rows for ${customerId}.`);
+    }
+  }
+
+  if (!rows.length) {
+    try {
+      rows = await fetchLocationViewRows();
+    } catch (error) {
+      messages.push(error.message || `Could not fetch location-view geography rows for ${customerId}.`);
     }
   }
 
@@ -3641,6 +3676,18 @@ function normalizeGoogleAdsGeographyReportRow(row) {
     conversionValue: +conversionValue.toFixed(2),
     allConversionValue: +allConversionValue.toFixed(2),
     costPerConversion: conversions ? +(cost / conversions).toFixed(2) : 0,
+  };
+}
+
+function normalizeGoogleAdsLocationViewReportRow(row) {
+  const normalized = normalizeGoogleAdsGeographyReportRow(row);
+  return {
+    ...normalized,
+    mostSpecificResource: row.campaignCriterion?.location?.geoTargetConstant || normalized.mostSpecificResource,
+    countryResource: "",
+    regionResource: "",
+    cityResource: "",
+    source: "location_view",
   };
 }
 
