@@ -39,6 +39,8 @@ const GOOGLE_ADS_LIVE_ALLOWED_DATE_RANGES = new Set([
   "LAST_MONTH",
   "CUSTOM",
 ]);
+const DEFAULT_OPENAI_STRATEGIST_MODEL = "gpt-5.4";
+const AI_STRATEGY_CACHE_TTL = Number(process.env.ADPULSE_AI_STRATEGY_CACHE_TTL || 15 * 60 * 1000);
 
 loadEnvFile(path.join(__dirname, ".env.local"));
 loadEnvFile(path.join(__dirname, ".env"));
@@ -68,6 +70,7 @@ const PROVIDERS = {
 };
 
 const pendingStates = new Map();
+const aiStrategyCache = new Map();
 const DEFAULT_USERS = [
   { id: "usr-01", name: "Maria Papadaki", role: "director", title: "Performance Director", email: "director@adpulse.local", password: "demo123", accent: "#162218", accent2: "#2d6cdf" },
   { id: "usr-02", name: "Anna Kosta", role: "account", title: "Senior Account Manager", email: "anna@adpulse.local", password: "demo123", accent: "#0f8f66", accent2: "#78d1ad" },
@@ -253,6 +256,19 @@ const server = http.createServer(async (request, response) => {
       }
 
       const payload = await fetchGa4LiveOverview(parsed);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/strategy") {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const payload = await generateAiStrategy(parsed);
       sendJson(response, 200, payload);
       return;
     }
@@ -4863,6 +4879,7 @@ function getSetupStatus() {
       GOOGLE_ADS_DEVELOPER_TOKEN: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
       META_APP_ID: !!process.env.META_APP_ID,
       META_APP_SECRET: !!process.env.META_APP_SECRET,
+      OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
     },
     masked: {
       GOOGLE_CLIENT_ID: mask(process.env.GOOGLE_CLIENT_ID || ""),
@@ -4870,6 +4887,8 @@ function getSetupStatus() {
       GOOGLE_ADS_DEVELOPER_TOKEN: mask(process.env.GOOGLE_ADS_DEVELOPER_TOKEN || ""),
       META_APP_ID: mask(process.env.META_APP_ID || ""),
       META_APP_SECRET: mask(process.env.META_APP_SECRET || ""),
+      OPENAI_API_KEY: mask(process.env.OPENAI_API_KEY || ""),
+      OPENAI_STRATEGIST_MODEL: String(process.env.OPENAI_STRATEGIST_MODEL || "").trim(),
     },
     allReady: !!(
       process.env.GOOGLE_CLIENT_ID &&
@@ -4884,6 +4903,7 @@ function getSetupStatus() {
 const ALLOWED_SETUP_KEYS = new Set([
   "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_ADS_DEVELOPER_TOKEN",
   "META_APP_ID", "META_APP_SECRET", "META_CONFIG_ID", "META_API_VERSION",
+  "OPENAI_API_KEY", "OPENAI_STRATEGIST_MODEL",
 ]);
 
 function saveSetupCredentials(input) {
@@ -4940,7 +4960,326 @@ function saveSetupCredentials(input) {
   return {
     ok: true,
     changed,
-    message: `Saved ${changed} credential${changed === 1 ? "" : "s"}. OAuth is ready to use.`,
+    message: `Saved ${changed} setting${changed === 1 ? "" : "s"}.`,
     status: getSetupStatus(),
   };
+}
+
+function getAiStrategistModel() {
+  const configured = String(process.env.OPENAI_STRATEGIST_MODEL || "").trim();
+  return configured || DEFAULT_OPENAI_STRATEGIST_MODEL;
+}
+
+function pruneAiStrategyCache() {
+  const now = Date.now();
+
+  for (const [key, entry] of aiStrategyCache.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      aiStrategyCache.delete(key);
+    }
+  }
+}
+
+function getAiStrategyCacheKey(payload) {
+  return crypto.createHash("sha1").update(JSON.stringify(payload || {})).digest("hex");
+}
+
+function extractOpenAiOutputText(payload) {
+  if (typeof payload?.output_text === "string" && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+
+  const chunks = [];
+
+  for (const item of payload?.output || []) {
+    if (item?.type !== "message") continue;
+
+    for (const content of item.content || []) {
+      if (content?.type === "refusal" && content.refusal) {
+        throw new Error(`OpenAI AI strategist refused the request: ${content.refusal}`);
+      }
+
+      if (content?.type === "output_text" && content.text) {
+        chunks.push(content.text);
+      }
+    }
+  }
+
+  const combined = chunks.join("\n").trim();
+  if (combined) return combined;
+
+  throw new Error("OpenAI AI strategist returned no structured output.");
+}
+
+function normalizeAiStrategyPayload(payload) {
+  const recommendationDefaults = {
+    title: "",
+    area: "strategy",
+    priority: "next",
+    action: "",
+    why: "",
+    expectedImpact: "",
+    confidence: "medium",
+  };
+  const keywordDefaults = {
+    keyword: "",
+    suggestedMatchType: "",
+    why: "",
+    priority: "next",
+  };
+  const experimentDefaults = {
+    title: "",
+    hypothesis: "",
+    successMetric: "",
+  };
+  const budgetDefaults = {
+    channel: "",
+    direction: "",
+    amountText: "",
+    why: "",
+    priority: "next",
+  };
+
+  return {
+    strategySummary: String(payload?.strategySummary || "").trim(),
+    performanceDiagnosis: String(payload?.performanceDiagnosis || "").trim(),
+    nextBestAction: {
+      ...recommendationDefaults,
+      ...(payload?.nextBestAction || {}),
+    },
+    recommendations: Array.isArray(payload?.recommendations)
+      ? payload.recommendations.map((item) => ({
+          ...recommendationDefaults,
+          ...(item || {}),
+        }))
+      : [],
+    keywordOpportunities: Array.isArray(payload?.keywordOpportunities)
+      ? payload.keywordOpportunities.map((item) => ({
+          ...keywordDefaults,
+          ...(item || {}),
+        }))
+      : [],
+    negativeKeywordSuggestions: Array.isArray(payload?.negativeKeywordSuggestions)
+      ? payload.negativeKeywordSuggestions.map((item) => ({
+          ...keywordDefaults,
+          ...(item || {}),
+        }))
+      : [],
+    budgetActions: Array.isArray(payload?.budgetActions)
+      ? payload.budgetActions.map((item) => ({
+          ...budgetDefaults,
+          ...(item || {}),
+        }))
+      : [],
+    experiments: Array.isArray(payload?.experiments)
+      ? payload.experiments.map((item) => ({
+          ...experimentDefaults,
+          ...(item || {}),
+        }))
+      : [],
+    watchouts: Array.isArray(payload?.watchouts)
+      ? payload.watchouts.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
+  };
+}
+
+async function generateAiStrategy(input) {
+  const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  if (!apiKey) {
+    throw new Error("AI strategist is not configured. Add OPENAI_API_KEY from the Connections screen.");
+  }
+
+  if (!input || typeof input !== "object") {
+    throw new Error("AI strategist expected a JSON object.");
+  }
+
+  const scope = String(input.scope || "account").trim().toLowerCase() || "account";
+  const context = input.context && typeof input.context === "object" ? input.context : {};
+  const cachePayload = { scope, context };
+
+  pruneAiStrategyCache();
+  const cacheKey = getAiStrategyCacheKey(cachePayload);
+  const cached = aiStrategyCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return {
+      ...cached.value,
+      cached: true,
+    };
+  }
+
+  const model = getAiStrategistModel();
+  const systemPrompt = [
+    "You are AdPulse Strategist, a senior paid media strategist.",
+    "Infer the real campaign strategy from the provided dashboard context.",
+    "Recommend the single highest-leverage next action first, then short follow-up actions.",
+    "Use only the supplied data. If evidence is missing, say so instead of inventing facts.",
+    "Respect the stated client target, date range, and connected channels.",
+    "Keep recommendations operational and specific.",
+  ].join(" ");
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      strategySummary: { type: "string" },
+      performanceDiagnosis: { type: "string" },
+      nextBestAction: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          area: {
+            type: "string",
+            enum: ["strategy", "budget", "keyword", "negative_keywords", "creative", "bidding", "audience", "landing_page", "measurement", "structure"],
+          },
+          priority: { type: "string", enum: ["now", "next", "later"] },
+          action: { type: "string" },
+          why: { type: "string" },
+          expectedImpact: { type: "string" },
+          confidence: { type: "string", enum: ["high", "medium", "low"] },
+        },
+        required: ["title", "area", "priority", "action", "why", "expectedImpact", "confidence"],
+      },
+      recommendations: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: "string" },
+            area: {
+              type: "string",
+              enum: ["strategy", "budget", "keyword", "negative_keywords", "creative", "bidding", "audience", "landing_page", "measurement", "structure"],
+            },
+            priority: { type: "string", enum: ["now", "next", "later"] },
+            action: { type: "string" },
+            why: { type: "string" },
+            expectedImpact: { type: "string" },
+            confidence: { type: "string", enum: ["high", "medium", "low"] },
+          },
+          required: ["title", "area", "priority", "action", "why", "expectedImpact", "confidence"],
+        },
+      },
+      keywordOpportunities: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            keyword: { type: "string" },
+            suggestedMatchType: { type: "string" },
+            why: { type: "string" },
+            priority: { type: "string", enum: ["now", "next", "later"] },
+          },
+          required: ["keyword", "suggestedMatchType", "why", "priority"],
+        },
+      },
+      negativeKeywordSuggestions: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            keyword: { type: "string" },
+            suggestedMatchType: { type: "string" },
+            why: { type: "string" },
+            priority: { type: "string", enum: ["now", "next", "later"] },
+          },
+          required: ["keyword", "suggestedMatchType", "why", "priority"],
+        },
+      },
+      budgetActions: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            channel: { type: "string" },
+            direction: { type: "string" },
+            amountText: { type: "string" },
+            why: { type: "string" },
+            priority: { type: "string", enum: ["now", "next", "later"] },
+          },
+          required: ["channel", "direction", "amountText", "why", "priority"],
+        },
+      },
+      experiments: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: "string" },
+            hypothesis: { type: "string" },
+            successMetric: { type: "string" },
+          },
+          required: ["title", "hypothesis", "successMetric"],
+        },
+      },
+      watchouts: {
+        type: "array",
+        items: { type: "string" },
+      },
+    },
+    required: [
+      "strategySummary",
+      "performanceDiagnosis",
+      "nextBestAction",
+      "recommendations",
+      "keywordOpportunities",
+      "negativeKeywordSuggestions",
+      "budgetActions",
+      "experiments",
+      "watchouts",
+    ],
+  };
+
+  const response = await fetchJson("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      reasoning: { effort: "medium" },
+      max_output_tokens: 1800,
+      input: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `Analyze this AdPulse ${scope} context. Explain the strategy you detect, identify what is limiting performance, and recommend the highest-leverage next step plus short follow-ups. Ground every point in the supplied live data.`,
+        },
+        {
+          role: "user",
+          content: JSON.stringify(context, null, 2),
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "adpulse_strategy_response",
+          schema,
+          strict: true,
+        },
+      },
+    }),
+  }, "OpenAI AI strategist");
+
+  const parsed = JSON.parse(extractOpenAiOutputText(response));
+  const strategy = normalizeAiStrategyPayload(parsed);
+  const payload = {
+    ok: true,
+    cached: false,
+    model,
+    generatedAt: new Date().toISOString(),
+    strategy,
+  };
+
+  aiStrategyCache.set(cacheKey, {
+    expiresAt: Date.now() + AI_STRATEGY_CACHE_TTL,
+    value: payload,
+  });
+
+  return payload;
 }

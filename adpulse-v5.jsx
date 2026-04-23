@@ -4,6 +4,7 @@ import {
   deleteClientRecord,
   deleteUser,
   disconnectIntegrationProfile,
+  fetchAiStrategy,
   fetchClients,
   fetchGa4LiveOverview,
   fetchGoogleAdsLiveOverview,
@@ -903,6 +904,256 @@ function buildBudgetRecommendations(client) {
     .slice(0, 3);
 }
 
+function getAiPriorityTone(priority) {
+  if (priority === "now") return "warning";
+  if (priority === "later") return "neutral";
+  return "positive";
+}
+
+function getAiAreaLabel(area) {
+  if (area === "negative_keywords") return "Negative keywords";
+  if (area === "landing_page") return "Landing page";
+  return String(area || "strategy")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function formatAiGeneratedAt(value) {
+  if (!value) return "";
+
+  try {
+    return new Date(value).toLocaleString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch (_) {
+    return value;
+  }
+}
+
+function summarizeAiCampaign(campaign) {
+  const spend = Number(campaign?.spend) || 0;
+  const clicks = Number(campaign?.clicks) || 0;
+  const impressions = Number(campaign?.impressions) || 0;
+  const conversions = Number(campaign?.conversions) || 0;
+  const conversionValue = getConversionValue(campaign);
+  const ctr = impressions > 0 ? +(clicks / impressions * 100).toFixed(2) : Number(campaign?.ctr) || 0;
+  const cpc = clicks > 0 ? +(spend / clicks).toFixed(2) : Number(campaign?.cpc) || 0;
+  const roas = spend > 0 ? +(conversionValue / spend).toFixed(2) : Number(campaign?.roas) || 0;
+  const costPerConversion = conversions > 0 ? +(spend / conversions).toFixed(2) : 0;
+
+  return {
+    platform: campaign?.platform || "",
+    name: campaign?.name || "Campaign",
+    status: campaign?.status || "",
+    objective: campaign?.objective || campaign?.channelType || "",
+    spend,
+    clicks,
+    impressions,
+    conversions,
+    conversionValue,
+    ctr,
+    cpc,
+    roas,
+    costPerConversion,
+  };
+}
+
+function buildAccountAiPayload(client, dateRangeLabel) {
+  const grouped = ["google_ads", "meta_ads"].map((platform) => {
+    const accounts = (client.accounts || []).filter((account) => account.platform === platform);
+    const spend = accounts.reduce((acc, account) => acc + (Number(account.spend) || 0), 0);
+    const clicks = accounts.reduce((acc, account) => acc + (Number(account.clicks) || 0), 0);
+    const impressions = accounts.reduce((acc, account) => acc + (Number(account.impressions) || 0), 0);
+    const conversions = accounts.reduce((acc, account) => acc + (Number(account.conversions) || 0), 0);
+    const conversionValue = accounts.reduce((acc, account) => acc + getConversionValue(account), 0);
+    const budget = Number(client.budgets?.[platform]) || 0;
+
+    return {
+      platform,
+      label: PLATFORM_META[platform]?.label || platform,
+      budget,
+      spend,
+      clicks,
+      impressions,
+      conversions,
+      conversionValue,
+      ctr: impressions > 0 ? +(clicks / impressions * 100).toFixed(2) : 0,
+      cpc: clicks > 0 ? +(spend / clicks).toFixed(2) : 0,
+      roas: spend > 0 ? +(conversionValue / spend).toFixed(2) : 0,
+      accountCount: accounts.length,
+    };
+  }).filter((item) => item.budget > 0 || item.spend > 0 || item.accountCount > 0);
+
+  const campaigns = (client.campaigns || []).map(summarizeAiCampaign);
+  const topCampaigns = [...campaigns]
+    .sort((left, right) => right.spend - left.spend || right.conversions - left.conversions)
+    .slice(0, 8);
+  const concernCampaigns = [...campaigns]
+    .filter((campaign) => campaign.spend > 0)
+    .sort((left, right) => {
+      const leftScore = (left.conversions > 0 ? left.conversions * 20 : 0) + left.roas * 10 - left.costPerConversion;
+      const rightScore = (right.conversions > 0 ? right.conversions * 20 : 0) + right.roas * 10 - right.costPerConversion;
+      return leftScore - rightScore || right.spend - left.spend;
+    })
+    .slice(0, 5);
+
+  return {
+    client: {
+      id: client.id,
+      name: client.name,
+      target: normalizeClientTarget(client.focus),
+      category: client.category,
+      reportingGroup: client.reportingGroup || "Independent",
+      dateRange: dateRangeLabel,
+      totalBudget: Number(client.totalBudget) || 0,
+      spend: Number(client.spend) || 0,
+      impressions: Number(client.impressions) || 0,
+      clicks: Number(client.clicks) || 0,
+      conversions: Number(client.conversions) || 0,
+      conversionValue: Number(client.conversionValue) || 0,
+      roas: Number(client.roas) || 0,
+      activeCampaigns: Number(client.activeCampaigns) || 0,
+      stoppedCampaigns: Number(client.stoppedCampaigns) || 0,
+      linkedAccounts: Number(client.accounts?.length) || 0,
+    },
+    channelSummary: grouped,
+    healthFlags: (client.health?.flags || []).slice(0, 6).map((flag) => ({
+      label: flag.label,
+      detail: flag.detail,
+      tone: flag.tone,
+    })),
+    topCampaigns,
+    concernCampaigns,
+    ga4: client.ga4
+      ? {
+          propertyName: client.ga4.propertyName,
+          sessions: Number(client.ga4.sessions) || 0,
+          users: Number(client.ga4.users) || 0,
+          engagedRate: Number(client.ga4.engagedRate) || 0,
+          conversionRate: Number(client.ga4.conversionRate) || 0,
+          revenueCurrentPeriod: Number(client.ga4.revenueCurrentPeriod) || 0,
+          purchasesOrLeads: Number(client.ga4.purchasesOrLeads) || 0,
+          channels: client.ga4.channels || {},
+          insight: client.ga4.insight || "",
+        }
+      : null,
+  };
+}
+
+function buildSearchTermsAiPayload({
+  selectedClient,
+  selectedAccount,
+  selectedCampaign,
+  selectedAdGroup,
+  isPerformanceMax,
+  dateRangeLabel,
+  termStatusFilter,
+  summary,
+  benchmarks,
+  autoTagRules,
+  evaluatedTerms,
+  suggestedNegatives,
+}) {
+  const activeTerms = evaluatedTerms.filter((term) => !isInactiveSearchTerm(term));
+  const positiveTerms = [...activeTerms]
+    .filter((term) => term.effectiveTag === "good" || term.recommendedAction === "keep")
+    .sort((left, right) => (Number(right.conversions) || 0) - (Number(left.conversions) || 0) || (Number(right.clicks) || 0) - (Number(left.clicks) || 0))
+    .slice(0, 10)
+    .map((term) => ({
+      searchTerm: term.searchTerm,
+      keywordText: term.keywordText || "",
+      matchType: term.matchType || "",
+      clicks: Number(term.clicks) || 0,
+      impressions: Number(term.impressions) || 0,
+      conversions: Number(term.conversions) || 0,
+      ctr: Number(term.ctr) || 0,
+      averageCpc: Number(term.averageCpc) || 0,
+      cost: Number(term.cost) || 0,
+      performanceScore: Number(term.performanceScore) || 0,
+      relevanceScore: Number(term.relevanceScore) || 0,
+    }));
+  const wasteTerms = [...evaluatedTerms]
+    .filter((term) => term.effectiveTag === "bad" || term.recommendedAction === "add_negative" || term.recommendedAction === "consider_negative")
+    .sort((left, right) => (Number(right.cost) || 0) - (Number(left.cost) || 0) || (Number(right.clicks) || 0) - (Number(left.clicks) || 0))
+    .slice(0, 10)
+    .map((term) => ({
+      searchTerm: term.searchTerm,
+      keywordText: term.keywordText || "",
+      matchType: term.matchType || "",
+      status: term.status || "",
+      clicks: Number(term.clicks) || 0,
+      impressions: Number(term.impressions) || 0,
+      conversions: Number(term.conversions) || 0,
+      ctr: Number(term.ctr) || 0,
+      averageCpc: Number(term.averageCpc) || 0,
+      cost: Number(term.cost) || 0,
+      performanceScore: Number(term.performanceScore) || 0,
+      relevanceScore: Number(term.relevanceScore) || 0,
+      action: term.recommendedAction || "",
+      effectiveTag: term.effectiveTag || "",
+    }));
+
+  return {
+    client: {
+      id: selectedClient?.id || "",
+      name: selectedClient?.name || "",
+      target: normalizeClientTarget(selectedClient?.focus),
+      category: selectedClient?.category || "",
+      reportingGroup: selectedClient?.reportingGroup || "Independent",
+    },
+    slice: {
+      accountName: selectedAccount?.name || "",
+      accountExternalId: selectedAccount?.externalId || "",
+      campaignName: selectedCampaign?.name || "",
+      campaignType: selectedCampaign?.channelType || "",
+      reviewLevel: isPerformanceMax ? "campaign" : "ad_group",
+      adGroupName: isPerformanceMax ? "" : selectedAdGroup?.name || "",
+      dateRange: dateRangeLabel,
+      statusFilter: termStatusFilter,
+    },
+    summary: {
+      totalTerms: Number(summary?.totalTerms) || 0,
+      activeTerms: Number(summary?.activeTerms) || 0,
+      inactiveTerms: Number(summary?.inactiveTerms) || 0,
+      goodCount: Number(summary?.goodCount) || 0,
+      badCount: Number(summary?.badCount) || 0,
+      neutralCount: Number(summary?.neutralCount) || 0,
+      untaggedCount: Number(summary?.untaggedCount) || 0,
+      averagePerformanceScore: Number(summary?.averagePerformanceScore) || 0,
+      averageRelevanceScore: Number(summary?.averageRelevanceScore) || 0,
+      wastedSpend: Number(summary?.wastedSpend) || 0,
+      negativeActionCount: Number(summary?.negativeActionCount) || 0,
+    },
+    benchmarks: {
+      medianCtr: Number(benchmarks?.medianCtr) || 0,
+      medianCpc: Number(benchmarks?.medianCpc) || 0,
+      medianImpressions: Number(benchmarks?.medianImpressions) || 0,
+      medianClicks: Number(benchmarks?.medianClicks) || 0,
+      medianConversions: Number(benchmarks?.medianConversions) || 0,
+    },
+    autoTagRules: {
+      goodMinConversions: Number(autoTagRules?.goodMinConversions) || 0,
+      goodMaxCostPerConversion: Number(autoTagRules?.goodMaxCostPerConversion) || 0,
+      badNoConversionSpend: Number(autoTagRules?.badNoConversionSpend) || 0,
+      badNoConversionClicks: Number(autoTagRules?.badNoConversionClicks) || 0,
+      badMaxRelevanceScore: Number(autoTagRules?.badMaxRelevanceScore) || 0,
+      neutralMinClicks: Number(autoTagRules?.neutralMinClicks) || 0,
+    },
+    positiveTerms,
+    wasteTerms,
+    negativeCandidates: suggestedNegatives.slice(0, 12).map((item) => ({
+      keyword: item.word,
+      termCount: Number(item.termCount) || 0,
+      wastedSpend: Number(item.wastedSpend) || 0,
+      manualBadCount: Number(item.manualBadCount) || 0,
+      scoreCandidateCount: Number(item.scoreCandidateCount) || 0,
+    })),
+  };
+}
+
 function tokenizeNegativeCandidate(value) {
   return String(value || "")
     .toLowerCase()
@@ -1075,6 +1326,20 @@ function createEmptyClientDirectoryState() {
     lastSavedToken: "",
     lastSavedClientId: "",
   };
+}
+
+function createEmptyAiStrategistState() {
+  return {
+    loading: false,
+    error: "",
+    data: null,
+    generatedAt: "",
+    cached: false,
+  };
+}
+
+function getOptionLabel(options, value) {
+  return options.find((option) => option.value === value)?.label || value;
 }
 
 function createEmptyUserDraft(role = "account") {
@@ -2097,7 +2362,23 @@ function ProviderProfilePill({ profile }) {
   );
 }
 
-function IntegrationHub({ providerProfiles, clients, configured, loading, error, busyMap, onConnect, onSync, onDisconnect, layoutColumns }) {
+function IntegrationHub({
+  providerProfiles,
+  clients,
+  configured,
+  loading,
+  error,
+  busyMap,
+  onConnect,
+  onSync,
+  onDisconnect,
+  layoutColumns,
+  setupStatus,
+  aiForm,
+  onAiFormChange,
+  onSaveAiConfig,
+  aiSetupState,
+}) {
   const byPlatform = {
     google_ads: providerProfiles.filter((profile) => profile.platform === "google_ads"),
     meta_ads: providerProfiles.filter((profile) => profile.platform === "meta_ads"),
@@ -2119,6 +2400,75 @@ function IntegrationHub({ providerProfiles, clients, configured, loading, error,
           {error}
         </div>
       ) : null}
+
+      <div
+        style={{
+          padding: 20,
+          borderRadius: 24,
+          background: T.surface,
+          border: `1px solid ${T.line}`,
+          boxShadow: T.shadow,
+          display: "grid",
+          gap: 16,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-start" }}>
+          <div style={{ minWidth: 0 }}>
+            <ToneBadge tone={setupStatus?.configured?.OPENAI_API_KEY ? "positive" : "warning"}>
+              {setupStatus?.configured?.OPENAI_API_KEY ? "AI strategist enabled" : "AI strategist optional"}
+            </ToneBadge>
+            <div style={{ marginTop: 10, fontSize: 18, fontWeight: 800, fontFamily: T.heading }}>AI strategist</div>
+            <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+              Connect an OpenAI API key to enable strategy-level recommendations on the Accounts and Search Terms screens. This layer reasons over the live dashboard context instead of using a fixed recommendation rule list.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {setupStatus?.masked?.OPENAI_API_KEY ? <ToneBadge tone="neutral">{setupStatus.masked.OPENAI_API_KEY}</ToneBadge> : null}
+            <ToneBadge tone="neutral">{setupStatus?.masked?.OPENAI_STRATEGIST_MODEL || "gpt-5.4"}</ToneBadge>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: fitCols(240), gap: 12 }}>
+          <div>
+            <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>OpenAI API key</div>
+            <input
+              value={aiForm.OPENAI_API_KEY}
+              onChange={(event) => onAiFormChange("OPENAI_API_KEY", event.target.value)}
+              placeholder="sk-..."
+              style={{ width: "100%", boxSizing: "border-box", padding: "12px 13px", borderRadius: 14, border: `1px solid ${T.line}`, background: T.surfaceStrong, color: T.ink, fontSize: 13, outline: "none", fontFamily: T.mono }}
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Model</div>
+            <input
+              value={aiForm.OPENAI_STRATEGIST_MODEL}
+              onChange={(event) => onAiFormChange("OPENAI_STRATEGIST_MODEL", event.target.value)}
+              placeholder="gpt-5.4"
+              style={{ width: "100%", boxSizing: "border-box", padding: "12px 13px", borderRadius: 14, border: `1px solid ${T.line}`, background: T.surfaceStrong, color: T.ink, fontSize: 13, outline: "none", fontFamily: T.mono }}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <Button onClick={onSaveAiConfig} tone="primary" disabled={aiSetupState?.saving}>
+            {aiSetupState?.saving ? "Saving..." : "Save AI settings"}
+          </Button>
+          <div style={{ fontSize: 12, color: T.inkSoft }}>
+            Leave the model blank to use the default strategist model.
+          </div>
+        </div>
+
+        {aiSetupState?.error ? (
+          <div style={{ padding: 12, borderRadius: 16, background: T.coralSoft, border: `1px solid rgba(215, 93, 66, 0.16)`, color: T.coral, fontSize: 12, fontWeight: 700 }}>
+            {aiSetupState.error}
+          </div>
+        ) : null}
+        {aiSetupState?.success ? (
+          <div style={{ padding: 12, borderRadius: 16, background: T.accentSoft, border: `1px solid rgba(15, 143, 102, 0.16)`, color: T.accent, fontSize: 12, fontWeight: 700 }}>
+            {aiSetupState.success}
+          </div>
+        ) : null}
+      </div>
 
       <div style={{ display: "grid", gridTemplateColumns: layoutColumns, gap: 18 }}>
         {Object.keys(PLATFORM_META).map((platform) => {
@@ -2895,6 +3245,164 @@ function ActionCue({ tone = "neutral", children }) {
   );
 }
 
+function AiRecommendationCard({ item }) {
+  return (
+    <div
+      style={{
+        padding: 14,
+        borderRadius: 16,
+        background: T.surfaceStrong,
+        border: `1px solid ${T.line}`,
+        display: "grid",
+        gap: 8,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.title}</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <ToneBadge tone={getAiPriorityTone(item.priority)}>{String(item.priority || "next").toUpperCase()}</ToneBadge>
+          <ToneBadge tone="neutral">{getAiAreaLabel(item.area)}</ToneBadge>
+          <ToneBadge tone={item.confidence === "high" ? "positive" : item.confidence === "low" ? "warning" : "neutral"}>
+            {`${String(item.confidence || "medium").charAt(0).toUpperCase()}${String(item.confidence || "medium").slice(1)} confidence`}
+          </ToneBadge>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: T.ink, lineHeight: 1.6 }}>{item.action}</div>
+      <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.why}</div>
+      <div style={{ fontSize: 11, color: T.inkMute, lineHeight: 1.5 }}>
+        Expected impact: {item.expectedImpact}
+      </div>
+    </div>
+  );
+}
+
+function AiStrategyOutput({ result }) {
+  const strategy = result?.strategy;
+  if (!strategy) return null;
+
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {result?.model ? <ToneBadge tone="neutral">{result.model}</ToneBadge> : null}
+          {result?.generatedAt ? <ToneBadge tone="neutral">{formatAiGeneratedAt(result.generatedAt)}</ToneBadge> : null}
+          {result?.cached ? <ToneBadge tone="warning">Cached result</ToneBadge> : null}
+        </div>
+      </div>
+
+      <div style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Detected strategy</div>
+          <div style={{ marginTop: 6, fontSize: 13, color: T.ink, lineHeight: 1.65 }}>{strategy.strategySummary}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Diagnosis</div>
+          <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft, lineHeight: 1.65 }}>{strategy.performanceDiagnosis}</div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Next best action</div>
+        <AiRecommendationCard item={strategy.nextBestAction} />
+      </div>
+
+      {strategy.recommendations?.length ? (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Follow-up actions</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            {strategy.recommendations.map((item, index) => (
+              <AiRecommendationCard key={`${item.title}-${index}`} item={item} />
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {strategy.keywordOpportunities?.length ? (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Keyword opportunities</div>
+          <div style={{ display: "grid", gridTemplateColumns: fitCols(220), gap: 10 }}>
+            {strategy.keywordOpportunities.map((item, index) => (
+              <div key={`${item.keyword}-${index}`} style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.keyword}</div>
+                  <ToneBadge tone={getAiPriorityTone(item.priority)}>{String(item.priority || "next").toUpperCase()}</ToneBadge>
+                </div>
+                <div style={{ fontSize: 11, color: T.inkMute }}>Suggested match type: {item.suggestedMatchType || "Review manually"}</div>
+                <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.why}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {strategy.negativeKeywordSuggestions?.length ? (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Negative keyword suggestions</div>
+          <div style={{ display: "grid", gridTemplateColumns: fitCols(220), gap: 10 }}>
+            {strategy.negativeKeywordSuggestions.map((item, index) => (
+              <div key={`${item.keyword}-${index}`} style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.keyword}</div>
+                  <ToneBadge tone={getAiPriorityTone(item.priority)}>{String(item.priority || "next").toUpperCase()}</ToneBadge>
+                </div>
+                <div style={{ fontSize: 11, color: T.inkMute }}>Recommendation: {item.suggestedMatchType || "Negative keyword"}</div>
+                <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.why}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {strategy.budgetActions?.length ? (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Budget actions</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            {strategy.budgetActions.map((item, index) => (
+              <div key={`${item.channel}-${index}`} style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.channel || "Channel budget"}</div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {item.amountText ? <ToneBadge tone="neutral">{item.amountText}</ToneBadge> : null}
+                    <ToneBadge tone={getAiPriorityTone(item.priority)}>{String(item.priority || "next").toUpperCase()}</ToneBadge>
+                  </div>
+                </div>
+                <div style={{ fontSize: 12, color: T.ink }}>{item.direction}</div>
+                <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.why}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {strategy.experiments?.length ? (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Experiments</div>
+          <div style={{ display: "grid", gridTemplateColumns: fitCols(240), gap: 10 }}>
+            {strategy.experiments.map((item, index) => (
+              <div key={`${item.title}-${index}`} style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.title}</div>
+                <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.hypothesis}</div>
+                <div style={{ fontSize: 11, color: T.inkMute }}>Success metric: {item.successMetric}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {strategy.watchouts?.length ? (
+        <div style={{ padding: 14, borderRadius: 16, background: T.amberSoft, border: `1px solid rgba(199, 147, 33, 0.16)`, display: "grid", gap: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.amber, fontFamily: T.heading }}>Watchouts</div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {strategy.watchouts.map((item, index) => (
+              <div key={`${item}-${index}`} style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item}</div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ToastStack({ items, onDismiss }) {
   if (!items.length) return null;
 
@@ -3578,12 +4086,14 @@ function campaignMatchesStatusFilter(campaign, filter) {
   return true;
 }
 
-function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
+function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeLabel, aiReady, onOpenConnections }) {
   const [campaignFilter, setCampaignFilter] = useState("all");
+  const [aiState, setAiState] = useState(() => createEmptyAiStrategistState());
   const filterMeta = CAMPAIGN_STATUS_FILTERS.find((option) => option.id === campaignFilter) || CAMPAIGN_STATUS_FILTERS[2];
   const noConnections = Object.values(client.connections).every((value) => !value);
   const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
-  const budgetRecommendations = useMemo(() => buildBudgetRecommendations(client), [client]);
+  const aiPayload = useMemo(() => buildAccountAiPayload(client, dateRangeLabel), [client, dateRangeLabel]);
+  const aiFingerprint = useMemo(() => JSON.stringify(aiPayload), [aiPayload]);
   const groupedCampaigns = useMemo(
     () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, ads.filter((ad) => ad.campaignId === campaign.id)])),
     [ads, campaigns]
@@ -3600,6 +4110,36 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
     () => (campaignFilter === "all" ? client.accounts : client.accounts.filter((account) => visibleAccountIds.has(account.id))),
     [campaignFilter, client.accounts, visibleAccountIds]
   );
+
+  useEffect(() => {
+    setAiState(createEmptyAiStrategistState());
+  }, [aiFingerprint]);
+
+  async function runAiStrategist() {
+    setAiState((current) => ({ ...current, loading: true, error: "" }));
+
+    try {
+      const payload = await fetchAiStrategy({
+        scope: "account",
+        context: aiPayload,
+      });
+      setAiState({
+        loading: false,
+        error: "",
+        data: payload,
+        generatedAt: payload?.generatedAt || "",
+        cached: !!payload?.cached,
+      });
+    } catch (error) {
+      setAiState({
+        loading: false,
+        error: error.message || "Could not run the AI strategist.",
+        data: null,
+        generatedAt: "",
+        cached: false,
+      });
+    }
+  }
 
   return (
     <div
@@ -3712,42 +4252,66 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
               <div style={{ padding: 16, borderRadius: 18, background: T.bgSoft, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <div>
-                    <div style={{ fontSize: 15, fontWeight: 800, fontFamily: T.heading }}>Smart budget optimizer</div>
+                    <div style={{ fontSize: 15, fontWeight: 800, fontFamily: T.heading }}>AI strategist</div>
                     <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft }}>
-                      Suggestions are tuned for the client target: {client.focus}. Update Client Studio budgets to apply any changes.
+                      Model-backed strategic guidance for the current client target: {normalizeClientTarget(client.focus)}.
                     </div>
                   </div>
-                  <ActionCue tone={budgetRecommendations.length ? "info" : "success"}>
-                    {budgetRecommendations.length ? `${budgetRecommendations.length} recommendation${budgetRecommendations.length === 1 ? "" : "s"}` : "No budget shift needed"}
+                  <ActionCue tone={aiState.error ? "danger" : aiState.data ? "info" : "neutral"}>
+                    {aiState.loading
+                      ? "Running strategist"
+                      : aiState.data
+                        ? "Strategy ready"
+                        : aiReady
+                          ? "Ready to analyze"
+                          : "Needs OpenAI key"}
                   </ActionCue>
                 </div>
 
-                {budgetRecommendations.length ? (
+                {!aiReady ? (
                   <div style={{ display: "grid", gap: 10 }}>
-                    {budgetRecommendations.map((recommendation) => (
-                      <div
-                        key={recommendation.id}
-                        style={{
-                          padding: "12px 14px",
-                          borderRadius: 16,
-                          background: recommendation.tone === "warning" ? T.amberSoft : recommendation.tone === "success" ? T.accentSoft : "rgba(45, 108, 223, 0.10)",
-                          border: `1px solid ${recommendation.tone === "warning" ? "rgba(199, 147, 33, 0.18)" : recommendation.tone === "success" ? "rgba(15, 143, 102, 0.18)" : "rgba(45, 108, 223, 0.16)"}`,
-                        }}
-                      >
-                        <div style={{ fontSize: 13, fontWeight: 800, color: recommendation.tone === "warning" ? T.amber : recommendation.tone === "success" ? T.accent : T.sky }}>
-                          {recommendation.title}
-                        </div>
-                        <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
-                          {recommendation.detail}
-                        </div>
+                    <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+                      Add an OpenAI API key to enable the strategist layer. Once configured, AdPulse will analyze live account structure, pacing, efficiency, budgets, and client goals before suggesting the next best move.
+                    </div>
+                    {onOpenConnections ? (
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <Button onClick={onOpenConnections}>Open Connections</Button>
                       </div>
-                    ))}
+                    ) : null}
                   </div>
+                ) : aiState.error ? (
+                  <div style={{ display: "grid", gap: 10 }}>
+                    <div style={{ padding: 12, borderRadius: 16, background: T.coralSoft, border: `1px solid rgba(215, 93, 66, 0.16)`, color: T.coral, fontSize: 12, fontWeight: 700 }}>
+                      {aiState.error}
+                    </div>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <Button onClick={runAiStrategist} tone="primary" disabled={aiState.loading}>
+                        {aiState.loading ? "Retrying..." : "Retry analysis"}
+                      </Button>
+                    </div>
+                  </div>
+                ) : aiState.data ? (
+                  <AiStrategyOutput result={aiState.data} />
                 ) : (
-                  <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
-                    Budgets look broadly aligned with the current live data for this client. As new spend and conversion data arrives, AdPulse will suggest increases, trims, or channel shifts here.
+                  <div style={{ display: "grid", gap: 10 }}>
+                    <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+                      Run the strategist to interpret this client&apos;s current account structure, live performance, and channel mix for {dateRangeLabel.toLowerCase()}.
+                    </div>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <Button onClick={runAiStrategist} tone="primary" disabled={aiState.loading}>
+                        {aiState.loading ? "Running strategist..." : "Run AI strategist"}
+                      </Button>
+                    </div>
                   </div>
                 )}
+
+                {aiReady && aiState.data ? (
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <Button onClick={runAiStrategist} tone="primary" disabled={aiState.loading}>
+                      {aiState.loading ? "Refreshing..." : "Refresh analysis"}
+                    </Button>
+                  </div>
+                ) : null}
               </div>
               <AssignedUsersStrip client={client} users={users} label="Assigned team" />
             </>
@@ -5878,7 +6442,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
 
 // ── Setup Wizard ──────────────────────────────────────────────
 
-function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
+function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiReady, onOpenConnections }) {
   const selectStyle = {
     width: "100%",
     boxSizing: "border-box",
@@ -5915,6 +6479,7 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
   const [reviewPanel, setReviewPanel] = useState("table");
   const [sort, setSort] = useState({ key: "cost", direction: "desc" });
   const [tagBusyMap, setTagBusyMap] = useState({});
+  const [aiState, setAiState] = useState(() => createEmptyAiStrategistState());
 
   const googleAssetMap = useMemo(() => {
     const map = new Map();
@@ -6231,15 +6796,35 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
 
   const visibleTerms = useMemo(() => sortSearchTermRows(filteredTerms, sort), [filteredTerms, sort]);
   const suggestedNegatives = useMemo(() => extractSuggestedNegatives(statusFilteredTerms), [statusFilteredTerms]);
-  const keywordOpportunities = useMemo(
-    () => extractKeywordOpportunities(
-      evaluatedTerms.filter((term) => !isInactiveSearchTerm(term)),
-      benchmarks,
-      selectedClient?.focus,
-      autoTagRules
-    ),
-    [autoTagRules, benchmarks, evaluatedTerms, selectedClient?.focus]
-  );
+  const searchTermDateRangeLabel = getOptionLabel(SEARCH_TERM_DATE_RANGE_OPTIONS, selection.dateRange);
+  const aiPayload = useMemo(() => buildSearchTermsAiPayload({
+    selectedClient,
+    selectedAccount,
+    selectedCampaign,
+    selectedAdGroup,
+    isPerformanceMax,
+    dateRangeLabel: searchTermDateRangeLabel,
+    termStatusFilter,
+    summary,
+    benchmarks,
+    autoTagRules,
+    evaluatedTerms,
+    suggestedNegatives,
+  }), [
+    autoTagRules,
+    benchmarks,
+    evaluatedTerms,
+    isPerformanceMax,
+    searchTermDateRangeLabel,
+    selectedAccount,
+    selectedAdGroup,
+    selectedCampaign,
+    selectedClient,
+    suggestedNegatives,
+    summary,
+    termStatusFilter,
+  ]);
+  const aiFingerprint = useMemo(() => JSON.stringify(aiPayload), [aiPayload]);
   const tableColumns = isPerformanceMax
     ? [
       { key: "searchTerm", label: "Search term" },
@@ -6271,6 +6856,10 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
       { key: "recommendedAction", label: "Action" },
       { key: "tag", label: "Tag" },
     ];
+
+  useEffect(() => {
+    setAiState(createEmptyAiStrategistState());
+  }, [aiFingerprint]);
 
   function setSortColumn(nextKey) {
     setSort((current) => (
@@ -6340,17 +6929,30 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
     downloadTextFile(filename, content);
   }
 
-  function exportKeywordOpportunities() {
-    if (!selectedClient || !selectedAccount || !selectedCampaign || !keywordOpportunities.length) return;
+  async function runAiStrategist() {
+    setAiState((current) => ({ ...current, loading: true, error: "" }));
 
-    const filename = [
-      sanitizeFileFragment(selectedClient.name),
-      sanitizeFileFragment(selectedAccount.name),
-      sanitizeFileFragment(selectedCampaign.name),
-      "keyword-opportunities.txt",
-    ].join("-");
-    const content = keywordOpportunities.map((item) => `${item.searchTerm} | ${item.suggestedMatchType} | ${item.priority} | ${item.reason}`).join("\n");
-    downloadTextFile(filename, content);
+    try {
+      const payload = await fetchAiStrategy({
+        scope: "search_terms",
+        context: aiPayload,
+      });
+      setAiState({
+        loading: false,
+        error: "",
+        data: payload,
+        generatedAt: payload?.generatedAt || "",
+        cached: !!payload?.cached,
+      });
+    } catch (error) {
+      setAiState({
+        loading: false,
+        error: error.message || "Could not run the AI strategist.",
+        data: null,
+        generatedAt: "",
+        cached: false,
+      });
+    }
   }
 
   if (loading) {
@@ -6559,58 +7161,66 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
       <div style={panelStyle}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 800, fontFamily: T.heading }}>Smart keyword opportunities</div>
+            <div style={{ fontSize: 16, fontWeight: 800, fontFamily: T.heading }}>AI strategist</div>
             <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft }}>
-              Suggestions are based on live search terms, term scores, and this client&apos;s target: {selectedClient?.focus || DEFAULT_CLIENT_TARGET}.
+              Strategic analysis of this live search-term slice for the current client target: {normalizeClientTarget(selectedClient?.focus || DEFAULT_CLIENT_TARGET)}.
             </div>
           </div>
-          <Button onClick={exportKeywordOpportunities} tone="primary" disabled={!keywordOpportunities.length}>
-            Export ideas
-          </Button>
+          <ActionCue tone={aiState.error ? "danger" : aiState.data ? "info" : "neutral"}>
+            {aiState.loading
+              ? "Running strategist"
+              : aiState.data
+                ? "Strategy ready"
+                : aiReady
+                  ? "Ready to analyze"
+                  : "Needs OpenAI key"}
+          </ActionCue>
         </div>
 
-        {!keywordOpportunities.length ? (
-          <EmptyState title="No keyword opportunities yet" body="Once AdPulse finds strong live search terms that outperform the current triggered keywords, they will appear here." />
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: fitCols(240), gap: 12 }}>
-            {keywordOpportunities.slice(0, 8).map((item) => (
-              <div
-                key={item.normalizedTerm}
-                style={{
-                  padding: 14,
-                  borderRadius: 18,
-                  background: T.surfaceStrong,
-                  border: `1px solid ${T.line}`,
-                  display: "grid",
-                  gap: 10,
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 800, color: T.ink }}>{item.searchTerm}</div>
-                    <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft }}>
-                      Suggest as {item.suggestedMatchType} keyword{item.sourceKeywordText ? ` | currently triggered by ${item.sourceKeywordText}` : ""}
-                    </div>
-                  </div>
-                  <ToneBadge tone={item.priority === "High priority" ? "positive" : item.priority === "Promising" ? "warning" : "neutral"}>
-                    {item.priority}
-                  </ToneBadge>
-                </div>
-
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <ToneBadge tone="neutral">{formatNumber(item.clicks)} clicks</ToneBadge>
-                  <ToneBadge tone="neutral">{formatNumber(item.conversions)} conv.</ToneBadge>
-                  <ToneBadge tone="neutral">Perf {item.performanceScore}/100</ToneBadge>
-                  <ToneBadge tone="neutral">Rel {item.relevanceScore}/100</ToneBadge>
-                </div>
-
-                <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
-                  {item.reason}
-                </div>
+        {!aiReady ? (
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+              Add an OpenAI API key to enable model-backed keyword and negative-mining recommendations. The strategist uses the live term table, client target, thresholds, and current campaign slice instead of a static rule list.
+            </div>
+            {onOpenConnections ? (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <Button onClick={onOpenConnections}>Open Connections</Button>
               </div>
-            ))}
+            ) : null}
+          </div>
+        ) : aiState.error ? (
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ padding: 12, borderRadius: 16, background: T.coralSoft, border: `1px solid rgba(215, 93, 66, 0.16)`, color: T.coral, fontSize: 12, fontWeight: 700 }}>
+              {aiState.error}
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <Button onClick={runAiStrategist} tone="primary" disabled={aiState.loading || !selectedCampaign}>
+                {aiState.loading ? "Retrying..." : "Retry analysis"}
+              </Button>
+            </div>
+          </div>
+        ) : aiState.data ? (
+          <AiStrategyOutput result={aiState.data} />
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+              Run the strategist to interpret user intent, search-term fit, waste patterns, and expansion opportunities for {searchTermDateRangeLabel.toLowerCase()}.
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <Button onClick={runAiStrategist} tone="primary" disabled={aiState.loading || !selectedCampaign}>
+                {aiState.loading ? "Running strategist..." : "Run AI strategist"}
+              </Button>
+            </div>
           </div>
         )}
+
+        {aiReady && aiState.data ? (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <Button onClick={runAiStrategist} tone="primary" disabled={aiState.loading || !selectedCampaign}>
+              {aiState.loading ? "Refreshing..." : "Refresh analysis"}
+            </Button>
+          </div>
+        ) : null}
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
@@ -6889,6 +7499,8 @@ function SetupWizard({ onComplete }) {
     GOOGLE_ADS_DEVELOPER_TOKEN: "",
     META_APP_ID: "",
     META_APP_SECRET: "",
+    OPENAI_API_KEY: "",
+    OPENAI_STRATEGIST_MODEL: "",
   });
 
   useEffect(() => {
@@ -6922,7 +7534,15 @@ function SetupWizard({ onComplete }) {
       if (result.ok) {
         setSuccess(result.message || "Saved!");
         setStatus(result.status || null);
-        setForm({ GOOGLE_CLIENT_ID: "", GOOGLE_CLIENT_SECRET: "", GOOGLE_ADS_DEVELOPER_TOKEN: "", META_APP_ID: "", META_APP_SECRET: "" });
+        setForm({
+          GOOGLE_CLIENT_ID: "",
+          GOOGLE_CLIENT_SECRET: "",
+          GOOGLE_ADS_DEVELOPER_TOKEN: "",
+          META_APP_ID: "",
+          META_APP_SECRET: "",
+          OPENAI_API_KEY: "",
+          OPENAI_STRATEGIST_MODEL: "",
+        });
         if (result.status?.allReady) setTimeout(() => onComplete?.(), 1500);
       } else {
         setError(result.error || "Save failed.");
@@ -7066,6 +7686,24 @@ function SetupWizard({ onComplete }) {
               <input value={form.GOOGLE_ADS_DEVELOPER_TOKEN} onChange={(e) => updateField("GOOGLE_ADS_DEVELOPER_TOKEN", e.target.value)}
                 placeholder="xxxxxxxxxxxxxxxxxxxxxx" style={iS} />
             </div>
+            <div style={{ padding: 14, borderRadius: 16, background: T.bgSoft, border: `1px solid ${T.line}`, display: "grid", gap: 12, marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: T.ink }}>AI strategist (optional)</div>
+                <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft, lineHeight: 1.5 }}>
+                  Add an OpenAI API key now if you want model-backed strategy recommendations on the Accounts and Search Terms screens.
+                </div>
+              </div>
+              <div>
+                <label style={lS}>OpenAI API key</label>
+                <input value={form.OPENAI_API_KEY} onChange={(e) => updateField("OPENAI_API_KEY", e.target.value)}
+                  placeholder="sk-..." style={iS} />
+              </div>
+              <div>
+                <label style={lS}>Strategist model</label>
+                <input value={form.OPENAI_STRATEGIST_MODEL} onChange={(e) => updateField("OPENAI_STRATEGIST_MODEL", e.target.value)}
+                  placeholder="gpt-5.4" style={iS} />
+              </div>
+            </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => setStep(0)} style={btnSecondary}>← Back</button>
               <button onClick={() => setStep(2)} style={btnPrimary}>Next: Meta →</button>
@@ -7170,6 +7808,9 @@ export default function AdPulse() {
   const [integrationBusy, setIntegrationBusy] = useState({});
   const [currentUserId, setCurrentUserId] = useState(() => readStoredValue(STORAGE_KEYS.session, null));
   const [setupComplete, setSetupComplete] = useState(null);
+  const [setupStatus, setSetupStatus] = useState(null);
+  const [aiSetupForm, setAiSetupForm] = useState({ OPENAI_API_KEY: "", OPENAI_STRATEGIST_MODEL: "" });
+  const [aiSetupState, setAiSetupState] = useState({ saving: false, error: "", success: "" });
   const [openMap, setOpenMap] = useState({});
   const [toasts, setToasts] = useState([]);
   const [selectedClientId, setSelectedClientId] = useState(CLIENTS_BASE[0]?.id || "");
@@ -7401,7 +8042,10 @@ export default function AdPulse() {
 
   useEffect(() => {
     fetchSetupStatus()
-      .then((data) => setSetupComplete(data.allReady))
+      .then((data) => {
+        setSetupStatus(data);
+        setSetupComplete(data.allReady);
+      })
       .catch(() => setSetupComplete(true));
   }, []);
 
@@ -7853,6 +8497,7 @@ export default function AdPulse() {
   const alertColumns = viewportWidth >= 1200 ? "repeat(2, minmax(0, 1fr))" : "1fr";
   const studioColumns = viewportWidth >= 1380 ? "minmax(300px, 330px) minmax(0, 1fr)" : "1fr";
   const integrationColumns = viewportWidth >= 1520 ? "repeat(3, minmax(0, 1fr))" : viewportWidth >= 1020 ? "repeat(2, minmax(0, 1fr))" : "1fr";
+  const aiConfigured = !!setupStatus?.configured?.OPENAI_API_KEY;
   const navItems = [
     { key: "overview", label: "Overview" },
     { key: "accounts", label: "Accounts" },
@@ -8143,6 +8788,38 @@ export default function AdPulse() {
     } catch (error) {
       setClientDirectoryState((current) => ({ ...current, savingKey: "", error: error.message || "Could not delete the client.", notice: "" }));
       pushToast(error.message || "Could not delete the client.", "danger", "Clients");
+    }
+  }
+
+  async function saveAiSetup() {
+    const payload = Object.fromEntries(
+      Object.entries(aiSetupForm).filter(([, value]) => String(value || "").trim())
+    );
+
+    if (!Object.keys(payload).length) {
+      setAiSetupState({ saving: false, error: "Paste at least one AI setting before saving.", success: "" });
+      return;
+    }
+
+    setAiSetupState({ saving: true, error: "", success: "" });
+
+    try {
+      const result = await saveSetupCredentials(payload);
+      setSetupStatus(result.status || null);
+      setAiSetupState({
+        saving: false,
+        error: "",
+        success: result.message || "AI settings saved.",
+      });
+      setAiSetupForm({ OPENAI_API_KEY: "", OPENAI_STRATEGIST_MODEL: "" });
+      pushToast("AI strategist settings saved.", "success", "Connections");
+    } catch (error) {
+      setAiSetupState({
+        saving: false,
+        error: error.message || "Could not save the AI settings.",
+        success: "",
+      });
+      pushToast(error.message || "Could not save the AI settings.", "danger", "Connections");
     }
   }
 
@@ -8448,7 +9125,18 @@ export default function AdPulse() {
                   <ReportingGroupSection key={group.id} group={group}>
                     <div style={{ display: "grid", gap: 18 }}>
                       {group.clients.map((client) => (
-                        <AccountStack key={client.id} client={client} users={accountUsers} open={openMap} setOpen={setOpenMap} campaigns={client.campaigns} ads={client.ads} />
+                        <AccountStack
+                          key={client.id}
+                          client={client}
+                          users={accountUsers}
+                          open={openMap}
+                          setOpen={setOpenMap}
+                          campaigns={client.campaigns}
+                          ads={client.ads}
+                          dateRangeLabel={reportDateRangeLabel}
+                          aiReady={aiConfigured}
+                          onOpenConnections={isDirector ? () => setView("connections") : null}
+                        />
                       ))}
                     </div>
                   </ReportingGroupSection>
@@ -8465,6 +9153,8 @@ export default function AdPulse() {
               providerProfiles={providerProfiles}
               loading={integrationState.loading}
               error={integrationState.error}
+              aiReady={aiConfigured}
+              onOpenConnections={isDirector ? () => setView("connections") : null}
             />
           ) : null}
 
@@ -8673,6 +9363,14 @@ export default function AdPulse() {
               onSync={syncProviderProfile}
               onDisconnect={disconnectProviderProfile}
               layoutColumns={integrationColumns}
+              setupStatus={setupStatus}
+              aiForm={aiSetupForm}
+              onAiFormChange={(field, value) => {
+                setAiSetupForm((current) => ({ ...current, [field]: value }));
+                setAiSetupState((current) => ({ ...current, error: "", success: "" }));
+              }}
+              onSaveAiConfig={saveAiSetup}
+              aiSetupState={aiSetupState}
             />
           ) : null}
         </div>
