@@ -50,6 +50,34 @@ const T = {
   mono: "'IBM Plex Mono', 'Consolas', monospace",
 };
 
+const CLIENT_TARGET_OPTIONS = [
+  "Awareness",
+  "Reach",
+  "Traffic",
+  "Clicks",
+  "Engagement",
+  "Video Views",
+  "Leads",
+  "Conversions",
+  "Sales",
+  "ROAS",
+  "App Installs",
+  "Store Visits",
+];
+
+const DEFAULT_CLIENT_TARGET = "Conversions";
+const LEGACY_CLIENT_TARGET_LABEL = "Live media account";
+
+function normalizeClientTarget(value) {
+  const raw = String(value || "").trim();
+  if (!raw || raw.toLowerCase() === LEGACY_CLIENT_TARGET_LABEL.toLowerCase()) {
+    return DEFAULT_CLIENT_TARGET;
+  }
+
+  const matched = CLIENT_TARGET_OPTIONS.find((option) => option.toLowerCase() === raw.toLowerCase());
+  return matched || raw;
+}
+
 function buildCalendarWindow(now = new Date()) {
   const monthDays = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const spendDay = Math.min(now.getDate(), monthDays);
@@ -901,7 +929,7 @@ function createLiveClientDraft(seed = Date.now()) {
     id,
     name: "New client",
     category: "eshop",
-    focus: "Live media account",
+    focus: DEFAULT_CLIENT_TARGET,
     accent: "#0f8f66",
     accent2: "#78d1ad",
     healthMode: "healthy",
@@ -932,6 +960,7 @@ function getClientEditorFingerprint(client) {
   return JSON.stringify({
     id: client.id,
     name: client.name || "",
+    focus: normalizeClientTarget(client.focus),
     reportingGroup: client.reportingGroup || "",
     owner: client.owner || "",
     category: client.category || "",
@@ -1473,6 +1502,7 @@ function hydrateClients(value) {
     return {
       ...fallback,
       ...stored,
+      focus: normalizeClientTarget(stored.focus || fallback.focus),
       logoText: String(stored.logoText || fallback.logoText || getClientLogoText(stored.name || fallback.name || "Client")).slice(0, 4),
       logoImage: String(stored.logoImage || fallback.logoImage || ""),
       budgets: { ...fallback.budgets, ...stored.budgets },
@@ -2040,6 +2070,47 @@ function EmptyState({ title, body }) {
   );
 }
 
+function ReportingGroupSection({ group, children, showRollup = true }) {
+  return (
+    <section
+      style={{
+        padding: 18,
+        borderRadius: 24,
+        background: T.surface,
+        border: `1px solid ${T.line}`,
+        boxShadow: T.shadow,
+        display: "grid",
+        gap: 16,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div>
+          <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Reporting Group</div>
+          <div style={{ marginTop: 6, fontSize: 22, fontWeight: 800, fontFamily: T.heading, letterSpacing: "-0.05em", color: T.ink }}>{group.label}</div>
+          <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft }}>
+            {group.clientsCount} client{group.clientsCount === 1 ? "" : "s"} | {group.accounts} account{group.accounts === 1 ? "" : "s"} | {group.activeCampaigns} active campaign{group.activeCampaigns === 1 ? "" : "s"}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <StatusPill ok={group.needsAttention === 0} label={group.needsAttention === 0 ? "All clients healthy" : `${group.needsAttention} client${group.needsAttention === 1 ? "" : "s"} need attention`} />
+        </div>
+      </div>
+
+      {showRollup ? (
+        <div style={{ display: "grid", gridTemplateColumns: fitCols(132), gap: 10 }}>
+          <MetricTile label="Group Budget" value={formatCurrency(group.totalBudget)} />
+          <MetricTile label="Group Spend" value={formatCurrency(group.spend)} />
+          <MetricTile label="Conv. Value" value={formatCurrency(group.conversionValue)} />
+          <MetricTile label="ROAS" value={formatMetric("roas", group.roas)} accent={group.roas >= 3 ? T.accent : T.ink} />
+          <MetricTile label="Conversions" value={formatNumber(group.conversions)} />
+        </div>
+      ) : null}
+
+      {children}
+    </section>
+  );
+}
+
 function LoginScreen({ users, demoUsers, form, onFormChange, onSubmit, onQuickLogin, error }) {
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.ink, fontFamily: T.font, letterSpacing: "-0.01em", padding: "clamp(16px, 3vw, 36px)" }}>
@@ -2586,7 +2657,7 @@ function getClientLinkedPlatforms(client) {
 }
 
 function getClientSummaryText(client, { includeAds = false } = {}) {
-  const parts = [client.focus].filter(Boolean);
+  const parts = [client.focus ? `Target: ${client.focus}` : ""].filter(Boolean);
 
   if (client.accounts.length) {
     parts.push(`${client.accounts.length} account${client.accounts.length === 1 ? "" : "s"}`);
@@ -2646,6 +2717,49 @@ function LiveDataCue({ client, compact = false }) {
       <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>{message}</div>
     </div>
   );
+}
+
+function getReportingGroupLabel(client) {
+  return String(client?.reportingGroup || client?.name || "Ungrouped").trim() || "Ungrouped";
+}
+
+function groupClientsByReportingGroup(clients) {
+  const map = new Map();
+
+  (clients || []).forEach((client) => {
+    const key = getReportingGroupLabel(client);
+    const current = map.get(key) || {
+      id: key,
+      label: key,
+      clients: [],
+      totalBudget: 0,
+      spend: 0,
+      conversionValue: 0,
+      conversions: 0,
+      activeCampaigns: 0,
+      accounts: 0,
+      healthyClients: 0,
+    };
+
+    current.clients.push(client);
+    current.totalBudget += Number(client.totalBudget) || 0;
+    current.spend += Number(client.spend) || 0;
+    current.conversionValue += Number(client.conversionValue) || 0;
+    current.conversions += Number(client.conversions) || 0;
+    current.activeCampaigns += Number(client.activeCampaigns) || 0;
+    current.accounts += Array.isArray(client.accounts) ? client.accounts.length : 0;
+    current.healthyClients += client.health?.ok ? 1 : 0;
+    map.set(key, current);
+  });
+
+  return Array.from(map.values())
+    .map((group) => ({
+      ...group,
+      roas: group.spend ? +(group.conversionValue / group.spend).toFixed(2) : 0,
+      clientsCount: group.clients.length,
+      needsAttention: group.clients.length - group.healthyClients,
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
 }
 
 function getSearchTermScoreTone(score) {
@@ -3882,6 +3996,8 @@ function ReportPrintStyles() {
 function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, dateRangeLabel, dateRangeValue, onDateRangeChange, googleReportState }) {
   const selectedClient = clients.find((client) => client.id === selectedClientId) || clients[0] || null;
   const googleDetails = selectedClient ? aggregateGoogleReportDetails(googleReportState.details, selectedClient.id) : null;
+  const reportGroups = groupClientsByReportingGroup(clients);
+  const selectedGroup = reportGroups.find((group) => group.clients.some((client) => client.id === selectedClient?.id)) || null;
 
   function generatePdf() {
     if (!selectedClient || typeof window === "undefined") return;
@@ -3989,13 +4105,39 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
               fontFamily: T.font,
             }}
           >
-            {clients.map((client) => (
-              <option key={client.id} value={client.id}>{client.name}</option>
+            {reportGroups.map((group) => (
+              <optgroup key={group.id} label={group.label}>
+                {group.clients.map((client) => (
+                  <option key={client.id} value={client.id}>{client.name}</option>
+                ))}
+              </optgroup>
             ))}
           </select>
           <Button onClick={generatePdf} tone="primary" disabled={!selectedClient}>Generate PDF</Button>
         </div>
       </div>
+
+      {selectedClient && selectedGroup ? (
+        <div
+          className="report-screen-controls"
+          style={{
+            padding: 16,
+            borderRadius: 22,
+            background: T.surface,
+            border: `1px solid ${T.line}`,
+            boxShadow: T.shadow,
+            display: "flex",
+            gap: 10,
+            flexWrap: "wrap",
+            alignItems: "center",
+          }}
+        >
+          <ActionCue tone="success">Reporting group: {selectedGroup.label}</ActionCue>
+          <ActionCue tone="info">Target: {selectedClient.focus}</ActionCue>
+          <ToneBadge tone="neutral">{selectedGroup.clientsCount} clients in group</ToneBadge>
+          <ToneBadge tone="neutral">Group spend {formatCurrency(selectedGroup.spend)}</ToneBadge>
+        </div>
+      ) : null}
 
       <div className="report-screen-controls">
         <AccountDateRangeControl value={dateRangeValue} onChange={onDateRangeChange} />
@@ -4023,6 +4165,7 @@ function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetai
   const metaSeries = getPlatformReportSeries(client, "meta_ads", seriesMap);
   const hasGoogle = googleAccounts.length > 0;
   const hasMeta = metaAccounts.length > 0;
+  const channelLabel = [hasGoogle ? "Google Ads" : "", hasMeta ? "Meta Ads" : "", client.ga4 ? "GA4" : ""].filter(Boolean).join(" + ") || "No linked channels";
 
   return (
     <>
@@ -4051,9 +4194,14 @@ function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetai
                 <ReportKpiTile label="ROAS" value={formatMetric("roas", totalSummary.roas)} />
               </div>
             </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 }}>
+              <ReportKpiTile label="Reporting Group" value={client.reportingGroup || client.name} />
+              <ReportKpiTile label="Client Target" value={client.focus || DEFAULT_CLIENT_TARGET} />
+              <ReportKpiTile label="Channels" value={channelLabel} />
+            </div>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", color: T.inkSoft, fontSize: 12 }}>
-            <div>{[hasGoogle ? "Google Ads" : "", hasMeta ? "Meta Ads" : "", client.ga4 ? "GA4" : ""].filter(Boolean).join(" + ") || "No linked channels"}</div>
+            <div>{channelLabel}</div>
             <div>Generated {getReportDateStamp()}</div>
           </div>
         </div>
@@ -4702,7 +4850,7 @@ function FiltersBar({
           <input
             value={search}
             onChange={(event) => onSearch(event.target.value)}
-            placeholder="Search client, sector or reporting group"
+            placeholder="Search client, target or reporting group"
             style={{
               width: "100%",
               boxSizing: "border-box",
@@ -5034,7 +5182,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
                 <LogoMark client={client} size={32} />
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 800, color: selectedClientId === client.id ? T.accent : T.ink }}>{client.name}</div>
-                  <div style={{ marginTop: 3, fontSize: 11, color: T.inkSoft }}>{client.focus}</div>
+                  <div style={{ marginTop: 3, fontSize: 11, color: T.inkSoft }}>Target: {client.focus}</div>
                 </div>
               </div>
             </button>
@@ -5069,7 +5217,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
               <LogoMark client={draft} size={48} />
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 22, fontWeight: 800, fontFamily: T.heading }}>{draft.name}</div>
-                <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>{draft.focus} | reporting group {draft.reportingGroup}</div>
+                <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>Target: {draft.focus} | reporting group {draft.reportingGroup}</div>
               </div>
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -5096,6 +5244,19 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
             <div>
               <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Client name</div>
               <input disabled={!canEditCoreSettings} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value, logoText: current.logoImage ? current.logoText : getClientLogoText(event.target.value) }))} style={canEditCoreSettings ? inputStyle : lockedInputStyle} />
+            </div>
+            <div>
+              <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Client target</div>
+              <select
+                disabled={!canEditCoreSettings}
+                value={normalizeClientTarget(draft.focus)}
+                onChange={(event) => setDraft((current) => ({ ...current, focus: event.target.value }))}
+                style={canEditCoreSettings ? inputStyle : lockedInputStyle}
+              >
+                {CLIENT_TARGET_OPTIONS.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
             </div>
             <div>
               <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Reporting group</div>
@@ -7272,6 +7433,7 @@ export default function AdPulse() {
       return left.name.localeCompare(right.name);
     });
   }, [accountUsers, categoryFilter, enriched, search, sortBy, statusFilter]);
+  const filteredClientGroups = useMemo(() => groupClientsByReportingGroup(filteredClients), [filteredClients]);
 
   const redClients = enriched.filter((client) => !client.health.ok);
   const greenClients = enriched.filter((client) => client.health.ok);
@@ -7838,15 +8000,27 @@ export default function AdPulse() {
               {filteredClients.length === 0 ? (
                 <EmptyState title={clients.length ? "No clients match the current filters" : "No live clients yet"} body={clients.length ? "Try a different search or switch back to all clients." : "Open Client Studio, add a client, then link synced assets to start seeing live data."} />
               ) : overviewMode === "grid" ? (
-                <div style={{ display: "grid", gridTemplateColumns: overviewColumns, gap: 18 }}>
-                  {filteredClients.map((client) => (
-                    <OverviewCard key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} />
+                <div style={{ display: "grid", gap: 18 }}>
+                  {filteredClientGroups.map((group) => (
+                    <ReportingGroupSection key={group.id} group={group}>
+                      <div style={{ display: "grid", gridTemplateColumns: overviewColumns, gap: 18 }}>
+                        {group.clients.map((client) => (
+                          <OverviewCard key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} />
+                        ))}
+                      </div>
+                    </ReportingGroupSection>
                   ))}
                 </div>
               ) : (
                 <div style={{ display: "grid", gap: 16 }}>
-                  {filteredClients.map((client) => (
-                    <OverviewRow key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} />
+                  {filteredClientGroups.map((group) => (
+                    <ReportingGroupSection key={group.id} group={group}>
+                      <div style={{ display: "grid", gap: 16 }}>
+                        {group.clients.map((client) => (
+                          <OverviewRow key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} />
+                        ))}
+                      </div>
+                    </ReportingGroupSection>
                   ))}
                 </div>
               )}
@@ -7871,8 +8045,14 @@ export default function AdPulse() {
               />
               <AccountDateRangeControl value={accountsDateRange} onChange={setAccountsDateRange} />
               <div style={{ display: "grid", gap: 18 }}>
-                {filteredClients.length ? filteredClients.map((client) => (
-                  <AccountStack key={client.id} client={client} users={accountUsers} open={openMap} setOpen={setOpenMap} campaigns={client.campaigns} ads={client.ads} />
+                {filteredClients.length ? filteredClientGroups.map((group) => (
+                  <ReportingGroupSection key={group.id} group={group}>
+                    <div style={{ display: "grid", gap: 18 }}>
+                      {group.clients.map((client) => (
+                        <AccountStack key={client.id} client={client} users={accountUsers} open={openMap} setOpen={setOpenMap} campaigns={client.campaigns} ads={client.ads} />
+                      ))}
+                    </div>
+                  </ReportingGroupSection>
                 )) : (
                   <EmptyState title="No live clients yet" body="Open Client Studio, add a client, then link synced ad accounts to populate this screen." />
                 )}

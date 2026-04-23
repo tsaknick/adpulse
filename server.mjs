@@ -590,6 +590,10 @@ function normalizeStoredClient(value) {
 
   const id = String(value.id || `client-${crypto.randomUUID()}`).trim();
   if (!id) return null;
+  const normalizeClientTarget = (input) => {
+    const raw = String(input || "").trim();
+    return !raw || raw.toLowerCase() === "live media account" ? "Conversions" : raw;
+  };
 
   const normalizeIdList = (items) => Array.isArray(items)
     ? Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)))
@@ -600,7 +604,7 @@ function normalizeStoredClient(value) {
     id,
     name: String(value.name || "New client").trim() || "New client",
     category: String(value.category || "eshop").trim() || "eshop",
-    focus: String(value.focus || "Live media account").trim() || "Live media account",
+    focus: normalizeClientTarget(value.focus),
     accent: String(value.accent || "#0f8f66").trim() || "#0f8f66",
     accent2: String(value.accent2 || "#78d1ad").trim() || "#78d1ad",
     healthMode: String(value.healthMode || "healthy").trim() || "healthy",
