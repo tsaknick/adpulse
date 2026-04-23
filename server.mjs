@@ -36,6 +36,7 @@ const GOOGLE_ADS_LIVE_ALLOWED_DATE_RANGES = new Set([
   "LAST_30_DAYS",
   "THIS_MONTH",
   "LAST_MONTH",
+  "CUSTOM",
 ]);
 
 loadEnvFile(path.join(__dirname, ".env.local"));
@@ -1474,7 +1475,7 @@ async function fetchSearchTerms(connectionId, searchParams) {
 }
 
 async function fetchGoogleAdsLiveOverview(payload) {
-  const dateRange = sanitizeGoogleAdsLiveDateRange(payload?.dateRange);
+  const dateRange = normalizeLiveDateRange(payload);
   const requests = Array.isArray(payload?.requests)
     ? payload.requests.map(normalizeGoogleAdsLiveRequest).filter(Boolean)
     : [];
@@ -1482,7 +1483,9 @@ async function fetchGoogleAdsLiveOverview(payload) {
   if (!requests.length) {
     return {
       generatedAt: new Date().toISOString(),
-      dateRange,
+      dateRange: dateRange.id,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
       accounts: [],
       campaigns: [],
       ads: [],
@@ -1544,7 +1547,9 @@ async function fetchGoogleAdsLiveOverview(payload) {
 
   const response = {
     generatedAt: new Date().toISOString(),
-    dateRange,
+    dateRange: dateRange.id,
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
     accounts: [],
     campaigns: [],
     ads: [],
@@ -1652,7 +1657,7 @@ async function fetchGoogleAdsLiveOverview(payload) {
 }
 
 async function fetchMetaAdsLiveOverview(payload) {
-  const dateRange = sanitizeGoogleAdsLiveDateRange(payload?.dateRange);
+  const dateRange = normalizeLiveDateRange(payload);
   const requests = Array.isArray(payload?.requests)
     ? payload.requests.map(normalizeMetaAdsLiveRequest).filter(Boolean)
     : [];
@@ -1660,7 +1665,9 @@ async function fetchMetaAdsLiveOverview(payload) {
   if (!requests.length) {
     return {
       generatedAt: new Date().toISOString(),
-      dateRange,
+      dateRange: dateRange.id,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
       accounts: [],
       campaigns: [],
       ads: [],
@@ -1722,7 +1729,9 @@ async function fetchMetaAdsLiveOverview(payload) {
 
   const response = {
     generatedAt: new Date().toISOString(),
-    dateRange,
+    dateRange: dateRange.id,
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
     accounts: [],
     campaigns: [],
     ads: [],
@@ -1904,7 +1913,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
         "  metrics.cost_micros",
         "FROM campaign",
         "WHERE campaign.status != REMOVED",
-        `  AND segments.date DURING ${dateRange}`,
+        dateRange.googleCondition,
         "ORDER BY metrics.cost_micros DESC",
         `LIMIT ${GOOGLE_ADS_LIVE_CAMPAIGN_LIMIT}`,
       ].join(" "),
@@ -1936,7 +1945,7 @@ async function fetchGoogleAdsLiveCustomerReport({ context, customerId, dateRange
         "FROM ad_group_ad",
         "WHERE ad_group_ad.status != REMOVED",
         "  AND campaign.status != REMOVED",
-        `  AND segments.date DURING ${dateRange}`,
+        dateRange.googleCondition,
         "ORDER BY metrics.cost_micros DESC",
         `LIMIT ${GOOGLE_ADS_LIVE_AD_LIMIT}`,
       ].join(" "),
@@ -2061,7 +2070,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
   const accessToken = tokenBundle.accessToken;
   const actId = `act_${adAccountId}`;
   const asset = connection.assets?.find((item) => sanitizeMetaAdAccountId(item.externalId) === adAccountId) || null;
-  const datePreset = mapMetaDatePreset(dateRange);
+  const metaDateParams = getMetaDateParams(dateRange);
   const errors = [];
   let accountDetails = null;
   let campaignRows = [];
@@ -2092,7 +2101,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
     campaignInsightRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/insights`, {
       fields: "campaign_id,campaign_name,impressions,clicks,spend,actions,action_values,purchase_roas",
       level: "campaign",
-      date_preset: datePreset,
+      ...metaDateParams,
       limit: String(META_ADS_LIVE_CAMPAIGN_LIMIT),
       access_token: accessToken,
     }), `Meta campaign insights ${adAccountId}`);
@@ -2114,7 +2123,7 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
     adInsightRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/insights`, {
       fields: "ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,actions,action_values",
       level: "ad",
-      date_preset: datePreset,
+      ...metaDateParams,
       limit: String(META_ADS_LIVE_AD_LIMIT),
       access_token: accessToken,
     }), `Meta ad insights ${adAccountId}`);
@@ -2363,12 +2372,56 @@ function normalizeGoogleAdsLiveAdRow(row) {
   };
 }
 
+function normalizeLiveDateRange(payload = {}) {
+  const requested = sanitizeGoogleAdsLiveDateRange(payload?.dateRange);
+
+  if (requested === "CUSTOM") {
+    const startDate = sanitizeIsoDate(payload?.startDate);
+    const endDate = sanitizeIsoDate(payload?.endDate);
+
+    if (startDate && endDate && startDate <= endDate) {
+      return {
+        id: "CUSTOM",
+        startDate,
+        endDate,
+        googleCondition: `  AND segments.date BETWEEN '${startDate}' AND '${endDate}'`,
+        dayCount: countInclusiveDays(startDate, endDate),
+      };
+    }
+  }
+
+  return {
+    id: requested === "CUSTOM" ? "THIS_MONTH" : requested,
+    startDate: "",
+    endDate: "",
+    googleCondition: `  AND segments.date DURING ${requested === "CUSTOM" ? "THIS_MONTH" : requested}`,
+    dayCount: getGoogleAdsBudgetDayCount(requested === "CUSTOM" ? "THIS_MONTH" : requested),
+  };
+}
+
 function sanitizeGoogleAdsLiveDateRange(value) {
   const normalized = String(value || "THIS_MONTH").trim().toUpperCase();
   return GOOGLE_ADS_LIVE_ALLOWED_DATE_RANGES.has(normalized) ? normalized : "THIS_MONTH";
 }
 
+function sanitizeIsoDate(value) {
+  const normalized = String(value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return "";
+
+  const date = new Date(`${normalized}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? "" : normalized;
+}
+
+function countInclusiveDays(startDate, endDate) {
+  const start = new Date(`${startDate}T00:00:00Z`).getTime();
+  const end = new Date(`${endDate}T00:00:00Z`).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 1;
+  return Math.max(1, Math.round((end - start) / 86_400_000) + 1);
+}
+
 function getGoogleAdsBudgetDayCount(dateRange) {
+  if (dateRange && typeof dateRange === "object") return dateRange.dayCount || 1;
+
   if (dateRange === "LAST_7_DAYS") return 7;
   if (dateRange === "LAST_30_DAYS") return 30;
 
@@ -2639,10 +2692,24 @@ function isMetaConversionAction(type) {
 }
 
 function mapMetaDatePreset(dateRange) {
-  if (dateRange === "LAST_7_DAYS") return "last_7d";
-  if (dateRange === "LAST_30_DAYS") return "last_30d";
-  if (dateRange === "LAST_MONTH") return "last_month";
+  const normalized = dateRange && typeof dateRange === "object" ? dateRange.id : dateRange;
+  if (normalized === "LAST_7_DAYS") return "last_7d";
+  if (normalized === "LAST_30_DAYS") return "last_30d";
+  if (normalized === "LAST_MONTH") return "last_month";
   return "this_month";
+}
+
+function getMetaDateParams(dateRange) {
+  if (dateRange?.id === "CUSTOM" && dateRange.startDate && dateRange.endDate) {
+    return {
+      time_range: JSON.stringify({
+        since: dateRange.startDate,
+        until: dateRange.endDate,
+      }),
+    };
+  }
+
+  return { date_preset: mapMetaDatePreset(dateRange) };
 }
 
 function mapMetaAccountStatus(status, activeCampaigns) {

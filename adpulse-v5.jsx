@@ -103,9 +103,11 @@ const ACCOUNT_USER_IDS = USER_BLUEPRINTS.filter((user) => user.role === "account
 const STORAGE_KEYS = {
   session: "adpulse/session",
   users: "adpulse/users",
-  clients: "adpulse/clients",
+  clients: "adpulse/liveClients",
   providerProfiles: "adpulse/providerProfiles",
 };
+
+const LEGACY_DEMO_CLIENT_STORAGE_KEY = "adpulse/clients";
 
 const SEARCH_TERM_DATE_RANGE_OPTIONS = [
   { value: "LAST_7_DAYS", label: "Last 7 days" },
@@ -113,6 +115,14 @@ const SEARCH_TERM_DATE_RANGE_OPTIONS = [
   { value: "LAST_30_DAYS", label: "Last 30 days" },
   { value: "THIS_MONTH", label: "This month" },
   { value: "LAST_MONTH", label: "Last month" },
+];
+
+const ACCOUNT_DATE_RANGE_OPTIONS = [
+  { value: "THIS_MONTH", label: "This month" },
+  { value: "LAST_7_DAYS", label: "Last 7 days" },
+  { value: "LAST_30_DAYS", label: "Last 30 days" },
+  { value: "LAST_MONTH", label: "Last month" },
+  { value: "CUSTOM", label: "Custom range" },
 ];
 
 const SEARCH_TERM_TAG_META = {
@@ -177,24 +187,7 @@ const CONNECTION_GUIDE = {
 
 const ADDITIVE_METRICS = new Set(["spend", "clicks", "conversions", "conversionValue", "revenue", "sessions", "users"]);
 
-const CLIENT_BLUEPRINTS = [
-  { id: "cl01", name: "Client 01", category: "eshop", focus: "Fashion retail", accent: "#d7654b", accent2: "#f2b07c", healthMode: "overspend" },
-  { id: "cl02", name: "Client 02", category: "lead_gen", focus: "Dental clinics", accent: "#0f8f66", accent2: "#78d1ad", healthMode: "healthy" },
-  { id: "cl03", name: "Client 03", category: "eshop", focus: "Home living", accent: "#c65c48", accent2: "#efb98c", healthMode: "revenue_drop" },
-  { id: "cl04", name: "Client 04", category: "b2b", focus: "SaaS", accent: "#2d6cdf", accent2: "#8db1ff", healthMode: "healthy" },
-  { id: "cl05", name: "Client 05", category: "lead_gen", focus: "Education", accent: "#14a67d", accent2: "#86debe", healthMode: "stopped_campaign" },
-  { id: "cl06", name: "Client 06", category: "brand", focus: "Hospitality", accent: "#9966e8", accent2: "#c7a8ff", healthMode: "underspend" },
-  { id: "cl07", name: "Client 07", category: "b2b", focus: "Energy", accent: "#1c7b7b", accent2: "#84d9d5", healthMode: "healthy" },
-  { id: "cl08", name: "Client 08", category: "eshop", focus: "Beauty", accent: "#df7a3c", accent2: "#f6c785", healthMode: "high_cpm" },
-  { id: "cl09", name: "Client 09", category: "lead_gen", focus: "Real estate", accent: "#2f8fa4", accent2: "#98d7e5", healthMode: "healthy" },
-  { id: "cl10", name: "Client 10", category: "eshop", focus: "Electronics", accent: "#cf553e", accent2: "#f5b392", healthMode: "overspend" },
-  { id: "cl11", name: "Client 11", category: "eshop", focus: "Sportswear", accent: "#b84f4b", accent2: "#efb5a5", healthMode: "revenue_drop" },
-  { id: "cl12", name: "Client 12", category: "b2b", focus: "Financial services", accent: "#4166c6", accent2: "#b3c4ff", healthMode: "healthy" },
-  { id: "cl13", name: "Client 13", category: "lead_gen", focus: "Automotive", accent: "#198c70", accent2: "#7ed6bd", healthMode: "underspend" },
-  { id: "cl14", name: "Client 14", category: "brand", focus: "Travel", accent: "#8c5fe0", accent2: "#c1a7ff", healthMode: "healthy" },
-  { id: "cl15", name: "Client 15", category: "eshop", focus: "Grocery", accent: "#d77256", accent2: "#f2c08a", healthMode: "high_cpc" },
-  { id: "cl16", name: "Client 16", category: "b2b", focus: "Manufacturing", accent: "#2d78a1", accent2: "#98cce6", healthMode: "healthy" },
-];
+const CLIENT_BLUEPRINTS = [];
 
 const GOOGLE_ACCOUNT_NAMES = ["Search Core", "Shopping", "Performance Max", "Brand Defense"];
 const META_ACCOUNT_NAMES = ["Prospecting", "Retargeting", "Creative Testing", "Catalog Sales"];
@@ -252,6 +245,45 @@ function getConversionValue(item) {
 
 function formatPercent(value, decimals = 2) {
   return `${Number(value || 0).toFixed(decimals)}%`;
+}
+
+function toDateInputValue(date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
+}
+
+function getDefaultAccountDateRange() {
+  const today = new Date();
+  return {
+    preset: "THIS_MONTH",
+    startDate: toDateInputValue(new Date(today.getFullYear(), today.getMonth(), 1)),
+    endDate: toDateInputValue(today),
+  };
+}
+
+function isValidDateInput(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function isValidAccountDateRange(value) {
+  if (value?.preset !== "CUSTOM") return true;
+  return isValidDateInput(value.startDate) && isValidDateInput(value.endDate) && value.startDate <= value.endDate;
+}
+
+function getAccountDateRangePayload(value) {
+  if (value?.preset === "CUSTOM" && isValidAccountDateRange(value)) {
+    return {
+      dateRange: "CUSTOM",
+      startDate: value.startDate,
+      endDate: value.endDate,
+    };
+  }
+
+  const preset = ACCOUNT_DATE_RANGE_OPTIONS.some((option) => option.value === value?.preset && option.value !== "CUSTOM")
+    ? value.preset
+    : "THIS_MONTH";
+
+  return { dateRange: preset };
 }
 
 function formatSearchTermStatus(status) {
@@ -783,6 +815,37 @@ function buildClients() {
   });
 }
 
+function createLiveClientDraft(seed = Date.now()) {
+  const id = String(seed).startsWith("client-") ? String(seed) : `client-${seed}`;
+
+  return {
+    id,
+    name: "New client",
+    category: "eshop",
+    focus: "Live media account",
+    accent: "#0f8f66",
+    accent2: "#78d1ad",
+    healthMode: "healthy",
+    logoText: "NC",
+    owner: "",
+    reportingGroup: "New client",
+    budgets: {
+      google_ads: 0,
+      meta_ads: 0,
+    },
+    connections: {
+      google_ads: false,
+      meta_ads: false,
+      ga4: false,
+    },
+    linkedProfiles: {},
+    linkedAssets: getEmptyLinkedAssets(),
+    rules: getDefaultRules("eshop"),
+    tags: ["Live client"],
+    assignedUserIds: [],
+  };
+}
+
 function spendFactorForMode(mode, platform, slot) {
   if (mode === "overspend") return platform === "google_ads" ? 1.16 + slot * 0.03 : 1.12 + slot * 0.02;
   if (mode === "underspend") return platform === "meta_ads" ? 0.82 + slot * 0.02 : 0.88 + slot * 0.02;
@@ -1164,37 +1227,46 @@ function hydrateProviderProfiles(value) {
 function hydrateClients(value) {
   if (!Array.isArray(value)) return CLIENTS_BASE;
 
-  return CLIENTS_BASE.map((baseClient) => {
-    const stored = value.find((item) => item.id === baseClient.id);
-    if (!stored) return baseClient;
-    const category = stored.category || baseClient.category;
+  const normalizeClient = (stored, baseClient = null) => {
+    const fallback = baseClient || createLiveClientDraft(stored?.id || Date.now());
+    const category = stored.category || fallback.category;
     const rules = {
-      ...baseClient.rules,
+      ...fallback.rules,
       ...stored.rules,
-      searchTerms: normalizeSearchTermRules(category, stored.rules?.searchTerms || baseClient.rules?.searchTerms),
+      searchTerms: normalizeSearchTermRules(category, stored.rules?.searchTerms || fallback.rules?.searchTerms),
     };
 
     return {
-      ...baseClient,
+      ...fallback,
       ...stored,
-      budgets: { ...baseClient.budgets, ...stored.budgets },
-      connections: { ...baseClient.connections, ...stored.connections },
-      linkedProfiles: { ...baseClient.linkedProfiles, ...stored.linkedProfiles },
+      budgets: { ...fallback.budgets, ...stored.budgets },
+      connections: { ...fallback.connections, ...stored.connections },
+      linkedProfiles: { ...fallback.linkedProfiles, ...stored.linkedProfiles },
       linkedAssets: {
         ...getEmptyLinkedAssets(),
-        ...(baseClient.linkedAssets || {}),
+        ...(fallback.linkedAssets || {}),
         ...Object.fromEntries(Object.entries(stored.linkedAssets || {}).map(([platform, ids]) => [
           platform,
           Array.isArray(ids) ? Array.from(new Set(ids.filter(Boolean))) : [],
         ])),
       },
       rules,
-      tags: Array.isArray(stored.tags) ? stored.tags : baseClient.tags,
+      tags: Array.isArray(stored.tags) ? stored.tags : fallback.tags,
       assignedUserIds: Array.isArray(stored.assignedUserIds)
         ? Array.from(new Set(stored.assignedUserIds.filter((userId) => ACCOUNT_USER_IDS.includes(userId))))
-        : baseClient.assignedUserIds,
+        : fallback.assignedUserIds,
     };
+  };
+
+  const mergedBase = CLIENTS_BASE.map((baseClient) => {
+    const stored = value.find((item) => item.id === baseClient.id);
+    return stored ? normalizeClient(stored, baseClient) : baseClient;
   });
+  const extras = value
+    .filter((item) => item?.id && !CLIENTS_BASE.some((baseClient) => baseClient.id === item.id))
+    .map((item) => normalizeClient(item));
+
+  return [...mergedBase, ...extras];
 }
 
 function evaluateHealth(client, accounts, campaigns, ga4) {
@@ -3163,7 +3235,99 @@ function FiltersBar({
   );
 }
 
-function ClientStudio({ clients, accounts, users, providerProfiles, selectedClientId, setSelectedClientId, draft, setDraft, onSave, layoutColumns, canManageAssignments, canEditCoreSettings, onOpenConnections }) {
+function AccountDateRangeControl({ value, onChange }) {
+  const isCustom = value.preset === "CUSTOM";
+  const customValid = isValidAccountDateRange(value);
+  const inputStyle = {
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: `1px solid ${T.line}`,
+    background: T.surfaceStrong,
+    color: T.ink,
+    fontSize: 12,
+    fontWeight: 700,
+    fontFamily: T.font,
+  };
+
+  return (
+    <div
+      style={{
+        padding: 16,
+        borderRadius: 22,
+        background: T.surface,
+        border: `1px solid ${T.line}`,
+        boxShadow: T.shadow,
+        display: "flex",
+        justifyContent: "space-between",
+        gap: 12,
+        flexWrap: "wrap",
+        alignItems: "center",
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 12, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Account data range</div>
+        <div style={{ marginTop: 4, fontSize: 12, color: customValid ? T.inkSoft : T.coral }}>
+          {isCustom
+            ? customValid ? `${value.startDate} to ${value.endDate}` : "Choose a valid start and end date."
+            : ACCOUNT_DATE_RANGE_OPTIONS.find((option) => option.value === value.preset)?.label || "This month"}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <select
+          value={value.preset}
+          onChange={(event) => onChange((current) => ({ ...current, preset: event.target.value }))}
+          style={{ ...inputStyle, minWidth: 180 }}
+        >
+          {ACCOUNT_DATE_RANGE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+
+        {isCustom ? (
+          <>
+            <input
+              type="date"
+              value={value.startDate}
+              onChange={(event) => onChange((current) => ({ ...current, startDate: event.target.value }))}
+              style={inputStyle}
+            />
+            <input
+              type="date"
+              value={value.endDate}
+              onChange={(event) => onChange((current) => ({ ...current, endDate: event.target.value }))}
+              style={inputStyle}
+            />
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ClientStudio({ clients, accounts, users, providerProfiles, selectedClientId, setSelectedClientId, draft, setDraft, onSave, onCreateClient, layoutColumns, canManageAssignments, canEditCoreSettings, onOpenConnections }) {
+  if (!draft) {
+    return (
+      <div
+        style={{
+          padding: 24,
+          borderRadius: 24,
+          background: T.surface,
+          border: `1px solid ${T.line}`,
+          boxShadow: T.shadow,
+          display: "grid",
+          gap: 14,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 800, fontFamily: T.heading }}>No live clients yet</div>
+          <div style={{ marginTop: 6, fontSize: 13, color: T.inkSoft }}>Demo clients have been removed. Create a client, then link synced Google, Meta or GA4 assets here.</div>
+        </div>
+        {canEditCoreSettings ? <Button onClick={onCreateClient} tone="primary">Add client</Button> : null}
+      </div>
+    );
+  }
+
   const connectedAssets = accounts.filter((account) => account.clientId === draft.id);
   const liveAssetsByPlatform = Object.keys(PLATFORM_META).reduce((acc, platform) => ({
     ...acc,
@@ -3240,6 +3404,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
             {canEditCoreSettings ? "Budgets, categories, alert rules and connections." : "Budgets, connected assets and alert rules for your assigned clients."}
           </div>
         </div>
+        {canEditCoreSettings ? <Button onClick={onCreateClient} tone="primary">Add client</Button> : null}
 
         <div style={{ display: "grid", gap: 8 }}>
           {clients.map((client) => (
@@ -4779,6 +4944,7 @@ export default function AdPulse() {
   const [sortBy, setSortBy] = useState("priority");
   const [users, setUsers] = useState(() => hydrateUsers(readStoredValue(STORAGE_KEYS.users, USERS_BASE)));
   const [clients, setClients] = useState(() => hydrateClients(readStoredValue(STORAGE_KEYS.clients, CLIENTS_BASE)));
+  const [accountsDateRange, setAccountsDateRange] = useState(() => getDefaultAccountDateRange());
   const [integrationState, setIntegrationState] = useState(() => ({
     ...createEmptyIntegrationSnapshot(),
     loading: true,
@@ -4790,24 +4956,21 @@ export default function AdPulse() {
   const [currentUserId, setCurrentUserId] = useState(() => readStoredValue(STORAGE_KEYS.session, null));
   const [setupComplete, setSetupComplete] = useState(null);
   const [openMap, setOpenMap] = useState({});
-  const [selectedClientId, setSelectedClientId] = useState(CLIENTS_BASE[0].id);
+  const [selectedClientId, setSelectedClientId] = useState(CLIENTS_BASE[0]?.id || "");
   const [viewportWidth, setViewportWidth] = useState(() => (typeof window === "undefined" ? 1440 : window.innerWidth));
   const [showProfile, setShowProfile] = useState(false);
   const [profileDraft, setProfileDraft] = useState({ name: "", title: "" });
   const [loginForm, setLoginForm] = useState({ email: "director@adpulse.local", password: "demo123" });
   const [loginError, setLoginError] = useState("");
   const [chartForm, setChartForm] = useState({
-    clientId: CLIENTS_BASE[0].id,
+    clientId: CLIENTS_BASE[0]?.id || "",
     scope: "client",
-    accountId: ACCOUNTS_BASE.find((account) => account.clientId === CLIENTS_BASE[0].id)?.id || "",
+    accountId: CLIENTS_BASE[0] ? ACCOUNTS_BASE.find((account) => account.clientId === CLIENTS_BASE[0].id)?.id || "" : "",
     metrics: ["spend", "revenue"],
   });
-  const [charts, setCharts] = useState([
-    { id: "chart-1", clientId: CLIENTS_BASE[0].id, scope: "client", accountId: "", metrics: ["spend", "revenue", "conversions"] },
-    { id: "chart-2", clientId: CLIENTS_BASE[3].id, scope: "ga4", accountId: "", metrics: ["sessions", "users", "revenue"] },
-  ]);
-  const [gaClientId, setGaClientId] = useState(CLIENTS_BASE.find((client) => client.connections.ga4)?.id || CLIENTS_BASE[0].id);
-  const [studioDraft, setStudioDraft] = useState(CLIENTS_BASE[0]);
+  const [charts, setCharts] = useState([]);
+  const [gaClientId, setGaClientId] = useState(CLIENTS_BASE.find((client) => client.connections.ga4)?.id || CLIENTS_BASE[0]?.id || "");
+  const [studioDraft, setStudioDraft] = useState(CLIENTS_BASE[0] || null);
   const currentUser = users.find((user) => user.id === currentUserId) || null;
   const isDirector = currentUser?.role === "director";
   const providerProfiles = integrationState.connections;
@@ -4816,6 +4979,10 @@ export default function AdPulse() {
     if (!currentUser) return [];
     return isDirector ? clients : clients.filter((client) => client.assignedUserIds?.includes(currentUser.id));
   }, [clients, currentUser, isDirector]);
+  const accountsDateRangePayload = useMemo(
+    () => getAccountDateRangePayload(accountsDateRange),
+    [accountsDateRange]
+  );
   const googleAdsAssetLookup = useMemo(() => (
     new Map(
       providerProfiles
@@ -4891,6 +5058,11 @@ export default function AdPulse() {
     window.addEventListener("resize", handleResize);
 
     return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.removeItem(LEGACY_DEMO_CLIENT_STORAGE_KEY);
   }, []);
 
   useEffect(() => {
@@ -4980,7 +5152,7 @@ export default function AdPulse() {
     }));
 
     fetchGoogleAdsLiveOverview({
-      dateRange: "THIS_MONTH",
+      ...accountsDateRangePayload,
       requests: googleAdsLiveRequests,
     })
       .then((data) => {
@@ -5011,7 +5183,7 @@ export default function AdPulse() {
     return () => {
       cancelled = true;
     };
-  }, [currentUser, googleAdsLiveRequests]);
+  }, [accountsDateRangePayload, currentUser, googleAdsLiveRequests]);
 
   useEffect(() => {
     if (!currentUser || !metaAdsLiveRequests.length) {
@@ -5027,7 +5199,7 @@ export default function AdPulse() {
     }));
 
     fetchMetaAdsLiveOverview({
-      dateRange: "THIS_MONTH",
+      ...accountsDateRangePayload,
       requests: metaAdsLiveRequests,
     })
       .then((data) => {
@@ -5058,7 +5230,7 @@ export default function AdPulse() {
     return () => {
       cancelled = true;
     };
-  }, [currentUser, metaAdsLiveRequests]);
+  }, [accountsDateRangePayload, currentUser, metaAdsLiveRequests]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -5071,9 +5243,7 @@ export default function AdPulse() {
 
   useEffect(() => {
     const current = clients.find((client) => client.id === selectedClientId) || clients[0];
-    if (current) {
-      setStudioDraft(current);
-    }
+    setStudioDraft(current || null);
   }, [clients, selectedClientId]);
 
   useEffect(() => {
@@ -5306,7 +5476,17 @@ export default function AdPulse() {
     setView("studio");
   }
 
+  function createClient() {
+    const nextClient = createLiveClientDraft(Date.now());
+    setClients((current) => [...current, nextClient]);
+    setSelectedClientId(nextClient.id);
+    setStudioDraft(nextClient);
+    setView("studio");
+  }
+
   function saveStudioDraft() {
+    if (!studioDraft) return;
+
     if (!isDirector) {
       setClients((current) => current.map((client) => (
         client.id === studioDraft.id
@@ -5585,7 +5765,7 @@ export default function AdPulse() {
                 count={filteredClients.length}
               />
               {filteredClients.length === 0 ? (
-                <EmptyState title="No clients match the current filters" body="Try a different search or switch back to all clients." />
+                <EmptyState title={clients.length ? "No clients match the current filters" : "No live clients yet"} body={clients.length ? "Try a different search or switch back to all clients." : "Open Client Studio, add a client, then link synced assets to start seeing live data."} />
               ) : overviewMode === "grid" ? (
                 <div style={{ display: "grid", gridTemplateColumns: overviewColumns, gap: 18 }}>
                   {filteredClients.map((client) => (
@@ -5618,10 +5798,13 @@ export default function AdPulse() {
                 showModeToggle={false}
                 count={filteredClients.length}
               />
+              <AccountDateRangeControl value={accountsDateRange} onChange={setAccountsDateRange} />
               <div style={{ display: "grid", gap: 18 }}>
-                {filteredClients.map((client) => (
+                {filteredClients.length ? filteredClients.map((client) => (
                   <AccountStack key={client.id} client={client} users={accountUsers} open={openMap} setOpen={setOpenMap} campaigns={client.campaigns} ads={client.ads} />
-                ))}
+                )) : (
+                  <EmptyState title="No live clients yet" body="Open Client Studio, add a client, then link synced ad accounts to populate this screen." />
+                )}
               </div>
             </>
           ) : null}
@@ -5800,7 +5983,7 @@ export default function AdPulse() {
           ) : null}
 
           {view === "studio" ? (
-            <ClientStudio clients={enriched} accounts={allDashboardAccounts} users={users} providerProfiles={providerProfiles} selectedClientId={selectedClientId} setSelectedClientId={setSelectedClientId} draft={studioDraft} setDraft={setStudioDraft} onSave={saveStudioDraft} layoutColumns={studioColumns} canManageAssignments={isDirector} canEditCoreSettings={isDirector} onOpenConnections={() => setView("connections")} />
+            <ClientStudio clients={enriched} accounts={allDashboardAccounts} users={users} providerProfiles={providerProfiles} selectedClientId={selectedClientId} setSelectedClientId={setSelectedClientId} draft={studioDraft} setDraft={setStudioDraft} onSave={saveStudioDraft} onCreateClient={createClient} layoutColumns={studioColumns} canManageAssignments={isDirector} canEditCoreSettings={isDirector} onOpenConnections={() => setView("connections")} />
           ) : null}
 
           {view === "connections" ? (
