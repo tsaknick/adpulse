@@ -624,6 +624,285 @@ function extractSuggestedNegatives(rows) {
   });
 }
 
+function getClientTargetMode(target) {
+  const normalized = normalizeClientTarget(target).toLowerCase();
+
+  if (normalized === "sales" || normalized === "roas") return "revenue";
+  if (normalized === "conversions" || normalized === "leads" || normalized === "app installs" || normalized === "store visits") return "conversion";
+  if (normalized === "traffic" || normalized === "clicks" || normalized === "engagement") return "traffic";
+  return "awareness";
+}
+
+function getSuggestedKeywordMatchType(target, searchTerm) {
+  const targetMode = getClientTargetMode(target);
+  const tokenCount = tokenizeNegativeCandidate(searchTerm).length;
+
+  if (targetMode === "revenue" || targetMode === "conversion") return tokenCount >= 4 ? "Phrase" : "Exact";
+  if (targetMode === "traffic") return tokenCount >= 4 ? "Broad" : "Phrase";
+  return tokenCount >= 4 ? "Phrase" : "Broad";
+}
+
+function buildKeywordOpportunityReason(candidate, target) {
+  const targetMode = getClientTargetMode(target);
+
+  if (targetMode === "revenue" || targetMode === "conversion") {
+    if (candidate.conversions > 0) {
+      return `${formatNumber(candidate.conversions)} conversion${candidate.conversions === 1 ? "" : "s"} from this query with ${candidate.costPerConversion > 0 ? formatCurrency(candidate.costPerConversion) : "efficient"} CPA and ${formatPercent(candidate.ctr)} CTR.`;
+    }
+    return `${formatNumber(candidate.clicks)} clicks and ${formatPercent(candidate.ctr)} CTR with ${candidate.performanceScore}/100 performance and ${candidate.relevanceScore}/100 relevance.`;
+  }
+
+  if (targetMode === "traffic") {
+    return `${formatNumber(candidate.clicks)} clicks at ${formatMetric("cpc", candidate.averageCpc)} CPC with ${formatPercent(candidate.ctr)} CTR and ${candidate.relevanceScore}/100 relevance.`;
+  }
+
+  return `${formatNumber(candidate.impressions)} impressions with ${formatPercent(candidate.ctr)} CTR and ${candidate.relevanceScore}/100 audience relevance.`;
+}
+
+function extractKeywordOpportunities(rows, benchmarks, clientTarget, rules) {
+  const config = normalizeSearchTermRules("", rules);
+  const targetMode = getClientTargetMode(clientTarget);
+  const suggestions = new Map();
+  const minClicks = Math.max(targetMode === "awareness" ? 8 : 6, Number(config.neutralMinClicks) || 0);
+  const minCtr = Math.max(Number(benchmarks?.medianCtr) || 0, targetMode === "awareness" ? 3.2 : 2.2);
+
+  rows.forEach((row) => {
+    if (isInactiveSearchTerm(row)) return;
+    if (row.effectiveTag === "bad" || row.manualTag === "bad") return;
+    if (row.recommendedAction === "add_negative" || row.recommendedAction === "consider_negative") return;
+
+    const normalizedTerm = normalizeSearchTermKey(row.searchTerm);
+    const normalizedKeyword = normalizeSearchTermKey(row.keywordText || "");
+    if (!normalizedTerm || normalizedTerm === normalizedKeyword) return;
+
+    const clicks = Number(row.clicks) || 0;
+    const impressions = Number(row.impressions) || 0;
+    const conversions = Number(row.conversions) || 0;
+    const ctr = Number(row.ctr) || 0;
+    const performanceScore = Number(row.performanceScore) || 0;
+    const relevanceScore = Number(row.relevanceScore) || 0;
+    const averageCpc = Number(row.averageCpc) || 0;
+    const cost = Number(row.cost) || 0;
+    const costPerConversion = conversions > 0 ? cost / conversions : 0;
+    const strongConversionFit = conversions >= Math.max(1, Number(config.goodMinConversions) || 1)
+      && (config.goodMaxCostPerConversion <= 0 || costPerConversion <= config.goodMaxCostPerConversion * 1.15);
+    const strongTrafficFit = clicks >= minClicks
+      && ctr >= minCtr
+      && relevanceScore >= (targetMode === "awareness" ? 70 : 66)
+      && performanceScore >= (targetMode === "traffic" ? 62 : 68);
+    const strongAwarenessFit = impressions >= Math.max(Number(benchmarks?.medianImpressions) || 0, 120)
+      && ctr >= minCtr
+      && relevanceScore >= 68;
+
+    const qualifies = targetMode === "revenue"
+      ? strongConversionFit || (conversions > 0 && performanceScore >= 60)
+      : targetMode === "conversion"
+        ? strongConversionFit || (conversions > 0 && relevanceScore >= 60)
+        : targetMode === "traffic"
+          ? strongTrafficFit
+          : strongAwarenessFit || strongTrafficFit;
+
+    if (!qualifies) return;
+
+    let priorityScore = performanceScore + relevanceScore;
+    if (targetMode === "revenue" || targetMode === "conversion") {
+      priorityScore += conversions * 22;
+      if (config.goodMaxCostPerConversion > 0 && costPerConversion > 0) {
+        priorityScore += clampNumber((1 - costPerConversion / config.goodMaxCostPerConversion) * 18, -12, 18);
+      }
+    } else if (targetMode === "traffic") {
+      priorityScore += clicks * 2 + ctr * 4;
+      if (benchmarks?.medianCpc > 0 && averageCpc > 0) {
+        priorityScore += clampNumber((1 - averageCpc / benchmarks.medianCpc) * 16, -12, 12);
+      }
+    } else {
+      priorityScore += Math.min(impressions / 30, 24) + ctr * 4;
+    }
+
+    const current = suggestions.get(normalizedTerm) || {
+      normalizedTerm,
+      searchTerm: row.searchTerm,
+      sourceKeywordText: row.keywordText || "",
+      suggestedMatchType: getSuggestedKeywordMatchType(clientTarget, row.searchTerm),
+      clicks: 0,
+      impressions: 0,
+      conversions: 0,
+      cost: 0,
+      weightedPerformance: 0,
+      weightedRelevance: 0,
+      weight: 0,
+      priorityScore: -Infinity,
+    };
+    const weight = Math.max(clicks, 1);
+
+    current.clicks += clicks;
+    current.impressions += impressions;
+    current.conversions += conversions;
+    current.cost += cost;
+    current.weightedPerformance += performanceScore * weight;
+    current.weightedRelevance += relevanceScore * weight;
+    current.weight += weight;
+
+    if (priorityScore >= current.priorityScore) {
+      current.priorityScore = priorityScore;
+      current.searchTerm = row.searchTerm;
+      current.sourceKeywordText = row.keywordText || current.sourceKeywordText;
+      current.suggestedMatchType = getSuggestedKeywordMatchType(clientTarget, row.searchTerm);
+      current.averageCpc = averageCpc;
+      current.ctr = ctr;
+    }
+
+    suggestions.set(normalizedTerm, current);
+  });
+
+  return [...suggestions.values()]
+    .map((candidate) => {
+      const performanceScore = candidate.weight ? Math.round(candidate.weightedPerformance / candidate.weight) : 0;
+      const relevanceScore = candidate.weight ? Math.round(candidate.weightedRelevance / candidate.weight) : 0;
+      const ctr = candidate.impressions > 0 ? candidate.clicks / candidate.impressions * 100 : candidate.ctr || 0;
+      const averageCpc = candidate.clicks > 0 ? candidate.cost / candidate.clicks : candidate.averageCpc || 0;
+      const costPerConversion = candidate.conversions > 0 ? candidate.cost / candidate.conversions : 0;
+      const priority = candidate.priorityScore >= 120 ? "High priority" : candidate.priorityScore >= 92 ? "Promising" : "Test";
+
+      return {
+        ...candidate,
+        performanceScore,
+        relevanceScore,
+        ctr: +ctr.toFixed(2),
+        averageCpc: +averageCpc.toFixed(2),
+        costPerConversion: +costPerConversion.toFixed(2),
+        priority,
+        reason: buildKeywordOpportunityReason({
+          ...candidate,
+          performanceScore,
+          relevanceScore,
+          ctr,
+          averageCpc,
+          costPerConversion,
+        }, clientTarget),
+      };
+    })
+    .sort((left, right) => right.priorityScore - left.priorityScore || right.conversions - left.conversions || right.clicks - left.clicks)
+    .slice(0, 12);
+}
+
+function roundBudgetSuggestionAmount(value) {
+  if (value <= 0) return 0;
+  if (value < 200) return Math.round(value / 25) * 25;
+  if (value < 1000) return Math.round(value / 50) * 50;
+  return Math.round(value / 100) * 100;
+}
+
+function describeBudgetPerformance(summary, targetMode) {
+  if (targetMode === "revenue") {
+    return `${formatMetric("roas", summary.roas)} ROAS on ${formatCurrency(summary.spend)} spend`;
+  }
+  if (targetMode === "conversion") {
+    return `${formatNumber(summary.conversions)} conversions at ${summary.costPerConversion > 0 ? formatCurrency(summary.costPerConversion) : "no CPA yet"}`;
+  }
+  if (targetMode === "traffic") {
+    return `${formatNumber(summary.clicks)} clicks at ${formatMetric("cpc", summary.cpc)} CPC`;
+  }
+  return `${formatNumber(summary.impressions)} impressions at ${formatMetric("cpm", summary.cpm)} CPM`;
+}
+
+function buildBudgetRecommendations(client) {
+  const targetMode = getClientTargetMode(client.focus);
+  const connectedPlatforms = ["google_ads", "meta_ads"].filter((platform) => client.connections?.[platform] || (client.budgets?.[platform] || 0) > 0);
+  const summaries = connectedPlatforms.map((platform) => {
+    const accounts = (client.accounts || []).filter((account) => account.platform === platform);
+    const budget = Number(client.budgets?.[platform]) || accounts.reduce((acc, account) => acc + (Number(account.monthlyBudget) || 0), 0);
+    const spend = accounts.reduce((acc, account) => acc + (Number(account.spend) || 0), 0);
+    const clicks = accounts.reduce((acc, account) => acc + (Number(account.clicks) || 0), 0);
+    const impressions = accounts.reduce((acc, account) => acc + (Number(account.impressions) || 0), 0);
+    const conversions = accounts.reduce((acc, account) => acc + (Number(account.conversions) || 0), 0);
+    const conversionValue = accounts.reduce((acc, account) => acc + getConversionValue(account), 0);
+    const paceTarget = Math.max(budget * CALENDAR.spendProgress, 1);
+    const paceRatio = budget > 0 ? spend / paceTarget : 0;
+    const roas = spend > 0 ? conversionValue / spend : 0;
+    const cpc = clicks > 0 ? spend / clicks : 0;
+    const cpm = impressions > 0 ? spend / impressions * 1000 : 0;
+    const ctr = impressions > 0 ? clicks / impressions * 100 : 0;
+    const costPerConversion = conversions > 0 ? spend / conversions : 0;
+
+    let efficiencyScore = 50;
+    if (targetMode === "revenue") {
+      efficiencyScore += clampNumber((roas - 2.5) * 14, -22, 26) + clampNumber(conversions * 1.8, 0, 16);
+    } else if (targetMode === "conversion") {
+      efficiencyScore += clampNumber(conversions * 2.1, 0, 22);
+      if (costPerConversion > 0) efficiencyScore += clampNumber((30 - costPerConversion) * 0.9, -16, 18);
+    } else if (targetMode === "traffic") {
+      efficiencyScore += clampNumber(clicks / 12, 0, 18) + clampNumber((3.5 - cpc) * 6, -16, 16) + clampNumber((ctr - 2.5) * 6, -12, 16);
+    } else {
+      efficiencyScore += clampNumber(impressions / 1800, 0, 18) + clampNumber((4 - cpm) * 4, -14, 14) + clampNumber((ctr - 1.5) * 5, -10, 14);
+    }
+
+    return {
+      platform,
+      label: PLATFORM_META[platform]?.label || platform,
+      budget,
+      spend,
+      clicks,
+      impressions,
+      conversions,
+      conversionValue,
+      roas: +roas.toFixed(2),
+      cpc: +cpc.toFixed(2),
+      cpm: +cpm.toFixed(2),
+      ctr: +ctr.toFixed(2),
+      costPerConversion: +costPerConversion.toFixed(2),
+      paceRatio,
+      efficiencyScore: clampNumber(efficiencyScore, 0, 100),
+    };
+  }).filter((summary) => summary.budget > 0 || summary.spend > 0);
+
+  if (!summaries.length) return [];
+
+  const recommendations = [];
+  const sortedByEfficiency = [...summaries].sort((left, right) => right.efficiencyScore - left.efficiencyScore);
+  const best = sortedByEfficiency[0];
+  const weakest = sortedByEfficiency[sortedByEfficiency.length - 1];
+
+  summaries.forEach((summary) => {
+    if (summary.paceRatio < 0.82 && summary.efficiencyScore >= 62) {
+      const amount = roundBudgetSuggestionAmount(Math.max(summary.budget * 0.1, client.totalBudget * 0.04));
+      recommendations.push({
+        id: `${summary.platform}-increase`,
+        tone: "success",
+        title: `Increase ${summary.label} by about ${formatCurrency(amount)}`,
+        detail: `${summary.label} is under pace at ${Math.round(summary.paceRatio * 100)}% but still looks strong for ${client.focus}: ${describeBudgetPerformance(summary, targetMode)}.`,
+      });
+    }
+
+    if (summary.paceRatio > 1.12 && summary.efficiencyScore <= 48) {
+      const amount = roundBudgetSuggestionAmount(Math.max(summary.budget * 0.1, client.totalBudget * 0.04));
+      recommendations.push({
+        id: `${summary.platform}-decrease`,
+        tone: "warning",
+        title: `Trim ${summary.label} by about ${formatCurrency(amount)}`,
+        detail: `${summary.label} is already at ${Math.round(summary.paceRatio * 100)}% of pace with softer efficiency for ${client.focus}: ${describeBudgetPerformance(summary, targetMode)}.`,
+      });
+    }
+  });
+
+  if (summaries.length >= 2 && best && weakest && best.platform !== weakest.platform) {
+    const scoreGap = best.efficiencyScore - weakest.efficiencyScore;
+    if (scoreGap >= 14 && weakest.budget > 0) {
+      const amount = roundBudgetSuggestionAmount(Math.min(weakest.budget * 0.12, Math.max(client.totalBudget * 0.05, 250)));
+      recommendations.unshift({
+        id: `${weakest.platform}-to-${best.platform}`,
+        tone: "info",
+        title: `Shift about ${formatCurrency(amount)} from ${weakest.label} to ${best.label}`,
+        detail: `${best.label} is the stronger channel for ${client.focus}: ${describeBudgetPerformance(best, targetMode)} versus ${describeBudgetPerformance(weakest, targetMode)}.`,
+      });
+    }
+  }
+
+  return recommendations
+    .filter((recommendation, index, current) => current.findIndex((item) => item.id === recommendation.id) === index)
+    .slice(0, 3);
+}
+
 function tokenizeNegativeCandidate(value) {
   return String(value || "")
     .toLowerCase()
@@ -3304,6 +3583,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
   const filterMeta = CAMPAIGN_STATUS_FILTERS.find((option) => option.id === campaignFilter) || CAMPAIGN_STATUS_FILTERS[2];
   const noConnections = Object.values(client.connections).every((value) => !value);
   const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
+  const budgetRecommendations = useMemo(() => buildBudgetRecommendations(client), [client]);
   const groupedCampaigns = useMemo(
     () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, ads.filter((ad) => ad.campaignId === campaign.id)])),
     [ads, campaigns]
@@ -3429,6 +3709,46 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads }) {
           ) : (
             <>
               <AlertList health={client.health} />
+              <div style={{ padding: 16, borderRadius: 18, background: T.bgSoft, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <div>
+                    <div style={{ fontSize: 15, fontWeight: 800, fontFamily: T.heading }}>Smart budget optimizer</div>
+                    <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft }}>
+                      Suggestions are tuned for the client target: {client.focus}. Update Client Studio budgets to apply any changes.
+                    </div>
+                  </div>
+                  <ActionCue tone={budgetRecommendations.length ? "info" : "success"}>
+                    {budgetRecommendations.length ? `${budgetRecommendations.length} recommendation${budgetRecommendations.length === 1 ? "" : "s"}` : "No budget shift needed"}
+                  </ActionCue>
+                </div>
+
+                {budgetRecommendations.length ? (
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {budgetRecommendations.map((recommendation) => (
+                      <div
+                        key={recommendation.id}
+                        style={{
+                          padding: "12px 14px",
+                          borderRadius: 16,
+                          background: recommendation.tone === "warning" ? T.amberSoft : recommendation.tone === "success" ? T.accentSoft : "rgba(45, 108, 223, 0.10)",
+                          border: `1px solid ${recommendation.tone === "warning" ? "rgba(199, 147, 33, 0.18)" : recommendation.tone === "success" ? "rgba(15, 143, 102, 0.18)" : "rgba(45, 108, 223, 0.16)"}`,
+                        }}
+                      >
+                        <div style={{ fontSize: 13, fontWeight: 800, color: recommendation.tone === "warning" ? T.amber : recommendation.tone === "success" ? T.accent : T.sky }}>
+                          {recommendation.title}
+                        </div>
+                        <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+                          {recommendation.detail}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+                    Budgets look broadly aligned with the current live data for this client. As new spend and conversion data arrives, AdPulse will suggest increases, trims, or channel shifts here.
+                  </div>
+                )}
+              </div>
               <AssignedUsersStrip client={client} users={users} label="Assigned team" />
             </>
           )}
@@ -5911,6 +6231,15 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
 
   const visibleTerms = useMemo(() => sortSearchTermRows(filteredTerms, sort), [filteredTerms, sort]);
   const suggestedNegatives = useMemo(() => extractSuggestedNegatives(statusFilteredTerms), [statusFilteredTerms]);
+  const keywordOpportunities = useMemo(
+    () => extractKeywordOpportunities(
+      evaluatedTerms.filter((term) => !isInactiveSearchTerm(term)),
+      benchmarks,
+      selectedClient?.focus,
+      autoTagRules
+    ),
+    [autoTagRules, benchmarks, evaluatedTerms, selectedClient?.focus]
+  );
   const tableColumns = isPerformanceMax
     ? [
       { key: "searchTerm", label: "Search term" },
@@ -6008,6 +6337,19 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
       "negatives.txt",
     ].join("-");
     const content = suggestedNegatives.map((item) => item.word).join("\n");
+    downloadTextFile(filename, content);
+  }
+
+  function exportKeywordOpportunities() {
+    if (!selectedClient || !selectedAccount || !selectedCampaign || !keywordOpportunities.length) return;
+
+    const filename = [
+      sanitizeFileFragment(selectedClient.name),
+      sanitizeFileFragment(selectedAccount.name),
+      sanitizeFileFragment(selectedCampaign.name),
+      "keyword-opportunities.txt",
+    ].join("-");
+    const content = keywordOpportunities.map((item) => `${item.searchTerm} | ${item.suggestedMatchType} | ${item.priority} | ${item.reason}`).join("\n");
     downloadTextFile(filename, content);
   }
 
@@ -6212,6 +6554,63 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error }) {
         <MetricTile label="Avg perf score" value={summary.averagePerformanceScore === null ? "--" : `${summary.averagePerformanceScore}/100`} subValue={`${summary.actionCounts.keep} keep / ${summary.actionCounts.review} review`} accent={T.sky} />
         <MetricTile label="Avg relevance" value={summary.averageRelevanceScore === null ? "--" : `${summary.averageRelevanceScore}/100`} subValue={`${summary.negativeActionCount} negative candidates / ${summary.actionCounts.needs_data} need data`} accent={T.amber} />
         <MetricTile label="Wasted spend" value={formatMetric("spend", summary.wastedSpend)} subValue="Spend attached to bad terms" accent={T.coral} />
+      </div>
+
+      <div style={panelStyle}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 800, fontFamily: T.heading }}>Smart keyword opportunities</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft }}>
+              Suggestions are based on live search terms, term scores, and this client&apos;s target: {selectedClient?.focus || DEFAULT_CLIENT_TARGET}.
+            </div>
+          </div>
+          <Button onClick={exportKeywordOpportunities} tone="primary" disabled={!keywordOpportunities.length}>
+            Export ideas
+          </Button>
+        </div>
+
+        {!keywordOpportunities.length ? (
+          <EmptyState title="No keyword opportunities yet" body="Once AdPulse finds strong live search terms that outperform the current triggered keywords, they will appear here." />
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: fitCols(240), gap: 12 }}>
+            {keywordOpportunities.slice(0, 8).map((item) => (
+              <div
+                key={item.normalizedTerm}
+                style={{
+                  padding: 14,
+                  borderRadius: 18,
+                  background: T.surfaceStrong,
+                  border: `1px solid ${T.line}`,
+                  display: "grid",
+                  gap: 10,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: T.ink }}>{item.searchTerm}</div>
+                    <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft }}>
+                      Suggest as {item.suggestedMatchType} keyword{item.sourceKeywordText ? ` | currently triggered by ${item.sourceKeywordText}` : ""}
+                    </div>
+                  </div>
+                  <ToneBadge tone={item.priority === "High priority" ? "positive" : item.priority === "Promising" ? "warning" : "neutral"}>
+                    {item.priority}
+                  </ToneBadge>
+                </div>
+
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <ToneBadge tone="neutral">{formatNumber(item.clicks)} clicks</ToneBadge>
+                  <ToneBadge tone="neutral">{formatNumber(item.conversions)} conv.</ToneBadge>
+                  <ToneBadge tone="neutral">Perf {item.performanceScore}/100</ToneBadge>
+                  <ToneBadge tone="neutral">Rel {item.relevanceScore}/100</ToneBadge>
+                </div>
+
+                <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+                  {item.reason}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
