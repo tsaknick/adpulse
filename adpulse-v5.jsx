@@ -4149,6 +4149,21 @@ function comparePeriodSeries(currentSeries, previousSeries, metricKey) {
   };
 }
 
+function getAdsGa4ValueComparison(client, ga4) {
+  const accounts = Array.isArray(client?.accounts) ? client.accounts : [];
+  const adsConversionValue = accounts.reduce((acc, account) => acc + (Number(account.conversionValue) || 0), 0);
+  const adsAllConversionValue = accounts.reduce((acc, account) => acc + (Number(account.allConversionValue) || 0), 0);
+  const ga4Revenue = Number(ga4?.revenueCurrentPeriod) || 0;
+  const gapPercent = ga4Revenue ? ((adsConversionValue - ga4Revenue) / ga4Revenue) * 100 : 0;
+
+  return {
+    adsConversionValue,
+    adsAllConversionValue,
+    ga4Revenue,
+    gapPercent,
+  };
+}
+
 function InteractiveLineChart({
   series,
   metricKey,
@@ -4156,7 +4171,7 @@ function InteractiveLineChart({
   previousSeries = [],
   currentLabel = "Selected period",
   previousLabel = "Previous period",
-  height = 220,
+  height = 300,
 }) {
   const [hoverIndex, setHoverIndex] = useState(null);
   const points = Array.isArray(series) ? series : [];
@@ -4174,11 +4189,11 @@ function InteractiveLineChart({
     );
   }
 
-  const width = 680;
-  const padLeft = 62;
-  const padRight = 18;
-  const padTop = 18;
-  const padBottom = 42;
+  const width = 940;
+  const padLeft = 84;
+  const padRight = 28;
+  const padTop = 24;
+  const padBottom = 56;
   const chartWidth = width - padLeft - padRight;
   const chartHeight = height - padTop - padBottom;
   const maxValue = Math.max(...allValues, 1);
@@ -4234,7 +4249,7 @@ function InteractiveLineChart({
           return (
             <g key={`${metricKey}-ytick-${tick}`}>
               <line x1={padLeft} x2={width - padRight} y1={y} y2={y} stroke="rgba(22, 34, 24, 0.08)" />
-              <text x={padLeft - 10} y={y + 4} fontSize="10" fill={T.inkSoft} textAnchor="end">
+              <text x={padLeft - 12} y={y + 4} fontSize="12" fill={T.inkSoft} textAnchor="end">
                 {formatChartAxisValue(tick, metric.type)}
               </text>
             </g>
@@ -4249,7 +4264,7 @@ function InteractiveLineChart({
         <path d={currentPath} fill="none" stroke={color} strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
 
         {xLabels.map((item) => (
-          <text key={`${metricKey}-xlabel-${item.index}`} x={xFor(item.index)} y={height - 14} fontSize="10" fill={T.inkSoft} textAnchor={item.index === 0 ? "start" : item.index === points.length - 1 ? "end" : "middle"}>
+          <text key={`${metricKey}-xlabel-${item.index}`} x={xFor(item.index)} y={height - 18} fontSize="12" fill={T.inkSoft} textAnchor={item.index === 0 ? "start" : item.index === points.length - 1 ? "end" : "middle"}>
             {item.label}
           </text>
         ))}
@@ -4259,22 +4274,22 @@ function InteractiveLineChart({
             <line x1={hoverX} x2={hoverX} y1={padTop} y2={height - padBottom} stroke={T.ink} strokeOpacity="0.28" strokeDasharray="4 4" />
             <circle cx={hoverX} cy={yFor(hoverValue)} r="4" fill={color} stroke="#fff" strokeWidth="2" />
             <rect
-              x={Math.min(width - 204, Math.max(padLeft, hoverX + 10))}
-              y={Math.max(4, yFor(hoverValue) - 44)}
-              width="194"
-              height={previousHoverValue == null ? 42 : 58}
+              x={Math.min(width - 282, Math.max(padLeft, hoverX + 14))}
+              y={Math.max(6, yFor(hoverValue) - 58)}
+              width="268"
+              height={previousHoverValue == null ? 58 : 78}
               rx="12"
               fill={T.surfaceStrong}
               stroke="rgba(22, 34, 24, 0.14)"
             />
-            <text x={Math.min(width - 192, Math.max(padLeft + 12, hoverX + 22))} y={Math.max(22, yFor(hoverValue) - 24)} fontSize="10" fill={T.inkSoft}>
+            <text x={Math.min(width - 264, Math.max(padLeft + 16, hoverX + 30))} y={Math.max(28, yFor(hoverValue) - 34)} fontSize="12" fill={T.inkSoft}>
               {hoverLabel}
             </text>
-            <text x={Math.min(width - 192, Math.max(padLeft + 12, hoverX + 22))} y={Math.max(36, yFor(hoverValue) - 10)} fontSize="11" fill={color} fontWeight="800">
+            <text x={Math.min(width - 264, Math.max(padLeft + 16, hoverX + 30))} y={Math.max(46, yFor(hoverValue) - 16)} fontSize="13" fill={color} fontWeight="800">
               {currentLabel}: {formatMetric(metricKey, hoverValue)}
             </text>
             {previousHoverValue != null ? (
-              <text x={Math.min(width - 192, Math.max(padLeft + 12, hoverX + 22))} y={Math.max(50, yFor(hoverValue) + 4)} fontSize="11" fill={T.inkSoft} fontWeight="800">
+              <text x={Math.min(width - 264, Math.max(padLeft + 16, hoverX + 30))} y={Math.max(64, yFor(hoverValue) + 2)} fontSize="13" fill={T.inkSoft} fontWeight="800">
                 {previousLabel}: {formatMetric(metricKey, previousHoverValue)}
               </text>
             ) : null}
@@ -4282,7 +4297,7 @@ function InteractiveLineChart({
         ) : null}
       </svg>
       {previousValues.length ? (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", fontSize: 11, color: T.inkSoft }}>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", fontSize: 12, color: T.inkSoft, fontWeight: 700 }}>
           <span><span style={{ display: "inline-block", width: 18, height: 3, borderRadius: 999, background: color, marginRight: 6 }} />{currentLabel}</span>
           <span><span style={{ display: "inline-block", width: 18, height: 3, borderRadius: 999, background: T.inkMute, marginRight: 6, opacity: 0.7 }} />{previousLabel}</span>
         </div>
@@ -4318,12 +4333,12 @@ function AnalyticsTrendTile({ label, metricKey, comparison }) {
   const metric = KPI_LIBRARY[metricKey] || { color: T.accent };
 
   return (
-    <div style={{ padding: 14, borderRadius: 18, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 8 }}>
+    <div style={{ padding: 18, borderRadius: 22, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
         <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 900 }}>{label}</div>
         <AnalyticsDeltaBadge delta={comparison.delta} />
       </div>
-      <div style={{ fontSize: 20, color: T.ink, fontWeight: 900, fontFamily: T.heading, letterSpacing: "-0.05em" }}>
+      <div style={{ fontSize: 26, color: T.ink, fontWeight: 900, fontFamily: T.heading, letterSpacing: "-0.05em" }}>
         {formatMetric(metricKey, comparison.current)}
       </div>
       <InteractiveLineChart
@@ -4331,9 +4346,9 @@ function AnalyticsTrendTile({ label, metricKey, comparison }) {
         previousSeries={comparison.previousSeries}
         metricKey={metricKey}
         color={metric.color}
-        height={190}
+        height={320}
       />
-      <div style={{ fontSize: 11, color: T.inkSoft }}>
+      <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.45 }}>
         Selected period vs previous equivalent period. Previous total: {formatMetric(metricKey, comparison.previous)}.
       </div>
     </div>
@@ -4390,16 +4405,17 @@ function AnalyticsCommandCenter({ client, ga4, seriesMap, dateRangeLabel, liveSt
   const paidSpend = (client.accounts || []).reduce((acc, account) => acc + (Number(account.spend) || 0), 0);
   const paidClicks = (client.accounts || []).reduce((acc, account) => acc + (Number(account.clicks) || 0), 0);
   const paidImpressions = (client.accounts || []).reduce((acc, account) => acc + (Number(account.impressions) || 0), 0);
-  const analyticsRevenue = Number(ga4.revenueCurrentPeriod) || 0;
-  const adsValue = Number(client.conversionValue) || 0;
-  const valueGap = analyticsRevenue ? ((adsValue - analyticsRevenue) / analyticsRevenue) * 100 : 0;
+  const valueComparison = getAdsGa4ValueComparison(client, ga4);
+  const analyticsRevenue = valueComparison.ga4Revenue;
+  const adsConversionValue = valueComparison.adsConversionValue;
+  const valueGap = valueComparison.gapPercent;
   const sessionsPerPaidClick = paidClicks ? (Number(ga4.sessions || 0) / paidClicks) * 100 : 0;
   const topChannel = channelItems[0];
   const liveErrors = Array.isArray(liveState?.errors) ? liveState.errors.filter((item) => item?.clientId === client.id || !item?.clientId) : [];
   const insightItems = [
     sessionsTrend.delta < -10 ? `Sessions are down ${Math.abs(sessionsTrend.delta).toFixed(0)}% vs the previous equivalent period.` : "",
     conversionsTrend.delta < -10 ? `Conversions are down ${Math.abs(conversionsTrend.delta).toFixed(0)}% vs the previous equivalent period; check landing pages and offer quality.` : "",
-    Math.abs(valueGap) > 20 && analyticsRevenue > 0 ? `Ads conversion value and GA4 revenue differ by ${Math.abs(valueGap).toFixed(0)}%; check attribution and conversion mapping.` : "",
+    Math.abs(valueGap) > 20 && analyticsRevenue > 0 ? `Primary ads conversion value (${formatCurrency(adsConversionValue)}) and GA4 revenue (${formatCurrency(analyticsRevenue)}) differ by ${Math.abs(valueGap).toFixed(0)}%; all conversion value is excluded from this check.` : "",
     topChannel?.value > 55 ? `${topChannel.label} is ${Math.round(topChannel.value)}% of traffic, so channel concentration is high.` : "",
     !gaSeries.length ? "No live GA4 daily stream returned for the selected period, so no synthetic trend chart is drawn." : "",
     gaSeries.length && !previousGaSeries.length ? "Previous-period GA4 daily stream did not return, so comparison deltas may be incomplete." : "",
@@ -4459,7 +4475,7 @@ function AnalyticsCommandCenter({ client, ga4, seriesMap, dateRangeLabel, liveSt
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: fitCols(210), gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 420px), 1fr))", gap: 18 }}>
         <AnalyticsTrendTile label="Sessions" metricKey="sessions" comparison={sessionsTrend} />
         <AnalyticsTrendTile label="Users" metricKey="users" comparison={usersTrend} />
         <AnalyticsTrendTile label={client.category === "eshop" ? "Purchases" : "Leads"} metricKey="conversions" comparison={conversionsTrend} />
@@ -4486,7 +4502,7 @@ function AnalyticsCommandCenter({ client, ga4, seriesMap, dateRangeLabel, liveSt
           <AnalyticsBarList items={funnelItems} />
           <div style={{ display: "grid", gridTemplateColumns: fitCols(120), gap: 10 }}>
             <MetricTile label="Sessions / Paid Clicks" value={`${sessionsPerPaidClick.toFixed(0)}%`} subValue="Directional tracking sanity check" />
-            <MetricTile label="Ads vs GA4 Value" value={`${valueGap >= 0 ? "+" : ""}${valueGap.toFixed(0)}%`} subValue="Conversion value gap" accent={Math.abs(valueGap) > 20 ? T.coral : T.accent} />
+            <MetricTile label="Ads Conv. Value vs GA4" value={`${valueGap >= 0 ? "+" : ""}${valueGap.toFixed(0)}%`} subValue={`${formatCurrency(adsConversionValue)} ads primary value vs ${formatCurrency(analyticsRevenue)} GA4 revenue. All conv. value excluded.`} accent={Math.abs(valueGap) > 20 ? T.coral : T.accent} />
           </div>
         </div>
 
@@ -5335,19 +5351,19 @@ function ChartCard({ chart, clients, accounts, seriesMap, dateRangeLabel, onRemo
             <div
               key={metricKey}
               style={{
-                padding: 12,
-                borderRadius: 16,
+                padding: 18,
+                borderRadius: 20,
                 background: T.surfaceStrong,
                 border: `1px solid ${T.line}`,
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: metric.color }}>{metric.label}</div>
-                <div style={{ fontSize: 12, fontWeight: 800, fontFamily: T.mono, color: T.ink }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                <div style={{ fontSize: 14, fontWeight: 900, color: metric.color }}>{metric.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 900, fontFamily: T.mono, color: T.ink }}>
                   {formatMetric(metricKey, summaryValue)}
                 </div>
               </div>
-              <InteractiveLineChart series={series} previousSeries={previousSeries} metricKey={metricKey} color={metric.color} />
+              <InteractiveLineChart series={series} previousSeries={previousSeries} metricKey={metricKey} color={metric.color} height={340} />
             </div>
           );
         })}
@@ -9344,7 +9360,7 @@ export default function AdPulse() {
   const shellMaxWidth = viewportWidth >= 1880 ? 1740 : viewportWidth >= 1680 ? 1640 : viewportWidth >= 1440 ? 1540 : viewportWidth >= 1200 ? 1380 : 1120;
   const overviewColumns = viewportWidth >= 1680 ? "repeat(4, minmax(0, 1fr))" : viewportWidth >= 1220 ? "repeat(3, minmax(0, 1fr))" : viewportWidth >= 760 ? "repeat(2, minmax(0, 1fr))" : "1fr";
   const analyticsColumns = viewportWidth >= 1320 ? "minmax(0, 1.15fr) minmax(360px, 0.85fr)" : "1fr";
-  const chartColumns = viewportWidth >= 1680 ? "repeat(3, minmax(0, 1fr))" : viewportWidth >= 1040 ? "repeat(2, minmax(0, 1fr))" : "1fr";
+  const chartColumns = viewportWidth >= 1500 ? "repeat(2, minmax(0, 1fr))" : "1fr";
   const alertColumns = viewportWidth >= 1200 ? "repeat(2, minmax(0, 1fr))" : "1fr";
   const studioColumns = viewportWidth >= 1380 ? "minmax(300px, 330px) minmax(0, 1fr)" : "1fr";
   const integrationColumns = viewportWidth >= 1520 ? "repeat(3, minmax(0, 1fr))" : viewportWidth >= 1020 ? "repeat(2, minmax(0, 1fr))" : "1fr";
