@@ -5606,7 +5606,7 @@ function aggregateGoogleReportDetails(details, clientId) {
   const geographies = aggregateReportRows(
     clientDetails.flatMap((detail) => detail.geographies || []),
     "location",
-    ["clicks", "cost", "conversions", "conversionValue"],
+    ["clicks", "cost", "conversions", "conversionValue", "sessions", "users", "keyEvents", "revenue"],
     "conversions"
   );
   const keywords = aggregateReportRows(
@@ -6820,17 +6820,28 @@ function ReportGoogleGeographyPage({ details, loading }) {
   const rows = details?.geographies || [];
   const geographyError = (details?.errors || []).find((error) => /geo|location/i.test(String(error)));
   const usingLocationViewFallback = rows.some((row) => row.source === "location_view");
+  const usingGa4Fallback = rows.some((row) => row.source === "ga4");
 
   return (
     <ReportPage accent={PLATFORM_META.google_ads.color}>
       <ReportHeader title="Geographic Performance" platform="google_ads" />
-      {usingLocationViewFallback ? (
+      {usingGa4Fallback ? (
+        <div style={{ marginBottom: 14, padding: "10px 12px", borderRadius: 16, background: "rgba(66, 133, 244, 0.08)", color: T.inkSoft, fontSize: 12 }}>
+          Showing city-level data from Google Analytics 4. Google Ads geographic breakdown requires a developer token upgrade (Basic Access) — apply at ads.google.com/aw/apicenter.
+        </div>
+      ) : usingLocationViewFallback ? (
         <div style={{ marginBottom: 14, padding: "10px 12px", borderRadius: 16, background: "rgba(66, 133, 244, 0.08)", color: T.inkSoft, fontSize: 12 }}>
           Google Ads did not return visitor geography for this account, so this table is using targeted location performance from the account&apos;s location criteria.
         </div>
       ) : null}
       <ReportTable
-        columns={[
+        columns={usingGa4Fallback ? [
+          { label: "City", render: (row) => row.location },
+          { label: "Sessions", align: "right", render: (row) => formatReportNumber(row.sessions) },
+          { label: "Users", align: "right", render: (row) => formatReportNumber(row.users) },
+          { label: "Key Events", align: "right", render: (row) => formatReportNumber(row.keyEvents, 0) },
+          { label: "Revenue", align: "right", render: (row) => formatReportCurrency(row.revenue) },
+        ] : [
           { label: "Location", render: (row) => row.location },
           { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
           { label: "Conversions", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
@@ -9775,6 +9786,7 @@ export default function AdPulse() {
     fetchGoogleAdsReportDetails({
       ...accountsDateRangePayload,
       requests: googleAdsLiveRequests,
+      ga4Requests: ga4LiveRequests,
     })
       .then((data) => {
         if (cancelled) return;
@@ -11153,32 +11165,4 @@ export default function AdPulse() {
               onUpdateUser={saveDashboardUser}
               onDeleteUser={deleteDashboardUser}
             />
-          ) : null}
-
-          {view === "connections" ? (
-            <IntegrationHub
-              providerProfiles={providerProfiles}
-              clients={clients}
-              configured={integrationState.configured}
-              loading={integrationState.loading}
-              error={integrationState.error}
-              busyMap={integrationBusy}
-              onConnect={connectProviderProfile}
-              onSync={syncProviderProfile}
-              onDisconnect={disconnectProviderProfile}
-              layoutColumns={integrationColumns}
-              setupStatus={setupStatus}
-              aiForm={aiSetupForm}
-              onAiFormChange={(field, value) => {
-                setAiSetupForm((current) => ({ ...current, [field]: value }));
-                setAiSetupState((current) => ({ ...current, error: "", success: "" }));
-              }}
-              onSaveAiConfig={saveAiSetup}
-              aiSetupState={aiSetupState}
-            />
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-}
+  

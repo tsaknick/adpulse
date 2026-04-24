@@ -2141,6 +2141,11 @@ async function fetchGoogleAdsReportDetails(payload) {
     ? payload.requests.map(normalizeGoogleAdsLiveRequest).filter(Boolean)
     : [];
 
+  // Optional GA4 requests — used as geo fallback when Google Ads geo views return 403
+  const ga4Requests = Array.isArray(payload?.ga4Requests)
+    ? payload.ga4Requests.map(normalizeGa4ReportRequest).filter(Boolean)
+    : [];
+
   if (!requests.length) {
     return {
       generatedAt: new Date().toISOString(),
@@ -2152,12 +2157,25 @@ async function fetchGoogleAdsReportDetails(payload) {
     };
   }
 
+  // Build Google Ads connection context map
   const connectionIds = Array.from(new Set(requests.map((item) => item.connectionId)));
   const contextEntries = await Promise.all(connectionIds.map(async (connectionId) => ([
     connectionId,
     await getGoogleAdsConnectionContext(connectionId),
   ])));
   const contextMap = new Map(contextEntries);
+
+  // Build GA4 connection context map (for geo fallback — failures are non-fatal)
+  const ga4ConnectionIds = Array.from(new Set(ga4Requests.map((r) => r.connectionId)));
+  const ga4ContextEntries = await Promise.all(ga4ConnectionIds.map(async (connectionId) => {
+    try {
+      return [connectionId, await getGa4ConnectionContext(connectionId)];
+    } catch (_) {
+      return [connectionId, null];
+    }
+  }));
+  const ga4ContextMap = new Map(ga4ContextEntries.filter(([, ctx]) => ctx !== null));
+
   const uniqueTargets = [];
   const targetKeys = new Set();
 
@@ -2171,17 +2189,37 @@ async function fetchGoogleAdsReportDetails(payload) {
     });
   });
 
-  const settledTargets = await Promise.allSettled(uniqueTargets.map(async (target) => {
-    const context = contextMap.get(target.connectionId);
-    return {
-      targetKey: `${target.connectionId}:${target.customerId}`,
-      report: await fetchGoogleAdsReportDetailForCustomer({
-        context,
-        customerId: target.customerId,
-        dateRange,
-      }),
-    };
-  }));
+  // Fetch Google Ads reports and GA4 geo data in parallel
+  const [settledTargets, ga4GeoSettled] = await Promise.all([
+    Promise.allSettled(uniqueTargets.map(async (target) => {
+      const context = contextMap.get(target.connectionId);
+      return {
+        targetKey: `${target.connectionId}:${target.customerId}`,
+        report: await fetchGoogleAdsReportDetailForCustomer({
+          context,
+          customerId: target.customerId,
+          dateRange,
+        }),
+      };
+    })),
+    Promise.allSettled(ga4Requests.map(async (r) => {
+      const context = ga4ContextMap.get(r.connectionId);
+      if (!context) throw new Error(`No GA4 context for connection ${r.connectionId}.`);
+      return {
+        clientId: r.clientId,
+        rows: await fetchGa4GeographyReport({ context, propertyId: r.propertyId, dateRange }),
+      };
+    })),
+  ]);
+
+  // Build GA4 geo map keyed by clientId
+  const ga4GeoByClientId = new Map();
+  ga4GeoSettled.forEach((result) => {
+    if (result.status === "fulfilled" && result.value.rows?.length) {
+      ga4GeoByClientId.set(result.value.clientId, result.value.rows);
+    }
+  });
+
   const reportMap = new Map();
 
   settledTargets.forEach((result, index) => {
@@ -2214,9 +2252,27 @@ async function fetchGoogleAdsReportDetails(payload) {
     errors: [],
   };
 
+  // Track which clients have already received GA4 geo rows to prevent double-counting
+  // when a client has multiple Google Ads accounts linked.
+  const clientIdsWithGa4Geo = new Set();
+
   requests.forEach((request) => {
     const targetKey = `${request.connectionId}:${request.customerId}`;
     const report = reportMap.get(targetKey) || null;
+
+    let geographies = Array.isArray(report?.geographies) ? report.geographies : [];
+
+    // Inject GA4 city data when Google Ads geo is unavailable or country-level only
+    const geoIsUseless = !geographies.length ||
+      geographies.every((row) => row.source === "location_view");
+
+    if (geoIsUseless && request.clientId && !clientIdsWithGa4Geo.has(request.clientId)) {
+      const ga4Rows = ga4GeoByClientId.get(request.clientId);
+      if (ga4Rows?.length) {
+        geographies = ga4Rows;
+        clientIdsWithGa4Geo.add(request.clientId); // only inject once per client
+      }
+    }
 
     response.details.push({
       requestKey: request.key,
@@ -2227,7 +2283,7 @@ async function fetchGoogleAdsReportDetails(payload) {
       dataStatus: report?.dataStatus || "ready",
       dataError: report?.dataError || "",
       devices: Array.isArray(report?.devices) ? report.devices : [],
-      geographies: Array.isArray(report?.geographies) ? report.geographies : [],
+      geographies,
       keywords: Array.isArray(report?.keywords) ? report.keywords : [],
       impressionShare: Array.isArray(report?.impressionShare) ? report.impressionShare : [],
     });
@@ -2572,6 +2628,16 @@ function normalizeGoogleAdsLiveRequest(value) {
   };
 }
 
+function normalizeGa4ReportRequest(value) {
+  const connectionId = String(value?.connectionId || "").trim();
+  const propertyId = sanitizeGoogleAdsId(value?.propertyId);
+  const clientId = String(value?.clientId || "").trim();
+
+  if (!connectionId || !propertyId || !clientId) return null;
+
+  return { connectionId, propertyId, clientId };
+}
+
 function normalizeMetaAdsLiveRequest(value) {
   const connectionId = String(value?.connectionId || "").trim();
   const adAccountId = sanitizeMetaAdAccountId(value?.adAccountId || value?.accountId || value?.externalId);
@@ -2679,6 +2745,79 @@ async function fetchGa4LivePropertyReport({ context, propertyId, dateRange }) {
     previousStartDate: previousDateRange.startDate,
     previousEndDate: previousDateRange.endDate,
   };
+}
+
+async function fetchGa4GeographyReport({ context, propertyId, dateRange }) {
+  if (!context?.connection) throw new Error("GA4 connection context is missing.");
+
+  const { connection, tokenBundle } = context;
+  assertGa4PropertyAccess(connection, propertyId);
+
+  // Try richer metric sets first, fall back to basics
+  const metricAttempts = [
+    ["sessions", "totalUsers", "keyEvents", "totalRevenue"],
+    ["sessions", "totalUsers", "conversions", "totalRevenue"],
+    ["sessions", "totalUsers", "keyEvents"],
+    ["sessions", "totalUsers", "conversions"],
+    ["sessions", "totalUsers"],
+  ];
+
+  let report = null;
+  for (const metricNames of metricAttempts) {
+    try {
+      report = await fetchGa4RunReport({
+        tokenBundle,
+        propertyId,
+        dateRange,
+        dimensions: ["city", "region"],
+        metricNames,
+        orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+        limit: 50,
+        label: `GA4 geography report ${propertyId}`,
+      });
+      break;
+    } catch (_) { /* try next metric set */ }
+  }
+
+  if (!report) throw new Error(`Could not fetch GA4 geography for property ${propertyId}.`);
+
+  return (Array.isArray(report?.rows) ? report.rows : [])
+    .map((row) => {
+      const city = String(row.dimensionValues?.[0]?.value || "").trim();
+      const region = String(row.dimensionValues?.[1]?.value || "").trim();
+
+      if (!city || city === "(not set)") return null;
+
+      const location = (region && region !== "(not set)" && region !== city)
+        ? `${city}, ${region}`
+        : city;
+
+      const sessions = Math.round(getGa4MetricValue(report, row, [], "sessions"));
+      const users = Math.round(getGa4MetricValue(report, row, [], "totalUsers"));
+      const keyEvents = +(
+        getGa4MetricValue(report, row, [], "keyEvents") ||
+        getGa4MetricValue(report, row, [], "conversions")
+      ).toFixed(2);
+      const revenue = +getGa4MetricValue(report, row, [], "totalRevenue").toFixed(2);
+
+      return {
+        location,
+        sessions,
+        users,
+        keyEvents,
+        revenue,
+        // Mirror into Google Ads field names so existing aggregation logic works
+        clicks: sessions,
+        conversions: keyEvents,
+        allConversions: keyEvents,
+        cost: 0,
+        conversionValue: revenue,
+        allConversionValue: revenue,
+        costPerConversion: 0,
+        source: "ga4",
+      };
+    })
+    .filter(Boolean);
 }
 
 async function fetchGa4RunReportWithMetricFallback({ tokenBundle, propertyId, dateRange, dimensions, orderBys, limit, label }) {
@@ -5244,178 +5383,4 @@ async function generateAiStrategy(input) {
     "Keep recommendations operational and specific.",
   ].join(" ");
 
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      performanceDiagnosis: {
-        type: "string",
-        description: "In Greek, summarize only what is wrong with the current account or search-term state. Do not explain the strategy.",
-      },
-      nextBestAction: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          title: { type: "string" },
-          area: {
-            type: "string",
-            enum: ["strategy", "budget", "keyword", "negative_keywords", "creative", "bidding", "audience", "landing_page", "measurement", "structure"],
-          },
-          priority: { type: "string", enum: ["now", "next", "later"] },
-          action: { type: "string" },
-          why: { type: "string" },
-          expectedImpact: { type: "string" },
-          confidence: { type: "string", enum: ["high", "medium", "low"] },
-        },
-        required: ["title", "area", "priority", "action", "why", "expectedImpact", "confidence"],
-      },
-      recommendations: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            title: { type: "string" },
-            area: {
-              type: "string",
-              enum: ["strategy", "budget", "keyword", "negative_keywords", "creative", "bidding", "audience", "landing_page", "measurement", "structure"],
-            },
-            priority: { type: "string", enum: ["now", "next", "later"] },
-            action: { type: "string" },
-            why: { type: "string" },
-            expectedImpact: { type: "string" },
-            confidence: { type: "string", enum: ["high", "medium", "low"] },
-          },
-          required: ["title", "area", "priority", "action", "why", "expectedImpact", "confidence"],
-        },
-      },
-      keywordOpportunities: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            keyword: { type: "string" },
-            suggestedMatchType: { type: "string" },
-            why: { type: "string" },
-            priority: { type: "string", enum: ["now", "next", "later"] },
-          },
-          required: ["keyword", "suggestedMatchType", "why", "priority"],
-        },
-      },
-      negativeKeywordSuggestions: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            keyword: { type: "string" },
-            suggestedMatchType: { type: "string" },
-            why: { type: "string" },
-            priority: { type: "string", enum: ["now", "next", "later"] },
-          },
-          required: ["keyword", "suggestedMatchType", "why", "priority"],
-        },
-      },
-      budgetActions: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            channel: { type: "string" },
-            direction: { type: "string" },
-            amountText: { type: "string" },
-            why: { type: "string" },
-            priority: { type: "string", enum: ["now", "next", "later"] },
-          },
-          required: ["channel", "direction", "amountText", "why", "priority"],
-        },
-      },
-      experiments: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            title: { type: "string" },
-            hypothesis: { type: "string" },
-            successMetric: { type: "string" },
-          },
-          required: ["title", "hypothesis", "successMetric"],
-        },
-      },
-      watchouts: {
-        type: "array",
-        items: { type: "string" },
-      },
-    },
-    required: [
-      "performanceDiagnosis",
-      "nextBestAction",
-      "recommendations",
-      "keywordOpportunities",
-      "negativeKeywordSuggestions",
-      "budgetActions",
-      "experiments",
-      "watchouts",
-    ],
-  };
-
-  const response = await fetchJson("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 2200,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `Analyze this AdPulse ${scope} context. Reply in Greek. Do not explain the strategy. Identify what is wrong right now, what is limiting performance, and the highest-leverage next step plus short follow-ups. Ground every point in the supplied live data.`,
-            },
-            {
-              type: "text",
-              text: JSON.stringify(context, null, 2),
-            },
-          ],
-        },
-      ],
-      tools: [
-        {
-          name: "record_adpulse_strategy",
-          description: "Return the AdPulse strategy analysis using the exact structured schema. Every user-facing string value must be Greek.",
-          input_schema: schema,
-        },
-      ],
-      tool_choice: {
-        type: "tool",
-        name: "record_adpulse_strategy",
-      },
-    }),
-  }, "Claude AI strategist");
-
-  const parsed = extractAnthropicStrategyInput(response);
-  const strategy = normalizeAiStrategyPayload(parsed);
-  const payload = {
-    ok: true,
-    cached: false,
-    model,
-    generatedAt: new Date().toISOString(),
-    strategy,
-  };
-
-  aiStrategyCache.set(cacheKey, {
-    expiresAt: Date.now() + AI_STRATEGY_CACHE_TTL,
-    value: payload,
-  });
-
-  return payload;
-}
+  const sche
