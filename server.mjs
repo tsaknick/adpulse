@@ -3401,21 +3401,26 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
   for (const attempt of attempts) {
     try {
       const fetched = await fetchRows(attempt.viewName, attempt.labelSuffix, attempt.extraConditions);
+      console.log(`[geo] ${attempt.viewName} returned ${fetched.length} rows for customer ${customerId}`);
       if (fetched.length && !isCountryLevelOnly(fetched)) {
         // Got municipality/city/region data — use it
         rows = fetched;
         break;
       } else if (fetched.length && !countryLevelFallback.length) {
         // Only country-level data so far — save as fallback and keep trying
+        console.log(`[geo] ${attempt.viewName} is country-level only — continuing to next source`);
         countryLevelFallback = fetched;
       }
     } catch (error) {
-      messages.push(error.message || `Could not fetch ${attempt.labelSuffix} geography rows for ${customerId}.`);
+      const msg = error.message || `Could not fetch ${attempt.labelSuffix} geography rows for ${customerId}.`;
+      console.error(`[geo] ${attempt.viewName} failed for customer ${customerId}:`, msg);
+      messages.push(msg);
     }
   }
 
   // If no granular rows were found, use the best country-level result we saw
   if (!rows.length && countryLevelFallback.length) {
+    console.log(`[geo] using country-level fallback rows for customer ${customerId}`);
     rows = countryLevelFallback;
   }
 
@@ -3424,8 +3429,11 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
   if (!rows.length) {
     try {
       rows = await fetchLocationViewRows();
+      console.log(`[geo] location_view returned ${rows.length} rows for customer ${customerId}`);
     } catch (error) {
-      messages.push(error.message || `Could not fetch location-view geography rows for ${customerId}.`);
+      const msg = error.message || `Could not fetch location-view geography rows for ${customerId}.`;
+      console.error(`[geo] location_view failed for customer ${customerId}:`, msg);
+      messages.push(msg);
     }
   }
 
