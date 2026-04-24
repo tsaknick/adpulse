@@ -147,6 +147,9 @@ const STORAGE_KEYS = {
   providerProfiles: "adpulse/providerProfiles",
   aiStrategy: "adpulse/aiStrategy",
   analyticsCharts: "adpulse/analyticsCharts",
+  reportSections: "adpulse/reportSections",
+  reportPreset: "adpulse/reportPreset",
+  reportSchedulePlans: "adpulse/reportSchedulePlans",
 };
 
 const LEGACY_DEMO_CLIENT_STORAGE_KEY = "adpulse/clients";
@@ -166,6 +169,75 @@ const ACCOUNT_DATE_RANGE_OPTIONS = [
   { value: "LAST_MONTH", label: "Last month" },
   { value: "CUSTOM", label: "Custom range" },
 ];
+
+const REPORT_SECTION_OPTIONS = [
+  { id: "cover", label: "Cover", description: "Client, window, target and headline KPIs." },
+  { id: "executive_summary", label: "Executive summary", description: "Board-ready summary, concerns and focus areas." },
+  { id: "strategist", label: "Claude strategist page", description: "Greek AI diagnosis and next steps when Claude is configured." },
+  { id: "google_overview", label: "Google overview", description: "Google Ads KPIs, conversion trend and top campaign spend." },
+  { id: "google_geo", label: "Google geography", description: "Geographic table when Google Ads grants access." },
+  { id: "google_device", label: "Google devices", description: "Device chart and KPI table." },
+  { id: "google_impression_share", label: "Google impression share", description: "Search IS and budget lost impression share." },
+  { id: "google_campaigns", label: "Google campaign table", description: "Top Google campaign rows." },
+  { id: "google_keywords", label: "Google keyword table", description: "Top keyword performance rows." },
+  { id: "meta_overview", label: "Meta overview", description: "Meta KPIs, click trend and top campaign spend." },
+  { id: "meta_campaigns", label: "Meta campaign table", description: "Top Meta campaign rows." },
+  { id: "meta_ads", label: "Meta ads table", description: "Meta ad-level performance rows." },
+  { id: "analytics", label: "GA4 analytics", description: "Live GA4 sessions, engagement, revenue/leads and traffic mix." },
+  { id: "definitions", label: "Metric definitions", description: "Plain-English KPI definitions for the client." },
+];
+
+const DEFAULT_REPORT_SECTION_IDS = REPORT_SECTION_OPTIONS
+  .map((section) => section.id)
+  .filter((id) => id !== "strategist");
+
+const REPORT_PRESETS = [
+  {
+    id: "full",
+    label: "Full client report",
+    description: "Everything needed for the monthly performance PDF.",
+    sections: DEFAULT_REPORT_SECTION_IDS,
+  },
+  {
+    id: "executive",
+    label: "Executive only",
+    description: "Short leadership version with KPIs, summary and definitions.",
+    sections: ["cover", "executive_summary", "google_overview", "meta_overview", "analytics", "definitions"],
+  },
+  {
+    id: "google_deep_dive",
+    label: "Google deep dive",
+    description: "Google Ads overview, diagnostics and detailed tables.",
+    sections: ["cover", "executive_summary", "google_overview", "google_geo", "google_device", "google_impression_share", "google_campaigns", "google_keywords", "definitions"],
+  },
+  {
+    id: "meta_deep_dive",
+    label: "Meta deep dive",
+    description: "Meta Ads overview, campaigns, ads and definitions.",
+    sections: ["cover", "executive_summary", "meta_overview", "meta_campaigns", "meta_ads", "definitions"],
+  },
+  {
+    id: "analytics_pack",
+    label: "Analytics pack",
+    description: "GA4 and channel context for measurement reviews.",
+    sections: ["cover", "executive_summary", "analytics", "google_overview", "meta_overview", "definitions"],
+  },
+  {
+    id: "strategist",
+    label: "Strategist report",
+    description: "Adds Claude diagnosis and next steps to the executive report.",
+    sections: ["cover", "executive_summary", "strategist", "google_overview", "meta_overview", "analytics", "definitions"],
+  },
+];
+
+const DEFAULT_REPORT_SCHEDULE = {
+  enabled: false,
+  frequency: "monthly",
+  weekday: "monday",
+  dayOfMonth: "1",
+  recipients: "",
+  notes: "",
+};
 
 const SEARCH_TERM_TAG_META = {
   good: { label: "Good", color: T.accent, tint: T.accentSoft, border: "rgba(15, 143, 102, 0.18)" },
@@ -5581,6 +5653,153 @@ function getReportDateStamp() {
   return new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+function normalizeReportSectionIds(value, fallback = DEFAULT_REPORT_SECTION_IDS) {
+  const allowed = new Set(REPORT_SECTION_OPTIONS.map((section) => section.id));
+  const source = Array.isArray(value) && value.length ? value : fallback;
+  const normalized = source.filter((id) => allowed.has(id));
+  return normalized.length ? normalized : [...fallback];
+}
+
+function getReportPresetById(presetId) {
+  return REPORT_PRESETS.find((preset) => preset.id === presetId) || REPORT_PRESETS[0];
+}
+
+function getReportPresetLabel(presetId) {
+  if (presetId === "custom") return "Custom report";
+  return getReportPresetById(presetId).label;
+}
+
+function normalizeReportSchedule(value) {
+  const input = value && typeof value === "object" ? value : {};
+  const frequency = ["weekly", "monthly"].includes(input.frequency) ? input.frequency : DEFAULT_REPORT_SCHEDULE.frequency;
+  const weekday = ["monday", "tuesday", "wednesday", "thursday", "friday"].includes(input.weekday)
+    ? input.weekday
+    : DEFAULT_REPORT_SCHEDULE.weekday;
+  const dayOfMonth = String(input.dayOfMonth || DEFAULT_REPORT_SCHEDULE.dayOfMonth).replace(/\D/g, "");
+  const dayNumber = Math.min(28, Math.max(1, Number(dayOfMonth) || 1));
+
+  return {
+    ...DEFAULT_REPORT_SCHEDULE,
+    ...input,
+    enabled: !!input.enabled,
+    frequency,
+    weekday,
+    dayOfMonth: String(dayNumber),
+    recipients: String(input.recipients || "").trim(),
+    notes: String(input.notes || "").trim(),
+  };
+}
+
+function getReportScheduleSummary(schedule) {
+  const normalized = normalizeReportSchedule(schedule);
+  if (!normalized.enabled) return "Manual PDF export only";
+
+  const cadence = normalized.frequency === "weekly"
+    ? `Every ${normalized.weekday}`
+    : `Day ${normalized.dayOfMonth} of each month`;
+  const recipients = normalized.recipients
+    ? normalized.recipients.split(",").map((item) => item.trim()).filter(Boolean).length
+    : 0;
+
+  return `${cadence}${recipients ? ` | ${recipients} recipient${recipients === 1 ? "" : "s"}` : " | no recipients yet"}`;
+}
+
+function getReportAiStrategyKey(client, dateRangeLabel) {
+  return client?.id ? `report:${client.id}:${dateRangeLabel}` : "";
+}
+
+function getReportSectionStatus(sectionId, client, googleDetails) {
+  const googleConnected = client?.connections?.google_ads;
+  const metaConnected = client?.connections?.meta_ads;
+  const ga4Connected = client?.connections?.ga4 && client?.ga4;
+
+  if (sectionId.startsWith("google_") && !googleConnected) {
+    return { tone: "warning", label: "No Google asset" };
+  }
+
+  if (sectionId === "google_geo" && googleConnected && googleDetails?.errors?.some((error) => /geo|location|permission|403/i.test(String(error)))) {
+    return { tone: "warning", label: "Permission dependent" };
+  }
+
+  if (sectionId.startsWith("meta_") && !metaConnected) {
+    return { tone: "warning", label: "No Meta asset" };
+  }
+
+  if (sectionId === "analytics" && !ga4Connected) {
+    return { tone: "warning", label: "No live GA4" };
+  }
+
+  if (sectionId === "strategist") {
+    return { tone: "neutral", label: "Optional" };
+  }
+
+  return { tone: "positive", label: "Ready" };
+}
+
+function buildReportReadinessItems(client, googleDetails, googleReportState, schedule) {
+  if (!client) return [];
+
+  const googleRows = [
+    ...(googleDetails?.geographies || []),
+    ...(googleDetails?.devices || []),
+    ...(googleDetails?.keywords || []),
+    ...(googleDetails?.impressionShare || []),
+  ].length;
+  const googleStatus = googleReportState.loading
+    ? "Google report details are still loading."
+    : googleRows
+      ? `${googleRows} Google detail rows available for the selected range.`
+      : client.connections?.google_ads
+        ? "Google overview is live; detail breakdowns may depend on account permissions."
+        : "No Google Ads asset is linked.";
+  const metaStatus = client.accounts?.some((account) => account.platform === "meta_ads")
+    ? `${client.campaigns.filter((campaign) => campaign.platform === "meta_ads").length} Meta campaigns available.`
+    : client.connections?.meta_ads
+      ? "Meta account is linked; campaign rows are still syncing or empty for this range."
+      : "No Meta Ads asset is linked.";
+  const ga4Status = client.ga4?.isLiveGa4
+    ? `Live GA4 connected: ${formatReportNumber(client.ga4.sessions)} sessions in the selected period.`
+    : client.connections?.ga4
+      ? "GA4 is linked but no live analytics rows are available for this range."
+      : "No GA4 property is linked.";
+
+  return [
+    { label: "Google Ads", detail: googleStatus, tone: googleRows || client.accounts?.some((account) => account.platform === "google_ads") ? "positive" : "warning" },
+    { label: "Meta Ads", detail: metaStatus, tone: client.accounts?.some((account) => account.platform === "meta_ads") ? "positive" : "warning" },
+    { label: "Analytics", detail: ga4Status, tone: client.ga4?.isLiveGa4 ? "positive" : "warning" },
+    { label: "Recurring plan", detail: getReportScheduleSummary(schedule), tone: normalizeReportSchedule(schedule).enabled ? "positive" : "neutral" },
+  ];
+}
+
+function getReportCampaignScore(campaign) {
+  const spend = Number(campaign?.spend) || 0;
+  const conversions = Number(campaign?.conversions) || 0;
+  const conversionValue = getConversionValue(campaign);
+  const roas = spend ? conversionValue / spend : 0;
+  return roas * 100 + conversions * 8 + (conversionValue > 0 ? 10 : 0);
+}
+
+function getReportTopCampaigns(campaigns, limit = 4) {
+  return [...(campaigns || [])]
+    .sort((left, right) => getReportCampaignScore(right) - getReportCampaignScore(left) || (Number(right.spend) || 0) - (Number(left.spend) || 0))
+    .slice(0, limit);
+}
+
+function getReportConcernCampaigns(campaigns, limit = 4) {
+  return [...(campaigns || [])]
+    .filter((campaign) => (Number(campaign.spend) || 0) > 0)
+    .sort((left, right) => {
+      const leftConversions = Number(left.conversions) || 0;
+      const rightConversions = Number(right.conversions) || 0;
+      const leftCpa = leftConversions ? (Number(left.spend) || 0) / leftConversions : Number(left.spend) || 0;
+      const rightCpa = rightConversions ? (Number(right.spend) || 0) / rightConversions : Number(right.spend) || 0;
+      const leftRoas = Number(left.spend) ? getConversionValue(left) / Number(left.spend) : 0;
+      const rightRoas = Number(right.spend) ? getConversionValue(right) / Number(right.spend) : 0;
+      return leftRoas - rightRoas || rightCpa - leftCpa || (Number(right.spend) || 0) - (Number(left.spend) || 0);
+    })
+    .slice(0, limit);
+}
+
 function ReportPrintStyles() {
   return (
     <style>
@@ -5610,11 +5829,150 @@ function ReportPrintStyles() {
   );
 }
 
-function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, dateRangeLabel, dateRangeValue, onDateRangeChange, googleReportState }) {
+function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, dateRangeLabel, dateRangeValue, onDateRangeChange, googleReportState, aiReady }) {
   const selectedClient = clients.find((client) => client.id === selectedClientId) || clients[0] || null;
   const googleDetails = selectedClient ? aggregateGoogleReportDetails(googleReportState.details, selectedClient.id) : null;
   const reportGroups = groupClientsByReportingGroup(clients);
   const selectedGroup = reportGroups.find((group) => group.clients.some((client) => client.id === selectedClient?.id)) || null;
+  const [reportPreset, setReportPreset] = useState(() => readStoredValue(STORAGE_KEYS.reportPreset, "full"));
+  const [selectedSections, setSelectedSections] = useState(() => normalizeReportSectionIds(readStoredValue(STORAGE_KEYS.reportSections, DEFAULT_REPORT_SECTION_IDS)));
+  const [schedulePlans, setSchedulePlans] = useState(() => {
+    const stored = readStoredValue(STORAGE_KEYS.reportSchedulePlans, {});
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  });
+  const [scheduleDraft, setScheduleDraft] = useState(() => normalizeReportSchedule());
+  const [builderCue, setBuilderCue] = useState(null);
+  const [reportAiState, setReportAiState] = useState(() => createEmptyAiStrategistState());
+  const normalizedSections = useMemo(() => normalizeReportSectionIds(selectedSections), [selectedSections]);
+  const selectedSectionSet = useMemo(() => new Set(normalizedSections), [normalizedSections]);
+  const reportAiStrategyKey = useMemo(() => getReportAiStrategyKey(selectedClient, dateRangeLabel), [selectedClient, dateRangeLabel]);
+  const reportReadinessItems = useMemo(
+    () => buildReportReadinessItems(selectedClient, googleDetails, googleReportState, scheduleDraft),
+    [selectedClient, googleDetails, googleReportState, scheduleDraft]
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORAGE_KEYS.reportSections, JSON.stringify(normalizedSections));
+  }, [normalizedSections]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORAGE_KEYS.reportPreset, JSON.stringify(reportPreset));
+  }, [reportPreset]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORAGE_KEYS.reportSchedulePlans, JSON.stringify(schedulePlans));
+  }, [schedulePlans]);
+
+  useEffect(() => {
+    if (!selectedClient) return;
+    setScheduleDraft(normalizeReportSchedule(schedulePlans[selectedClient.id]));
+  }, [schedulePlans, selectedClient?.id]);
+
+  useEffect(() => {
+    const saved = readStoredAiStrategyResult(reportAiStrategyKey);
+    setReportAiState(saved ? {
+      loading: false,
+      error: "",
+      data: saved,
+      generatedAt: saved?.generatedAt || "",
+      cached: !!saved?.cached,
+    } : createEmptyAiStrategistState());
+  }, [reportAiStrategyKey]);
+
+  useEffect(() => {
+    if (!builderCue) return undefined;
+    const timer = window.setTimeout(() => setBuilderCue(null), 3200);
+    return () => window.clearTimeout(timer);
+  }, [builderCue]);
+
+  function applyReportPreset(presetId) {
+    const preset = getReportPresetById(presetId);
+    setReportPreset(preset.id);
+    setSelectedSections(normalizeReportSectionIds(preset.sections));
+    setBuilderCue({ tone: "success", message: `${preset.label} preset applied.` });
+  }
+
+  function toggleReportSection(sectionId) {
+    setReportPreset("custom");
+    setSelectedSections((current) => {
+      const currentSet = new Set(normalizeReportSectionIds(current));
+      if (currentSet.has(sectionId)) {
+        currentSet.delete(sectionId);
+      } else {
+        currentSet.add(sectionId);
+      }
+
+      return REPORT_SECTION_OPTIONS.map((section) => section.id).filter((id) => currentSet.has(id));
+    });
+  }
+
+  function selectAllReportSections() {
+    setReportPreset("custom");
+    setSelectedSections(REPORT_SECTION_OPTIONS.map((section) => section.id));
+    setBuilderCue({ tone: "success", message: "All report pages selected." });
+  }
+
+  function resetReportSections() {
+    applyReportPreset("full");
+  }
+
+  function saveReportSchedulePlan() {
+    if (!selectedClient) return;
+
+    const normalized = normalizeReportSchedule(scheduleDraft);
+    setSchedulePlans((current) => ({
+      ...current,
+      [selectedClient.id]: normalized,
+    }));
+    setBuilderCue({ tone: "success", message: `Report schedule plan saved for ${selectedClient.name}.` });
+  }
+
+  async function refreshReportStrategist() {
+    if (!selectedClient || !reportAiStrategyKey) return;
+    if (!aiReady) {
+      setReportAiState((current) => ({
+        ...current,
+        error: "Claude is not configured yet. Add the Anthropic API key in Connections.",
+      }));
+      return;
+    }
+
+    setReportAiState((current) => ({ ...current, loading: true, error: "" }));
+
+    try {
+      const payload = await fetchAiStrategy({
+        scope: "report",
+        context: {
+          ...buildAccountAiPayload(selectedClient, dateRangeLabel),
+          report: {
+            preset: getReportPresetLabel(reportPreset),
+            sections: normalizedSections,
+            readiness: reportReadinessItems,
+          },
+        },
+        forceRefresh: true,
+      });
+      writeStoredAiStrategyResult(reportAiStrategyKey, payload);
+      setReportAiState({
+        loading: false,
+        error: "",
+        data: payload,
+        generatedAt: payload?.generatedAt || "",
+        cached: !!payload?.cached,
+      });
+      setSelectedSections((current) => normalizeReportSectionIds([...new Set([...current, "strategist"])]));
+      setBuilderCue({ tone: "success", message: "Claude strategist page refreshed and added to the report." });
+    } catch (error) {
+      setReportAiState((current) => ({
+        ...current,
+        loading: false,
+        error: error.message || "Could not refresh the report strategist.",
+      }));
+    }
+  }
 
   function generatePdf() {
     if (!selectedClient || typeof window === "undefined") return;
@@ -5627,6 +5985,8 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
       window.print();
       return;
     }
+
+    setBuilderCue({ tone: "info", message: "Opening the print dialog. Choose Save as PDF." });
 
     printWindow.document.write(`
       <!doctype html>
@@ -5761,20 +6121,284 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
       </div>
 
       {selectedClient ? (
+        <ReportBuilderPanel
+          client={selectedClient}
+          googleDetails={googleDetails}
+          reportPreset={reportPreset}
+          selectedSectionSet={selectedSectionSet}
+          selectedSections={normalizedSections}
+          onPreset={applyReportPreset}
+          onToggleSection={toggleReportSection}
+          onSelectAll={selectAllReportSections}
+          onReset={resetReportSections}
+          readinessItems={reportReadinessItems}
+          scheduleDraft={scheduleDraft}
+          onScheduleDraftChange={setScheduleDraft}
+          onSaveSchedule={saveReportSchedulePlan}
+          aiReady={aiReady}
+          aiState={reportAiState}
+          onRefreshStrategist={refreshReportStrategist}
+          cue={builderCue}
+        />
+      ) : null}
+
+      {selectedClient ? (
         <div className="report-print-root" style={{ display: "grid", gap: 18, justifyItems: "center" }}>
-          <CampaignReportDocument client={selectedClient} seriesMap={seriesMap} dateRangeLabel={dateRangeLabel} googleDetails={googleDetails} googleReportState={googleReportState} />
+          <CampaignReportDocument
+            client={selectedClient}
+            seriesMap={seriesMap}
+            dateRangeLabel={dateRangeLabel}
+            googleDetails={googleDetails}
+            googleReportState={googleReportState}
+            selectedSections={normalizedSections}
+            strategistResult={reportAiState.data}
+          />
         </div>
       ) : null}
     </div>
   );
 }
 
-function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetails, googleReportState }) {
+function ReportBuilderPanel({
+  client,
+  googleDetails,
+  reportPreset,
+  selectedSectionSet,
+  selectedSections,
+  onPreset,
+  onToggleSection,
+  onSelectAll,
+  onReset,
+  readinessItems,
+  scheduleDraft,
+  onScheduleDraftChange,
+  onSaveSchedule,
+  aiReady,
+  aiState,
+  onRefreshStrategist,
+  cue,
+}) {
+  return (
+    <div
+      className="report-screen-controls"
+      style={{
+        padding: 18,
+        borderRadius: 24,
+        background: T.surface,
+        border: `1px solid ${T.line}`,
+        boxShadow: T.shadow,
+        display: "grid",
+        gap: 18,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 800, fontFamily: T.heading }}>Report builder</div>
+          <div style={{ marginTop: 5, color: T.inkSoft, fontSize: 12, lineHeight: 1.5 }}>
+            Current setup: {getReportPresetLabel(reportPreset)} | {selectedSections.length} pages selected | {getReportScheduleSummary(scheduleDraft)}
+          </div>
+        </div>
+        {cue ? <ActionCue tone={cue.tone}>{cue.message}</ActionCue> : null}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 16 }}>
+        <div style={{ padding: 16, borderRadius: 22, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 900, color: T.ink }}>Presets and PDF pages</div>
+              <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft }}>Choose a preset, then fine-tune the exact pages that print.</div>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Button onClick={onSelectAll}>Select all</Button>
+              <Button onClick={onReset}>Reset full report</Button>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 }}>
+            {REPORT_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => onPreset(preset.id)}
+                style={{
+                  textAlign: "left",
+                  padding: 13,
+                  borderRadius: 16,
+                  border: `1px solid ${reportPreset === preset.id ? "rgba(15, 143, 102, 0.34)" : T.line}`,
+                  background: reportPreset === preset.id ? T.accentSoft : T.bgSoft,
+                  cursor: "pointer",
+                  fontFamily: T.font,
+                }}
+              >
+                <div style={{ fontSize: 12, fontWeight: 900, color: reportPreset === preset.id ? T.accent : T.ink }}>{preset.label}</div>
+                <div style={{ marginTop: 5, fontSize: 11, lineHeight: 1.45, color: T.inkSoft }}>{preset.description}</div>
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10 }}>
+            {REPORT_SECTION_OPTIONS.map((section) => {
+              const checked = selectedSectionSet.has(section.id);
+              const status = getReportSectionStatus(section.id, client, googleDetails);
+
+              return (
+                <label
+                  key={section.id}
+                  style={{
+                    padding: 12,
+                    borderRadius: 16,
+                    border: `1px solid ${checked ? "rgba(15, 143, 102, 0.26)" : T.line}`,
+                    background: checked ? "rgba(223, 245, 234, 0.58)" : T.bgSoft,
+                    display: "grid",
+                    gap: 8,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => onToggleSection(section.id)}
+                        style={{ accentColor: T.accent }}
+                      />
+                      <span style={{ fontSize: 12, fontWeight: 900, color: T.ink }}>{section.label}</span>
+                    </span>
+                    <ToneBadge tone={status.tone}>{status.label}</ToneBadge>
+                  </div>
+                  <div style={{ fontSize: 11, color: T.inkSoft, lineHeight: 1.45 }}>{section.description}</div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gap: 16 }}>
+          <ReportReadinessPanel items={readinessItems} />
+          <ReportStrategistControl aiReady={aiReady} aiState={aiState} onRefresh={onRefreshStrategist} />
+          <ReportSchedulePanel scheduleDraft={scheduleDraft} onChange={onScheduleDraftChange} onSave={onSaveSchedule} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReportReadinessPanel({ items }) {
+  return (
+    <div style={{ padding: 16, borderRadius: 22, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 900, color: T.ink }}>Live data readiness</div>
+        <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft }}>This is a sanity check before printing the PDF.</div>
+      </div>
+      <div style={{ display: "grid", gap: 8 }}>
+        {(items || []).map((item) => (
+          <div key={item.label} style={{ display: "grid", gridTemplateColumns: "110px 1fr", gap: 10, alignItems: "start", fontSize: 11, lineHeight: 1.45 }}>
+            <ToneBadge tone={item.tone}>{item.label}</ToneBadge>
+            <div style={{ color: T.inkSoft }}>{item.detail}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ReportStrategistControl({ aiReady, aiState, onRefresh }) {
+  return (
+    <div style={{ padding: 16, borderRadius: 22, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: T.ink }}>Claude strategist page</div>
+          <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft, lineHeight: 1.45 }}>
+            Creates a Greek diagnosis page for the PDF and keeps it saved until refreshed.
+          </div>
+        </div>
+        <ToneBadge tone={aiReady ? "positive" : "warning"}>{aiReady ? "Configured" : "Setup needed"}</ToneBadge>
+      </div>
+      {aiState?.generatedAt ? (
+        <div style={{ fontSize: 11, color: T.inkSoft }}>Last generated {formatAiGeneratedAt(aiState.generatedAt)}</div>
+      ) : null}
+      {aiState?.error ? <ActionCue tone="danger">{aiState.error}</ActionCue> : null}
+      <Button onClick={onRefresh} tone="primary" disabled={!aiReady || aiState?.loading}>
+        {aiState?.loading ? "Refreshing strategist..." : "Refresh strategist page"}
+      </Button>
+    </div>
+  );
+}
+
+function ReportSchedulePanel({ scheduleDraft, onChange, onSave }) {
+  const schedule = normalizeReportSchedule(scheduleDraft);
+  const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: `1px solid ${T.line}`,
+    background: T.bgSoft,
+    color: T.ink,
+    fontSize: 12,
+    fontWeight: 700,
+    fontFamily: T.font,
+  };
+  const update = (patch) => onChange((current) => normalizeReportSchedule({ ...current, ...patch }));
+
+  return (
+    <div style={{ padding: 16, borderRadius: 22, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 900, color: T.ink }}>Recurring report plan</div>
+        <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft, lineHeight: 1.45 }}>
+          This saves the plan inside AdPulse. Email automation can be connected later through a mail provider.
+        </div>
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 800, color: T.ink }}>
+        <input type="checkbox" checked={schedule.enabled} onChange={(event) => update({ enabled: event.target.checked })} style={{ accentColor: T.accent }} />
+        Enable recurring report plan
+      </label>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <select value={schedule.frequency} onChange={(event) => update({ frequency: event.target.value })} style={inputStyle}>
+          <option value="monthly">Monthly</option>
+          <option value="weekly">Weekly</option>
+        </select>
+        {schedule.frequency === "weekly" ? (
+          <select value={schedule.weekday} onChange={(event) => update({ weekday: event.target.value })} style={inputStyle}>
+            <option value="monday">Monday</option>
+            <option value="tuesday">Tuesday</option>
+            <option value="wednesday">Wednesday</option>
+            <option value="thursday">Thursday</option>
+            <option value="friday">Friday</option>
+          </select>
+        ) : (
+          <select value={schedule.dayOfMonth} onChange={(event) => update({ dayOfMonth: event.target.value })} style={inputStyle}>
+            {Array.from({ length: 28 }, (_, index) => String(index + 1)).map((day) => (
+              <option key={day} value={day}>Day {day}</option>
+            ))}
+          </select>
+        )}
+      </div>
+      <input
+        value={schedule.recipients}
+        onChange={(event) => update({ recipients: event.target.value })}
+        placeholder="client@example.com, team@example.com"
+        style={inputStyle}
+      />
+      <textarea
+        value={schedule.notes}
+        onChange={(event) => update({ notes: event.target.value })}
+        placeholder="Internal notes for this reporting plan"
+        rows={3}
+        style={{ ...inputStyle, resize: "vertical", fontWeight: 600, lineHeight: 1.45 }}
+      />
+      <Button onClick={onSave} tone="success">Save schedule plan</Button>
+    </div>
+  );
+}
+
+function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetails, googleReportState, selectedSections, strategistResult }) {
   const googleAccounts = (client.accounts || []).filter((account) => account.platform === "google_ads");
   const metaAccounts = (client.accounts || []).filter((account) => account.platform === "meta_ads");
   const googleCampaigns = (client.campaigns || []).filter((campaign) => campaign.platform === "google_ads").sort((left, right) => right.spend - left.spend);
   const metaCampaigns = (client.campaigns || []).filter((campaign) => campaign.platform === "meta_ads").sort((left, right) => right.spend - left.spend);
   const metaAds = (client.ads || []).filter((ad) => ad.platform === "meta_ads").sort((left, right) => right.spend - left.spend);
+  const allCampaigns = [...googleCampaigns, ...metaCampaigns];
   const googleSummary = summarizeReportMetrics(googleAccounts);
   const metaSummary = summarizeReportMetrics(metaAccounts);
   const totalSummary = summarizeReportMetrics(client.accounts || []);
@@ -5783,9 +6407,12 @@ function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetai
   const hasGoogle = googleAccounts.length > 0;
   const hasMeta = metaAccounts.length > 0;
   const channelLabel = [hasGoogle ? "Google Ads" : "", hasMeta ? "Meta Ads" : "", client.ga4 ? "GA4" : ""].filter(Boolean).join(" + ") || "No linked channels";
+  const sectionSet = new Set(normalizeReportSectionIds(selectedSections));
+  const showSection = (sectionId) => sectionSet.has(sectionId);
 
   return (
     <>
+      {showSection("cover") ? (
       <ReportPage accent={T.ink}>
         <div style={{ display: "grid", gridTemplateRows: "1fr auto", minHeight: 690 }}>
           <div style={{ display: "grid", alignContent: "center", gap: 24 }}>
@@ -5823,7 +6450,25 @@ function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetai
           </div>
         </div>
       </ReportPage>
+      ) : null}
 
+      {showSection("executive_summary") ? (
+        <ReportExecutiveSummaryPage
+          client={client}
+          dateRangeLabel={dateRangeLabel}
+          totalSummary={totalSummary}
+          googleSummary={googleSummary}
+          metaSummary={metaSummary}
+          campaigns={allCampaigns}
+          googleDetails={googleDetails}
+        />
+      ) : null}
+
+      {showSection("strategist") ? (
+        <ReportStrategistPage client={client} dateRangeLabel={dateRangeLabel} result={strategistResult} />
+      ) : null}
+
+      {showSection("google_overview") ? (
       <ReportChannelOverview
         title="Google Ads Performance Overview"
         platform="google_ads"
@@ -5834,22 +6479,26 @@ function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetai
         detailLoading={googleReportState.loading}
         empty={!hasGoogle}
       />
+      ) : null}
 
-      <ReportGoogleGeographyPage details={googleDetails} loading={googleReportState.loading} />
+      {showSection("google_geo") ? <ReportGoogleGeographyPage details={googleDetails} loading={googleReportState.loading} /> : null}
 
-      <ReportGoogleDevicePage details={googleDetails} loading={googleReportState.loading} />
+      {showSection("google_device") ? <ReportGoogleDevicePage details={googleDetails} loading={googleReportState.loading} /> : null}
 
-      <ReportGoogleImpressionSharePage details={googleDetails} loading={googleReportState.loading} />
+      {showSection("google_impression_share") ? <ReportGoogleImpressionSharePage details={googleDetails} loading={googleReportState.loading} /> : null}
 
+      {showSection("google_campaigns") ? (
       <ReportCampaignTablePage
         title="Google Campaign Performance"
         platform="google_ads"
         campaigns={googleCampaigns}
         emptyLabel="No linked Google Ads campaigns were found for this client."
       />
+      ) : null}
 
-      <ReportGoogleKeywordPage details={googleDetails} loading={googleReportState.loading} />
+      {showSection("google_keywords") ? <ReportGoogleKeywordPage details={googleDetails} loading={googleReportState.loading} /> : null}
 
+      {showSection("meta_overview") ? (
       <ReportChannelOverview
         title="Facebook Ads Performance Overview"
         platform="meta_ads"
@@ -5858,20 +6507,199 @@ function CampaignReportDocument({ client, seriesMap, dateRangeLabel, googleDetai
         campaigns={metaCampaigns}
         empty={!hasMeta}
       />
+      ) : null}
 
+      {showSection("meta_campaigns") ? (
       <ReportCampaignTablePage
         title="Facebook Campaign Performance"
         platform="meta_ads"
         campaigns={metaCampaigns}
         emptyLabel="No linked Meta Ads campaigns were found for this client."
       />
+      ) : null}
 
-      <ReportAdsTablePage ads={metaAds} />
+      {showSection("meta_ads") ? <ReportAdsTablePage ads={metaAds} /> : null}
 
-      {client.ga4 ? <ReportAnalyticsPage client={client} ga4={client.ga4} /> : null}
+      {showSection("analytics") && client.ga4 ? <ReportAnalyticsPage client={client} ga4={client.ga4} /> : null}
 
-      <ReportDefinitionsPage />
+      {showSection("definitions") ? <ReportDefinitionsPage /> : null}
     </>
+  );
+}
+
+function ReportExecutiveSummaryPage({ client, dateRangeLabel, totalSummary, googleSummary, metaSummary, campaigns, googleDetails }) {
+  const topCampaigns = getReportTopCampaigns(campaigns);
+  const concernCampaigns = getReportConcernCampaigns(campaigns);
+  const flags = client.health?.flags || [];
+  const budgetPace = client.totalBudget ? client.spend / client.totalBudget * 100 : 0;
+  const bestChannel = googleSummary.spend || metaSummary.spend
+    ? googleSummary.roas >= metaSummary.roas
+      ? { label: "Google Ads", summary: googleSummary, color: PLATFORM_META.google_ads.color }
+      : { label: "Meta Ads", summary: metaSummary, color: PLATFORM_META.meta_ads.color }
+    : null;
+  const geoAvailable = (googleDetails?.geographies || []).length > 0;
+
+  return (
+    <ReportPage accent={T.accent}>
+      <ReportHeader title="Executive Summary" />
+      <div style={{ display: "grid", gap: 18 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 10 }}>
+          <ReportKpiTile label="Spend" value={formatReportCurrency(totalSummary.spend)} subValue={`${formatReportPercent(budgetPace)} of client budget`} />
+          <ReportKpiTile label="Conv. Value" value={formatReportCurrency(totalSummary.conversionValue)} />
+          <ReportKpiTile label="ROAS" value={formatMetric("roas", totalSummary.roas)} />
+          <ReportKpiTile label="Conversions" value={formatReportNumber(totalSummary.conversions, 2)} />
+          <ReportKpiTile label="Date Range" value={dateRangeLabel} />
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+          <div style={{ padding: 20, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+            <div style={{ fontSize: 15, fontWeight: 900, fontFamily: T.heading }}>What needs attention</div>
+            {flags.length ? (
+              flags.slice(0, 5).map((flag) => (
+                <div key={flag.id || flag.label} style={{ padding: 12, borderRadius: 16, background: flag.tone === "warning" ? T.amberSoft : T.coralSoft, display: "grid", gap: 4 }}>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: flag.tone === "warning" ? T.amber : T.coral }}>{flag.label}</div>
+                  <div style={{ fontSize: 11, color: T.inkSoft, lineHeight: 1.45 }}>{flag.detail}</div>
+                </div>
+              ))
+            ) : (
+              <div style={{ padding: 14, borderRadius: 16, background: T.accentSoft, color: T.accent, fontSize: 12, fontWeight: 800 }}>
+                No active dashboard red flags for this client in the selected period.
+              </div>
+            )}
+          </div>
+
+          <div style={{ padding: 20, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+            <div style={{ fontSize: 15, fontWeight: 900, fontFamily: T.heading }}>Focus for the next review</div>
+            <ReportSummaryBullet
+              title={bestChannel ? `Protect ${bestChannel.label} efficiency` : "Add enough live data for channel comparison"}
+              body={bestChannel ? `${bestChannel.label} currently leads by ROAS at ${formatMetric("roas", bestChannel.summary.roas)} from ${formatReportCurrency(bestChannel.summary.spend)} spend.` : "The report needs linked live channel data before it can identify a leading channel."}
+              color={bestChannel?.color || T.inkSoft}
+            />
+            <ReportSummaryBullet
+              title={geoAvailable ? "Use geographic data in the client conversation" : "Geography may need permission attention"}
+              body={geoAvailable ? `${googleDetails.geographies.length} geographic rows are available for local performance discussion.` : getGoogleGeographyEmptyLabel((googleDetails?.errors || []).find((error) => /geo|location/i.test(String(error))))}
+              color={geoAvailable ? PLATFORM_META.google_ads.color : T.amber}
+            />
+            <ReportSummaryBullet
+              title={client.ga4?.isLiveGa4 ? "Use GA4 as the measurement cross-check" : "GA4 is not live in this report"}
+              body={client.ga4?.isLiveGa4 ? `GA4 shows ${formatReportNumber(client.ga4.sessions)} sessions and ${formatReportCurrency(client.ga4.revenueCurrentPeriod)} revenue for the selected period.` : "Link a GA4 property to make the analytics page and attribution cross-checks live."}
+              color={client.ga4?.isLiveGa4 ? PLATFORM_META.ga4.color : T.amber}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+          <ReportMiniCampaignList title="Best performing campaigns" campaigns={topCampaigns} emptyLabel="No campaign rows available." />
+          <ReportMiniCampaignList title="Campaigns to inspect" campaigns={concernCampaigns} emptyLabel="No campaign concerns detected from available rows." />
+        </div>
+      </div>
+    </ReportPage>
+  );
+}
+
+function ReportSummaryBullet({ title, body, color }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "10px 1fr", gap: 10, alignItems: "start" }}>
+      <span style={{ width: 10, height: 10, borderRadius: "50%", background: color, marginTop: 4 }} />
+      <span>
+        <span style={{ display: "block", fontSize: 12, fontWeight: 900, color: T.ink }}>{title}</span>
+        <span style={{ display: "block", marginTop: 4, fontSize: 11, color: T.inkSoft, lineHeight: 1.45 }}>{body}</span>
+      </span>
+    </div>
+  );
+}
+
+function ReportMiniCampaignList({ title, campaigns, emptyLabel }) {
+  return (
+    <div style={{ padding: 18, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 10 }}>
+      <div style={{ fontSize: 15, fontWeight: 900, fontFamily: T.heading }}>{title}</div>
+      {campaigns.length ? campaigns.map((campaign) => {
+        const spend = Number(campaign.spend) || 0;
+        const conversionValue = getConversionValue(campaign);
+        const roas = spend ? conversionValue / spend : 0;
+
+        return (
+          <div key={campaign.id || campaign.name} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, padding: "9px 0", borderBottom: `1px solid ${T.line}` }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 900, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{campaign.name}</div>
+              <div style={{ marginTop: 4, fontSize: 10, color: T.inkSoft }}>{PLATFORM_META[campaign.platform]?.label || campaign.platform} | {formatReportCurrency(spend)} spend</div>
+            </div>
+            <div style={{ textAlign: "right", fontFamily: T.mono, fontSize: 11, color: T.ink }}>
+              {formatMetric("roas", roas)}
+            </div>
+          </div>
+        );
+      }) : (
+        <div style={{ padding: 14, borderRadius: 16, background: T.bgSoft, color: T.inkSoft, fontSize: 12 }}>{emptyLabel}</div>
+      )}
+    </div>
+  );
+}
+
+function ReportStrategistPage({ client, dateRangeLabel, result }) {
+  const strategy = result?.strategy;
+  const recommendations = strategy?.recommendations || [];
+  const nextBestAction = strategy?.nextBestAction;
+
+  return (
+    <ReportPage accent="#9966e8">
+      <ReportHeader title="Claude Strategist Diagnosis" />
+      {strategy ? (
+        <div style={{ display: "grid", gap: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 0.8fr", gap: 18 }}>
+            <div style={{ padding: 22, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+              <div style={{ fontSize: 12, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 900 }}>Τι δεν δουλεύει τώρα</div>
+              <div style={{ fontSize: 15, color: T.ink, lineHeight: 1.65 }}>{strategy.performanceDiagnosis}</div>
+            </div>
+            <div style={{ padding: 22, borderRadius: 24, background: "linear-gradient(135deg, #221833, #4f2c7d)", color: "#fff", display: "grid", gap: 10 }}>
+              <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.12em", opacity: 0.78, fontWeight: 900 }}>Επόμενο βήμα</div>
+              <div style={{ fontSize: 22, fontFamily: T.heading, fontWeight: 900, letterSpacing: "-0.04em" }}>{nextBestAction?.title || "Δεν υπάρχει αποθηκευμένη πρόταση"}</div>
+              <div style={{ fontSize: 12, lineHeight: 1.55, opacity: 0.84 }}>{nextBestAction?.action || "Πάτησε Refresh strategist page πριν την εξαγωγή."}</div>
+              {nextBestAction?.expectedImpact ? <div style={{ fontSize: 11, opacity: 0.74 }}>Impact: {nextBestAction.expectedImpact}</div> : null}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 18 }}>
+            <div style={{ padding: 20, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 900, fontFamily: T.heading }}>Next actions</div>
+              {[nextBestAction, ...recommendations].filter(Boolean).slice(0, 5).map((item, index) => (
+                <div key={`${item.title}-${index}`} style={{ padding: 12, borderRadius: 16, background: index === 0 ? T.accentSoft : T.bgSoft, display: "grid", gap: 5 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: T.ink }}>{item.title}</div>
+                    <ToneBadge tone={getAiPriorityTone(item.priority)}>{getAiPriorityLabel(item.priority)}</ToneBadge>
+                  </div>
+                  <div style={{ fontSize: 11, color: T.inkSoft, lineHeight: 1.45 }}>{item.action}</div>
+                  <div style={{ fontSize: 10, color: T.inkMute, lineHeight: 1.4 }}>{item.why}</div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ padding: 20, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 900, fontFamily: T.heading }}>Watchouts</div>
+              {(strategy.watchouts || []).slice(0, 6).map((item, index) => (
+                <ReportSummaryBullet key={`${item}-${index}`} title={`Watchout ${index + 1}`} body={item} color={T.coral} />
+              ))}
+              {strategy.budgetActions?.length ? (
+                <div style={{ padding: 12, borderRadius: 16, background: T.bgSoft, display: "grid", gap: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: T.ink }}>Budget actions</div>
+                  {strategy.budgetActions.slice(0, 3).map((item, index) => (
+                    <div key={`${item.channel}-${index}`} style={{ fontSize: 11, color: T.inkSoft, lineHeight: 1.45 }}>
+                      <strong style={{ color: T.ink }}>{item.channel}:</strong> {item.direction} {item.amountText} | {item.why}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div style={{ fontSize: 11, color: T.inkSoft }}>Client: {client.name} | Range: {dateRangeLabel} | Generated {formatAiGeneratedAt(result.generatedAt)}</div>
+        </div>
+      ) : (
+        <div style={{ padding: 26, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, color: T.inkSoft, lineHeight: 1.6 }}>
+          No Claude strategist result is saved for {client.name} yet. Use Refresh strategist page from the report builder before generating the PDF.
+        </div>
+      )}
+    </ReportPage>
   );
 }
 
@@ -10300,6 +11128,7 @@ export default function AdPulse() {
               dateRangeValue={accountsDateRange}
               onDateRangeChange={setAccountsDateRange}
               googleReportState={googleAdsReportState}
+              aiReady={aiConfigured}
             />
           ) : null}
 
