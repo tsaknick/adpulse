@@ -4272,24 +4272,24 @@ function InteractiveLineChart({
         {hoverX != null ? (
           <g>
             <line x1={hoverX} x2={hoverX} y1={padTop} y2={height - padBottom} stroke={T.ink} strokeOpacity="0.28" strokeDasharray="4 4" />
-            <circle cx={hoverX} cy={yFor(hoverValue)} r="4" fill={color} stroke="#fff" strokeWidth="2" />
+            <circle cx={hoverX} cy={yFor(hoverValue)} r="5.5" fill={color} stroke="#fff" strokeWidth="2.5" />
             <rect
-              x={Math.min(width - 282, Math.max(padLeft, hoverX + 14))}
-              y={Math.max(6, yFor(hoverValue) - 58)}
-              width="268"
-              height={previousHoverValue == null ? 58 : 78}
-              rx="12"
+              x={Math.min(width - 392, Math.max(padLeft, hoverX + 18))}
+              y={Math.max(8, yFor(hoverValue) - 78)}
+              width="374"
+              height={previousHoverValue == null ? 82 : 112}
+              rx="16"
               fill={T.surfaceStrong}
-              stroke="rgba(22, 34, 24, 0.14)"
+              stroke="rgba(22, 34, 24, 0.18)"
             />
-            <text x={Math.min(width - 264, Math.max(padLeft + 16, hoverX + 30))} y={Math.max(28, yFor(hoverValue) - 34)} fontSize="12" fill={T.inkSoft}>
+            <text x={Math.min(width - 366, Math.max(padLeft + 24, hoverX + 38))} y={Math.max(36, yFor(hoverValue) - 48)} fontSize="15" fill={T.inkSoft} fontWeight="800">
               {hoverLabel}
             </text>
-            <text x={Math.min(width - 264, Math.max(padLeft + 16, hoverX + 30))} y={Math.max(46, yFor(hoverValue) - 16)} fontSize="13" fill={color} fontWeight="800">
+            <text x={Math.min(width - 366, Math.max(padLeft + 24, hoverX + 38))} y={Math.max(60, yFor(hoverValue) - 24)} fontSize="17" fill={color} fontWeight="900">
               {currentLabel}: {formatMetric(metricKey, hoverValue)}
             </text>
             {previousHoverValue != null ? (
-              <text x={Math.min(width - 264, Math.max(padLeft + 16, hoverX + 30))} y={Math.max(64, yFor(hoverValue) + 2)} fontSize="13" fill={T.inkSoft} fontWeight="800">
+              <text x={Math.min(width - 366, Math.max(padLeft + 24, hoverX + 38))} y={Math.max(84, yFor(hoverValue))} fontSize="17" fill={T.inkSoft} fontWeight="900">
                 {previousLabel}: {formatMetric(metricKey, previousHoverValue)}
               </text>
             ) : null}
