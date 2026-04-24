@@ -614,6 +614,28 @@ function normalizeStoredClient(value) {
   const normalizeIdList = (items) => Array.isArray(items)
     ? Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)))
     : [];
+  const normalizeCampaignStatus = (status) => {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (["stopped", "paused", "removed", "archived"].includes(normalized)) return "stopped";
+    if (normalized === "learning") return "learning";
+    return "active";
+  };
+  const normalizeCampaignStatusMemory = (items) => {
+    if (!items || typeof items !== "object" || Array.isArray(items)) return {};
+
+    return Object.fromEntries(Object.entries(items)
+      .map(([key, item]) => {
+        if (!key || !item || typeof item !== "object" || Array.isArray(item)) return null;
+
+        return [String(key), {
+          status: normalizeCampaignStatus(item.status),
+          lastSeenAt: String(item.lastSeenAt || ""),
+          lastChangedAt: String(item.lastChangedAt || ""),
+          stoppedAt: String(item.stoppedAt || ""),
+        }];
+      })
+      .filter(Boolean));
+  };
 
   return {
     ...value,
@@ -646,6 +668,8 @@ function normalizeStoredClient(value) {
     rules: value?.rules && typeof value.rules === "object" ? value.rules : {},
     tags: Array.isArray(value.tags) ? value.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [],
     assignedUserIds: normalizeIdList(value.assignedUserIds),
+    resolvedIssueIds: normalizeIdList(value.resolvedIssueIds),
+    campaignStatusMemory: normalizeCampaignStatusMemory(value.campaignStatusMemory),
   };
 }
 

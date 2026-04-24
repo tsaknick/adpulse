@@ -1485,6 +1485,66 @@ function getDefaultRules(category) {
   return { pacingTolerance: 10, revenueDropTolerance: 5, cpcMax: 2.6, cpmMax: 19.0, stoppedCampaigns: true, searchTerms };
 }
 
+const RECENT_STOPPED_CAMPAIGN_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function normalizeIssueIdList(items) {
+  return Array.isArray(items)
+    ? Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)))
+    : [];
+}
+
+function normalizeCampaignStatusMemory(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+
+  return Object.fromEntries(Object.entries(value)
+    .map(([key, item]) => {
+      if (!key || !item || typeof item !== "object" || Array.isArray(item)) return null;
+
+      return [String(key), {
+        status: normalizeCampaignStatus(item.status),
+        lastSeenAt: String(item.lastSeenAt || ""),
+        lastChangedAt: String(item.lastChangedAt || ""),
+        stoppedAt: String(item.stoppedAt || ""),
+      }];
+    })
+    .filter(Boolean));
+}
+
+function normalizeCampaignStatus(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "stopped" || normalized === "paused" || normalized === "removed" || normalized === "archived") return "stopped";
+  if (normalized === "learning") return "learning";
+  return "active";
+}
+
+function isStoppedCampaign(campaign) {
+  return normalizeCampaignStatus(campaign?.status) === "stopped";
+}
+
+function getCampaignMemoryKey(campaign) {
+  return [
+    campaign?.platform || "campaign",
+    campaign?.accountId || campaign?.requestKey || "",
+    campaign?.externalId || campaign?.rawCampaignId || campaign?.id || campaign?.name || "",
+  ].filter(Boolean).join(":");
+}
+
+function isWithinRecentStopWindow(value, nowMs = Date.now()) {
+  const stoppedAt = Date.parse(value || "");
+  return Number.isFinite(stoppedAt) && nowMs - stoppedAt >= 0 && nowMs - stoppedAt <= RECENT_STOPPED_CAMPAIGN_WINDOW_MS;
+}
+
+function createHealthIssueId(type, ...parts) {
+  return [type, ...parts.map((part) => String(part || "").trim()).filter(Boolean)].join(":");
+}
+
+function filterResolvedHealthFlags(client, flags) {
+  const resolvedIds = new Set(normalizeIssueIdList(client?.resolvedIssueIds));
+  const activeFlags = flags.filter((flag) => !resolvedIds.has(flag.id));
+
+  return activeFlags;
+}
+
 function buildClients() {
   return CLIENT_BLUEPRINTS.map((blueprint, index) => {
     const googleBudget = seededInt(`${blueprint.id}-google-budget`, blueprint.category === "b2b" ? 7000 : 5500, blueprint.category === "brand" ? 9500 : 16500);
@@ -1511,6 +1571,8 @@ function buildClients() {
       rules: getDefaultRules(blueprint.category),
       tags: [blueprint.focus, blueprint.category === "eshop" ? "Revenue focus" : "Pipeline focus"],
       assignedUserIds: getDefaultAssignedUserIds(index),
+      resolvedIssueIds: [],
+      campaignStatusMemory: {},
     };
   });
 }
@@ -1544,6 +1606,8 @@ function createLiveClientDraft(seed = Date.now()) {
     rules: getDefaultRules("eshop"),
     tags: ["Live client"],
     assignedUserIds: [],
+    resolvedIssueIds: [],
+    campaignStatusMemory: {},
   };
 }
 
@@ -2137,6 +2201,8 @@ function hydrateClients(value) {
       assignedUserIds: Array.isArray(stored.assignedUserIds)
         ? Array.from(new Set(stored.assignedUserIds.map((userId) => String(userId)).filter(Boolean)))
         : fallback.assignedUserIds,
+      resolvedIssueIds: normalizeIssueIdList(stored.resolvedIssueIds || fallback.resolvedIssueIds),
+      campaignStatusMemory: normalizeCampaignStatusMemory(stored.campaignStatusMemory || fallback.campaignStatusMemory),
     };
   };
 
@@ -2157,10 +2223,14 @@ function evaluateHealth(client, accounts, campaigns, ga4) {
   const totalBudget = connectedPlatforms.reduce((acc, platform) => acc + (client.budgets[platform] || 0), 0);
   const totalSpend = accounts.reduce((acc, account) => acc + account.spend, 0);
   const targetSpend = totalBudget * CALENDAR.spendProgress;
+  const activeCampaigns = campaigns.filter((campaign) => !isStoppedCampaign(campaign));
+  const campaignStatusMemory = normalizeCampaignStatusMemory(client.campaignStatusMemory);
+  const shouldEvaluatePacing = !campaigns.length || activeCampaigns.length > 0;
 
-  if (targetSpend > 0) {
+  if (targetSpend > 0 && shouldEvaluatePacing) {
     const deviation = (totalSpend - targetSpend) / targetSpend;
     if (Math.abs(deviation) > client.rules.pacingTolerance / 100) {
+      const pacingDirection = deviation > 0 ? "over" : "under";
       const channelNotes = connectedPlatforms
         .map((platform) => {
           const budget = client.budgets[platform] || 0;
@@ -2175,33 +2245,51 @@ function evaluateHealth(client, accounts, campaigns, ga4) {
         .join(" | ");
 
       flags.push({
+        id: createHealthIssueId("budget-pace", CALENDAR.spendRangeLabel, pacingDirection),
+        tone: "danger",
         label: deviation > 0 ? "Overspend vs month pace" : "Underspend vs month pace",
         detail: `${deviation > 0 ? "+" : ""}${(deviation * 100).toFixed(0)}% versus ${CALENDAR.spendRangeLabel}${channelNotes ? ` | ${channelNotes}` : ""}`,
       });
     }
   }
 
-  const stoppedCampaigns = client.rules.stoppedCampaigns ? campaigns.filter((campaign) => campaign.status === "stopped") : [];
-  if (stoppedCampaigns.length) {
+  const recentlyStoppedCampaigns = client.rules.stoppedCampaigns
+    ? campaigns.filter((campaign) => {
+      if (!isStoppedCampaign(campaign)) return false;
+      const memory = campaignStatusMemory[getCampaignMemoryKey(campaign)];
+      return isWithinRecentStopWindow(memory?.stoppedAt);
+    })
+    : [];
+  recentlyStoppedCampaigns.forEach((campaign) => {
+    const memory = campaignStatusMemory[getCampaignMemoryKey(campaign)] || {};
     flags.push({
-      label: "Stopped campaign detected",
-      detail: `${stoppedCampaigns.length} campaign(s) stopped across the connected account stack`,
+      id: createHealthIssueId("campaign-stopped-24h", getCampaignMemoryKey(campaign), memory.stoppedAt),
+      tone: "danger",
+      label: "Campaign stopped in the last 24h",
+      detail: `${campaign.name || "Campaign"} stopped recently on ${PLATFORM_META[campaign.platform]?.label || "ad platform"}.`,
     });
-  }
+  });
 
-  const highCpc = accounts.filter((account) => account.cpc > client.rules.cpcMax);
+  const efficiencyRows = activeCampaigns.length ? activeCampaigns : campaigns.length ? [] : accounts;
+  const efficiencyUnit = activeCampaigns.length ? "active campaign(s)" : "account(s)";
+  const getEfficiencyKey = (item) => activeCampaigns.length ? getCampaignMemoryKey(item) : item.id || item.name || item.platform;
+  const highCpc = efficiencyRows.filter((item) => item.cpc > client.rules.cpcMax);
   if (highCpc.length) {
     flags.push({
+      id: createHealthIssueId("cpc-threshold", CALENDAR.spendRangeLabel, client.rules.cpcMax, highCpc.map(getEfficiencyKey).sort().join("|")),
+      tone: "warning",
       label: "CPC above threshold",
-      detail: `${highCpc.length} account(s) above ${formatMetric("cpc", client.rules.cpcMax)}`,
+      detail: `${highCpc.length} ${efficiencyUnit} above ${formatMetric("cpc", client.rules.cpcMax)}`,
     });
   }
 
-  const highCpm = accounts.filter((account) => account.cpm > client.rules.cpmMax);
+  const highCpm = efficiencyRows.filter((item) => item.cpm > client.rules.cpmMax);
   if (highCpm.length) {
     flags.push({
+      id: createHealthIssueId("cpm-threshold", CALENDAR.spendRangeLabel, client.rules.cpmMax, highCpm.map(getEfficiencyKey).sort().join("|")),
+      tone: "warning",
       label: "CPM above threshold",
-      detail: `${highCpm.length} account(s) above ${formatMetric("cpm", client.rules.cpmMax)}`,
+      detail: `${highCpm.length} ${efficiencyUnit} above ${formatMetric("cpm", client.rules.cpmMax)}`,
     });
   }
 
@@ -2209,16 +2297,20 @@ function evaluateHealth(client, accounts, campaigns, ga4) {
     const drop = (ga4.revenueCurrentPeriod - ga4.revenueLastYearPeriod) / ga4.revenueLastYearPeriod;
     if (drop < -(client.rules.revenueDropTolerance / 100)) {
       flags.push({
+        id: createHealthIssueId("revenue-drop-yoy", CALENDAR.revenueRangeLabel, client.rules.revenueDropTolerance),
+        tone: "danger",
         label: "Revenue drop YoY",
         detail: `${(drop * 100).toFixed(1)}% on ${CALENDAR.revenueRangeLabel}`,
       });
     }
   }
 
+  const activeFlags = filterResolvedHealthFlags(client, flags);
+
   return {
-    ok: flags.length === 0,
-    flags,
-    score: flags.length * 100 + Math.abs(totalSpend - targetSpend),
+    ok: activeFlags.length === 0,
+    flags: activeFlags,
+    score: activeFlags.length * 100 + Math.abs(totalSpend - targetSpend),
   };
 }
 
@@ -2714,7 +2806,7 @@ function ProgressRail({ current, target }) {
   );
 }
 
-function AlertList({ health }) {
+function AlertList({ health, clientId, onResolveIssue }) {
   if (health.ok) {
     return (
       <div
@@ -2736,17 +2828,41 @@ function AlertList({ health }) {
     <div style={{ display: "grid", gap: 8 }}>
       {health.flags.slice(0, 3).map((flag) => (
         <div
-          key={`${flag.label}-${flag.detail}`}
+          key={flag.id || `${flag.label}-${flag.detail}`}
           style={{
             padding: 12,
             borderRadius: 14,
-            background: T.coralSoft,
-            color: T.coral,
-            border: `1px solid rgba(215, 93, 66, 0.10)`,
+            background: flag.tone === "warning" ? T.amberSoft : T.coralSoft,
+            color: flag.tone === "warning" ? T.amber : T.coral,
+            border: `1px solid ${flag.tone === "warning" ? "rgba(199, 147, 33, 0.12)" : "rgba(215, 93, 66, 0.10)"}`,
           }}
         >
-          <div style={{ fontSize: 12, fontWeight: 800 }}>{flag.label}</div>
-          <div style={{ marginTop: 3, fontSize: 11, color: T.inkSoft }}>{flag.detail}</div>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div style={{ minWidth: 0, flex: "1 1 180px" }}>
+              <div style={{ fontSize: 12, fontWeight: 800 }}>{flag.label}</div>
+              <div style={{ marginTop: 3, fontSize: 11, color: T.inkSoft }}>{flag.detail}</div>
+            </div>
+            {clientId && flag.id && onResolveIssue ? (
+              <button
+                type="button"
+                onClick={() => onResolveIssue(clientId, flag.id)}
+                style={{
+                  border: `1px solid ${flag.tone === "warning" ? "rgba(199, 147, 33, 0.22)" : "rgba(215, 93, 66, 0.22)"}`,
+                  background: T.surfaceStrong,
+                  color: flag.tone === "warning" ? T.amber : T.coral,
+                  borderRadius: 10,
+                  padding: "6px 9px",
+                  fontSize: 11,
+                  fontWeight: 800,
+                  cursor: "pointer",
+                  fontFamily: T.font,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Mark resolved
+              </button>
+            ) : null}
+          </div>
         </div>
       ))}
     </div>
@@ -3941,7 +4057,7 @@ function KpiSelector({ selected, onChange, available }) {
   );
 }
 
-function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
+function OverviewCard({ client, users, onOpenAccounts, onEdit, onResolveIssue }) {
   const noConnections = Object.values(client.connections).every((value) => !value);
   const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
 
@@ -3999,7 +4115,7 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
             <ProgressRail current={client.spend} target={client.totalBudget * CALENDAR.spendProgress} />
           </div>
 
-          <AlertList health={client.health} />
+          <AlertList health={client.health} clientId={client.id} onResolveIssue={onResolveIssue} />
         </>
       ) : null}
 
@@ -4036,10 +4152,10 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
                 </div>
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginLeft: "auto" }}>
-                <div style={{ fontSize: 11, fontFamily: T.mono, color: account.cpc > client.rules.cpcMax ? T.coral : T.inkSoft }}>
+                <div style={{ fontSize: 11, fontFamily: T.mono, color: T.inkSoft }}>
                   CPC {formatMetric("cpc", account.cpc)}
                 </div>
-                <div style={{ fontSize: 11, fontFamily: T.mono, color: account.cpm > client.rules.cpmMax ? T.coral : T.inkSoft }}>
+                <div style={{ fontSize: 11, fontFamily: T.mono, color: T.inkSoft }}>
                   CPM {formatMetric("cpm", account.cpm)}
                 </div>
               </div>
@@ -4056,7 +4172,7 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit }) {
   );
 }
 
-function OverviewRow({ client, users, onOpenAccounts, onEdit }) {
+function OverviewRow({ client, users, onOpenAccounts, onEdit, onResolveIssue }) {
   const noConnections = Object.values(client.connections).every((value) => !value);
   const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
 
@@ -4117,9 +4233,9 @@ function OverviewRow({ client, users, onOpenAccounts, onEdit }) {
         <LiveDataCue client={client} />
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          {(client.health.ok ? [{ label: "Healthy", detail: "No red flags triggered for this client." }] : client.health.flags).slice(0, 2).map((flag) => (
+          {(client.health.ok ? [{ id: "healthy", label: "Healthy", detail: "No red flags triggered for this client." }] : client.health.flags).slice(0, 2).map((flag) => (
             <div
-              key={`${client.id}-${flag.label}`}
+              key={flag.id || `${client.id}-${flag.label}`}
               style={{
                 padding: "10px 12px",
                 borderRadius: 14,
@@ -4127,8 +4243,32 @@ function OverviewRow({ client, users, onOpenAccounts, onEdit }) {
                 color: client.health.ok ? T.accent : T.coral,
               }}
             >
-              <div style={{ fontSize: 12, fontWeight: 800 }}>{flag.label}</div>
-              <div style={{ marginTop: 3, fontSize: 11, color: T.inkSoft }}>{flag.detail}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0, flex: "1 1 180px" }}>
+                  <div style={{ fontSize: 12, fontWeight: 800 }}>{flag.label}</div>
+                  <div style={{ marginTop: 3, fontSize: 11, color: T.inkSoft }}>{flag.detail}</div>
+                </div>
+                {!client.health.ok && flag.id && onResolveIssue ? (
+                  <button
+                    type="button"
+                    onClick={() => onResolveIssue(client.id, flag.id)}
+                    style={{
+                      border: "1px solid rgba(215, 93, 66, 0.22)",
+                      background: T.surfaceStrong,
+                      color: T.coral,
+                      borderRadius: 10,
+                      padding: "6px 9px",
+                      fontSize: 11,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                      fontFamily: T.font,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Mark resolved
+                  </button>
+                ) : null}
+              </div>
             </div>
           ))}
         </div>
@@ -4149,12 +4289,12 @@ const CAMPAIGN_STATUS_FILTERS = [
 ];
 
 function campaignMatchesStatusFilter(campaign, filter) {
-  if (filter === "active") return campaign.status !== "stopped";
-  if (filter === "stopped") return campaign.status === "stopped";
+  if (filter === "active") return !isStoppedCampaign(campaign);
+  if (filter === "stopped") return isStoppedCampaign(campaign);
   return true;
 }
 
-function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeLabel, aiReady, onOpenConnections }) {
+function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeLabel, aiReady, onOpenConnections, onResolveIssue }) {
   const [campaignFilter, setCampaignFilter] = useState("all");
   const [aiState, setAiState] = useState(() => createEmptyAiStrategistState());
   const filterMeta = CAMPAIGN_STATUS_FILTERS.find((option) => option.id === campaignFilter) || CAMPAIGN_STATUS_FILTERS[2];
@@ -4323,7 +4463,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
             <LiveDataCue client={client} />
           ) : (
             <>
-              <AlertList health={client.health} />
+              <AlertList health={client.health} clientId={client.id} onResolveIssue={onResolveIssue} />
               <div style={{ padding: 16, borderRadius: 18, background: T.bgSoft, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <div>
@@ -4408,19 +4548,29 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
               const accountCampaigns = campaigns.filter((campaign) => campaign.accountId === account.id);
               const shownCampaigns = visibleCampaigns.filter((campaign) => campaign.accountId === account.id);
               const isAccountOpen = open[account.id];
-              const liveCampaigns = accountCampaigns.filter((campaign) => campaign.status !== "stopped").length;
-              const stoppedCampaigns = accountCampaigns.filter((campaign) => campaign.status === "stopped").length;
+              const liveCampaigns = accountCampaigns.filter((campaign) => !isStoppedCampaign(campaign)).length;
+              const stoppedCampaigns = accountCampaigns.filter((campaign) => isStoppedCampaign(campaign)).length;
               const shownAdsCount = shownCampaigns.reduce((acc, campaign) => acc + (groupedCampaigns[campaign.id]?.length || 0), 0);
               const accountPaceTarget = Math.max(account.monthlyBudget * CALENDAR.spendProgress, 1);
               const accountPaceRatio = account.spend / accountPaceTarget;
-              const paceTone = accountPaceRatio > 1.1 || accountPaceRatio < 0.9 ? "danger" : "positive";
+              const activeAccountCampaigns = accountCampaigns.filter((campaign) => !isStoppedCampaign(campaign));
+              const shouldEvaluateAccountPace = !accountCampaigns.length || activeAccountCampaigns.length > 0;
+              const paceTone = shouldEvaluateAccountPace && (accountPaceRatio > 1.1 || accountPaceRatio < 0.9) ? "danger" : "positive";
               const accountFlags = [];
 
-              if (accountPaceRatio > 1.1) accountFlags.push({ tone: "danger", label: `${Math.round((accountPaceRatio - 1) * 100)}% over pace` });
-              if (accountPaceRatio < 0.9) accountFlags.push({ tone: "danger", label: `${Math.round((1 - accountPaceRatio) * 100)}% under pace` });
-              if (account.cpc > client.rules.cpcMax) accountFlags.push({ tone: "warning", label: `CPC above ${formatMetric("cpc", client.rules.cpcMax)}` });
-              if (account.cpm > client.rules.cpmMax) accountFlags.push({ tone: "warning", label: `CPM above ${formatMetric("cpm", client.rules.cpmMax)}` });
-              if (stoppedCampaigns) accountFlags.push({ tone: "danger", label: `${stoppedCampaigns} stopped campaign${stoppedCampaigns === 1 ? "" : "s"}` });
+              if (shouldEvaluateAccountPace && accountPaceRatio > 1.1) accountFlags.push({ tone: "danger", label: `${Math.round((accountPaceRatio - 1) * 100)}% over pace` });
+              if (shouldEvaluateAccountPace && accountPaceRatio < 0.9) accountFlags.push({ tone: "danger", label: `${Math.round((1 - accountPaceRatio) * 100)}% under pace` });
+              const activeAccountSpend = activeAccountCampaigns.reduce((acc, campaign) => acc + (Number(campaign.spend) || 0), 0);
+              const activeAccountClicks = activeAccountCampaigns.reduce((acc, campaign) => acc + (Number(campaign.clicks) || 0), 0);
+              const activeAccountImpressions = activeAccountCampaigns.reduce((acc, campaign) => acc + (Number(campaign.impressions) || 0), 0);
+              const activeAccountCpc = activeAccountClicks ? activeAccountSpend / activeAccountClicks : 0;
+              const activeAccountCpm = activeAccountImpressions ? activeAccountSpend / activeAccountImpressions * 1000 : 0;
+              const accountEfficiencyCpc = activeAccountCampaigns.length ? activeAccountCpc : accountCampaigns.length ? 0 : account.cpc;
+              const accountEfficiencyCpm = activeAccountCampaigns.length ? activeAccountCpm : accountCampaigns.length ? 0 : account.cpm;
+              const hasEfficiencyRows = activeAccountCampaigns.length || !accountCampaigns.length;
+
+              if (hasEfficiencyRows && accountEfficiencyCpc > client.rules.cpcMax) accountFlags.push({ tone: "warning", label: `${activeAccountCampaigns.length ? "Active " : ""}CPC above ${formatMetric("cpc", client.rules.cpcMax)}` });
+              if (hasEfficiencyRows && accountEfficiencyCpm > client.rules.cpmMax) accountFlags.push({ tone: "warning", label: `${activeAccountCampaigns.length ? "Active " : ""}CPM above ${formatMetric("cpm", client.rules.cpmMax)}` });
               if (account.dataError) accountFlags.push({ tone: "warning", label: "Live data warning" });
 
               return (
@@ -4452,7 +4602,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                           <PlatformChip platform={account.platform} />
                           <div style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>{account.name}</div>
                           <ToneBadge tone="neutral">{liveCampaigns} live</ToneBadge>
-                          {stoppedCampaigns ? <ToneBadge tone="danger">{stoppedCampaigns} stopped</ToneBadge> : null}
+                          {stoppedCampaigns ? <ToneBadge tone="neutral">{stoppedCampaigns} stopped</ToneBadge> : null}
                         </div>
                         <div style={{ fontSize: 12, color: T.inkSoft }}>
                           Spend {formatCurrency(account.spend)} of {formatCurrency(account.monthlyBudget)} | {shownCampaigns.length}{campaignFilter === "all" ? "" : ` of ${accountCampaigns.length}`} campaigns{campaignFilter === "all" ? "" : " shown"} | {shownAdsCount} ads{campaignFilter === "all" ? "" : " shown"}
@@ -4464,8 +4614,8 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                         <LedgerMetric label="Value" value={formatCurrency(getConversionValue(account))} />
                         <LedgerMetric label="Pace" value={`${Math.round(accountPaceRatio * 100)}%`} tone={paceTone === "danger" ? T.coral : T.accent} />
                         <LedgerMetric label="ROAS" value={formatMetric("roas", account.roas)} tone={account.roas >= 3 ? T.accent : T.ink} />
-                        <LedgerMetric label="CPC" value={formatMetric("cpc", account.cpc)} tone={account.cpc > client.rules.cpcMax ? T.coral : T.ink} />
-                        <LedgerMetric label="CPM" value={formatMetric("cpm", account.cpm)} tone={account.cpm > client.rules.cpmMax ? T.coral : T.ink} />
+                        <LedgerMetric label="CPC" value={formatMetric("cpc", account.cpc)} tone={hasEfficiencyRows && accountEfficiencyCpc > client.rules.cpcMax ? T.coral : T.ink} />
+                        <LedgerMetric label="CPM" value={formatMetric("cpm", account.cpm)} tone={hasEfficiencyRows && accountEfficiencyCpm > client.rules.cpmMax ? T.coral : T.ink} />
                         <LedgerMetric label="Conv." value={formatNumber(account.conversions)} />
                       </div>
                       <div style={{ fontSize: 12, fontWeight: 800, color: T.inkSoft, whiteSpace: "nowrap" }}>{isAccountOpen ? "Hide" : "Show"} campaigns</div>
@@ -4486,10 +4636,12 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                         const isCampaignOpen = open[campaign.id];
                         const campaignBadges = [];
 
-                        if (campaign.status === "stopped") campaignBadges.push({ tone: "danger", label: "Stopped" });
-                        if (campaign.status === "learning") campaignBadges.push({ tone: "warning", label: "Learning" });
-                        if (campaign.cpc > client.rules.cpcMax) campaignBadges.push({ tone: "warning", label: `High CPC ${formatMetric("cpc", campaign.cpc)}` });
-                        if (campaign.cpm > client.rules.cpmMax) campaignBadges.push({ tone: "warning", label: `High CPM ${formatMetric("cpm", campaign.cpm)}` });
+                        const campaignStopped = isStoppedCampaign(campaign);
+
+                        if (campaignStopped) campaignBadges.push({ tone: "neutral", label: "Stopped" });
+                        if (!campaignStopped && campaign.status === "learning") campaignBadges.push({ tone: "warning", label: "Learning" });
+                        if (!campaignStopped && campaign.cpc > client.rules.cpcMax) campaignBadges.push({ tone: "warning", label: `High CPC ${formatMetric("cpc", campaign.cpc)}` });
+                        if (!campaignStopped && campaign.cpm > client.rules.cpmMax) campaignBadges.push({ tone: "warning", label: `High CPM ${formatMetric("cpm", campaign.cpm)}` });
 
                         return (
                           <div
@@ -4497,8 +4649,8 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                             style={{
                               padding: 12,
                               borderRadius: 16,
-                              background: campaign.status === "stopped" ? T.coralSoft : T.bgSoft,
-                              border: `1px solid ${campaign.status === "stopped" ? "rgba(215, 93, 66, 0.18)" : T.line}`,
+                              background: T.bgSoft,
+                              border: `1px solid ${T.line}`,
                               display: "grid",
                               gap: 10,
                             }}
@@ -4518,7 +4670,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                                 <div style={{ minWidth: 0, flex: "1 1 240px", display: "grid", gap: 6 }}>
                                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                                     <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{campaign.name}</div>
-                                    <ToneBadge tone={campaign.status === "stopped" ? "danger" : campaign.status === "learning" ? "warning" : "positive"}>{campaign.status}</ToneBadge>
+                                    <ToneBadge tone={campaignStopped ? "neutral" : campaign.status === "learning" ? "warning" : "positive"}>{campaign.status}</ToneBadge>
                                     <ToneBadge tone="neutral">{campaignAds.length} ads</ToneBadge>
                                   </div>
                                   <div style={{ fontSize: 11, color: T.inkSoft }}>{campaign.objective}</div>
@@ -4527,8 +4679,8 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                                   <LedgerMetric label="Spend" value={formatCurrency(campaign.spend)} compact />
                                   <LedgerMetric label="Value" value={formatCurrency(campaign.conversionValue || 0)} compact />
                                   <LedgerMetric label="Conv." value={formatNumber(campaign.conversions)} compact />
-                                  <LedgerMetric label="CPC" value={formatMetric("cpc", campaign.cpc)} tone={campaign.cpc > client.rules.cpcMax ? T.coral : T.ink} compact />
-                                  <LedgerMetric label="CPM" value={formatMetric("cpm", campaign.cpm)} tone={campaign.cpm > client.rules.cpmMax ? T.coral : T.ink} compact />
+                                  <LedgerMetric label="CPC" value={formatMetric("cpc", campaign.cpc)} tone={!campaignStopped && campaign.cpc > client.rules.cpcMax ? T.coral : T.ink} compact />
+                                  <LedgerMetric label="CPM" value={formatMetric("cpm", campaign.cpm)} tone={!campaignStopped && campaign.cpm > client.rules.cpmMax ? T.coral : T.ink} compact />
                                 </div>
                                 <div style={{ fontSize: 12, fontWeight: 800, color: T.inkSoft, whiteSpace: "nowrap" }}>{isCampaignOpen ? "Hide" : "Show"} ads</div>
                               </div>
@@ -4562,7 +4714,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                                     <div style={{ minWidth: 0, flex: "1 1 220px" }}>
                                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                                         <div style={{ fontSize: 12, fontWeight: 700, color: T.ink }}>{ad.name}</div>
-                                        <ToneBadge tone={ad.status === "paused" ? "danger" : ad.status === "learning" ? "warning" : "positive"}>{ad.status}</ToneBadge>
+                                        <ToneBadge tone={ad.status === "paused" ? "neutral" : ad.status === "learning" ? "warning" : "positive"}>{ad.status}</ToneBadge>
                                       </div>
                                       <div style={{ marginTop: 3, fontSize: 10, color: T.inkSoft }}>{ad.format}</div>
                                     </div>
@@ -5703,7 +5855,7 @@ function ReportTable({ columns, rows, emptyLabel }) {
   );
 }
 
-function AlertLane({ title, description, items, ok, onOpenAccounts, onEdit, users }) {
+function AlertLane({ title, description, items, ok, onOpenAccounts, onEdit, users, onResolveIssue }) {
   return (
     <div
       style={{
@@ -5757,9 +5909,41 @@ function AlertLane({ title, description, items, ok, onOpenAccounts, onEdit, user
             ) : (
               <div style={{ display: "grid", gap: 8 }}>
                 {client.health.flags.map((flag) => (
-                  <div key={`${client.id}-${flag.label}`} style={{ fontSize: 12 }}>
-                    <span style={{ fontWeight: 800, color: T.coral }}>{flag.label}</span>
-                    <span style={{ color: T.inkSoft }}> | {flag.detail}</span>
+                  <div
+                    key={flag.id || `${client.id}-${flag.label}`}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 10,
+                      alignItems: "flex-start",
+                      flexWrap: "wrap",
+                      fontSize: 12,
+                    }}
+                  >
+                    <div style={{ minWidth: 0, flex: "1 1 220px" }}>
+                      <span style={{ fontWeight: 800, color: flag.tone === "warning" ? T.amber : T.coral }}>{flag.label}</span>
+                      <span style={{ color: T.inkSoft }}> | {flag.detail}</span>
+                    </div>
+                    {flag.id && onResolveIssue ? (
+                      <button
+                        type="button"
+                        onClick={() => onResolveIssue(client.id, flag.id)}
+                        style={{
+                          border: `1px solid ${flag.tone === "warning" ? "rgba(199, 147, 33, 0.22)" : "rgba(215, 93, 66, 0.22)"}`,
+                          background: T.surfaceStrong,
+                          color: flag.tone === "warning" ? T.amber : T.coral,
+                          borderRadius: 10,
+                          padding: "6px 9px",
+                          fontSize: 11,
+                          fontWeight: 800,
+                          cursor: "pointer",
+                          fontFamily: T.font,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        Mark resolved
+                      </button>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -6445,7 +6629,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: T.inkSoft }}>
             <input type="checkbox" checked={draft.rules.stoppedCampaigns} onChange={() => setDraft((current) => ({ ...current, rules: { ...current.rules, stoppedCampaigns: !current.rules.stoppedCampaigns } }))} />
-            Trigger red flag when a campaign is stopped
+            Notify only when a campaign stops in the last 24 hours
           </label>
         </div>
 
@@ -8498,8 +8682,8 @@ export default function AdPulse() {
       const metaBudget = effectiveConnections.meta_ads ? client.budgets.meta_ads : 0;
       const totalBudget = googleBudget + metaBudget;
       const roas = spend ? conversionValue / spend : 0;
-      const activeCampaigns = visibleCampaigns.filter((campaign) => campaign.status !== "stopped").length;
-      const stoppedCampaigns = visibleCampaigns.filter((campaign) => campaign.status === "stopped").length;
+      const activeCampaigns = visibleCampaigns.filter((campaign) => !isStoppedCampaign(campaign)).length;
+      const stoppedCampaigns = visibleCampaigns.filter((campaign) => isStoppedCampaign(campaign)).length;
       const liveAds = visibleAds.filter((ad) => ad.status === "live" || ad.status === "learning").length;
       const shouldPauseHealthChecks = (effectiveConnections.google_ads || effectiveConnections.meta_ads) && visibleAccounts.length === 0;
       const health = shouldPauseHealthChecks
@@ -8539,6 +8723,85 @@ export default function AdPulse() {
       };
     });
   }, [accessibleClients, ga4LiveState, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.loading, metaAdsLiveState.accounts, metaAdsLiveState.ads, metaAdsLiveState.campaigns, metaAdsLiveState.loading, providerProfiles]);
+
+  useEffect(() => {
+    if (googleAdsLiveState.loading || metaAdsLiveState.loading) return;
+    if (!enriched.length) return;
+
+    const now = new Date().toISOString();
+    const updates = [];
+
+    enriched.forEach((client) => {
+      if (!Array.isArray(client.campaigns) || !client.campaigns.length) return;
+
+      const storedClient = clients.find((item) => item.id === client.id);
+      if (!storedClient) return;
+
+      const currentMemory = normalizeCampaignStatusMemory(storedClient.campaignStatusMemory);
+      const nextMemory = {};
+      let changed = false;
+
+      client.campaigns.forEach((campaign) => {
+        const key = getCampaignMemoryKey(campaign);
+        if (!key) return;
+
+        const nextStatus = normalizeCampaignStatus(campaign.status);
+        const previous = currentMemory[key] || null;
+        const statusChanged = previous && previous.status !== nextStatus;
+        const nextRecord = {
+          status: nextStatus,
+          lastSeenAt: previous?.lastSeenAt || now,
+          lastChangedAt: previous?.lastChangedAt || "",
+          stoppedAt: previous?.stoppedAt || "",
+        };
+
+        if (statusChanged) {
+          nextRecord.lastSeenAt = now;
+          nextRecord.lastChangedAt = now;
+          nextRecord.stoppedAt = nextStatus === "stopped" ? now : "";
+        } else if (!previous) {
+          nextRecord.lastSeenAt = now;
+          nextRecord.stoppedAt = "";
+          nextRecord.lastChangedAt = "";
+        }
+
+        if (JSON.stringify(previous || null) !== JSON.stringify(nextRecord)) {
+          changed = true;
+        }
+
+        nextMemory[key] = nextRecord;
+      });
+
+      if (!changed) {
+        const currentKeys = Object.keys(currentMemory);
+        const nextKeys = Object.keys(nextMemory);
+        changed = currentKeys.length !== nextKeys.length || currentKeys.some((key) => !(key in nextMemory));
+      }
+
+      if (changed) {
+        updates.push({
+          id: storedClient.id,
+          nextClient: {
+            ...storedClient,
+            campaignStatusMemory: nextMemory,
+          },
+        });
+      }
+    });
+
+    if (!updates.length) return;
+
+    setClients((current) => hydrateClients(current.map((client) => {
+      const update = updates.find((item) => item.id === client.id);
+      return update ? update.nextClient : client;
+    })));
+
+    updates.forEach(({ nextClient }) => {
+      saveClientRecord(nextClient.id, nextClient).catch(() => {
+        // Status memory is a convenience layer; do not interrupt the dashboard if it cannot sync.
+      });
+    });
+  }, [clients, enriched, googleAdsLiveState.loading, metaAdsLiveState.loading]);
 
   const filteredClients = useMemo(() => {
     let list = enriched;
@@ -8772,6 +9035,37 @@ export default function AdPulse() {
     setClientDirectoryState((current) => ({ ...current, error: "", notice: "New client draft created. Save it to persist the record." }));
     pushToast("New client draft created. Save it to persist the record.", "info", "Clients");
     setView("studio");
+  }
+
+  async function resolveClientIssue(clientId, issueId) {
+    const client = clients.find((item) => item.id === clientId);
+    if (!client || !issueId) return;
+
+    const nextClient = hydrateClients([{
+      ...client,
+      resolvedIssueIds: normalizeIssueIdList([...(client.resolvedIssueIds || []), issueId]),
+    }])[0] || client;
+
+    mergeClientRecord(nextClient);
+    if (studioDraft?.id === clientId) {
+      setStudioDraft(nextClient);
+    }
+
+    try {
+      const payload = await saveClientRecord(nextClient.id, nextClient);
+      const savedClient = payload?.client ? hydrateClients([payload.client])[0] : nextClient;
+      mergeClientRecord(savedClient);
+      if (studioDraft?.id === clientId) {
+        setStudioDraft(savedClient);
+      }
+      pushToast("Issue marked as resolved for everyone viewing this client.", "success", "Alerts");
+    } catch (error) {
+      mergeClientRecord(client);
+      if (studioDraft?.id === clientId) {
+        setStudioDraft(client);
+      }
+      pushToast(error.message || "Could not mark the issue as resolved.", "danger", "Alerts");
+    }
   }
 
   async function saveStudioDraft() {
@@ -9171,7 +9465,7 @@ export default function AdPulse() {
                     <ReportingGroupSection key={group.id} group={group}>
                       <div style={{ display: "grid", gridTemplateColumns: overviewColumns, gap: 18 }}>
                         {group.clients.map((client) => (
-                          <OverviewCard key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} />
+                          <OverviewCard key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} onResolveIssue={resolveClientIssue} />
                         ))}
                       </div>
                     </ReportingGroupSection>
@@ -9183,7 +9477,7 @@ export default function AdPulse() {
                     <ReportingGroupSection key={group.id} group={group}>
                       <div style={{ display: "grid", gap: 16 }}>
                         {group.clients.map((client) => (
-                          <OverviewRow key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} />
+                          <OverviewRow key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} onResolveIssue={resolveClientIssue} />
                         ))}
                       </div>
                     </ReportingGroupSection>
@@ -9226,6 +9520,7 @@ export default function AdPulse() {
                           dateRangeLabel={reportDateRangeLabel}
                           aiReady={aiConfigured}
                           onOpenConnections={isDirector ? () => setView("connections") : null}
+                          onResolveIssue={resolveClientIssue}
                         />
                       ))}
                     </div>
@@ -9420,8 +9715,8 @@ export default function AdPulse() {
 
           {view === "alerts" ? (
             <div style={{ display: "grid", gridTemplateColumns: alertColumns, gap: 18 }}>
-              <AlertLane title="Red lane / needs focus" description={`Clients listed here failed at least one rule. Revenue comparison uses ${CALENDAR.revenueRangeLabel}.`} items={redClients} ok={false} onOpenAccounts={jumpToAccounts} onEdit={jumpToStudio} users={accountUsers} />
-              <AlertLane title="Green lane / all clear" description="Clients listed here passed all active alert rules, so you can safely focus elsewhere." items={greenClients} ok onOpenAccounts={jumpToAccounts} onEdit={jumpToStudio} users={accountUsers} />
+              <AlertLane title="Red lane / needs focus" description={`Clients listed here failed at least one rule. Revenue comparison uses ${CALENDAR.revenueRangeLabel}.`} items={redClients} ok={false} onOpenAccounts={jumpToAccounts} onEdit={jumpToStudio} users={accountUsers} onResolveIssue={resolveClientIssue} />
+              <AlertLane title="Green lane / all clear" description="Clients listed here passed all active alert rules, so you can safely focus elsewhere." items={greenClients} ok onOpenAccounts={jumpToAccounts} onEdit={jumpToStudio} users={accountUsers} onResolveIssue={resolveClientIssue} />
             </div>
           ) : null}
 
