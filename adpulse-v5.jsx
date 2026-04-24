@@ -146,6 +146,7 @@ const STORAGE_KEYS = {
   clients: "adpulse/liveClients",
   providerProfiles: "adpulse/providerProfiles",
   aiStrategy: "adpulse/aiStrategy",
+  analyticsCharts: "adpulse/analyticsCharts",
 };
 
 const LEGACY_DEMO_CLIENT_STORAGE_KEY = "adpulse/clients";
@@ -227,6 +228,13 @@ const CONNECTION_GUIDE = {
 };
 
 const ADDITIVE_METRICS = new Set(["spend", "clicks", "conversions", "conversionValue", "revenue", "sessions", "users"]);
+
+const ANALYTICS_CHART_PRESETS = [
+  { id: "ga4-growth", label: "GA4 growth", scope: "ga4", metrics: ["sessions", "users"] },
+  { id: "conversion-pulse", label: "Conversion pulse", scope: "ga4", metrics: ["conversions", "revenue"] },
+  { id: "paid-efficiency", label: "Paid efficiency", scope: "client", metrics: ["spend", "conversionValue", "roas"] },
+  { id: "traffic-to-sales", label: "Traffic to sales", scope: "client", metrics: ["clicks", "conversions", "revenue"] },
+];
 
 const CLIENT_BLUEPRINTS = [];
 
@@ -4026,6 +4034,224 @@ function Sparkline({ values, color }) {
   );
 }
 
+function compareRecentSeries(series, metricKey) {
+  const values = (Array.isArray(series) ? series : []).map((point) => Number(point?.[metricKey]) || 0);
+  if (!values.length) return { recent: 0, previous: 0, delta: 0, values: [] };
+
+  const windowSize = Math.min(7, Math.max(1, Math.floor(values.length / 2)));
+  const recentValues = values.slice(-windowSize);
+  const previousValues = values.slice(-(windowSize * 2), -windowSize);
+  const recent = recentValues.reduce((acc, value) => acc + value, 0);
+  const previous = previousValues.reduce((acc, value) => acc + value, 0);
+  const delta = previous ? ((recent - previous) / previous) * 100 : recent ? 100 : 0;
+
+  return { recent, previous, delta, values };
+}
+
+function AnalyticsDeltaBadge({ delta }) {
+  const positive = delta >= 0;
+  const tone = positive ? T.accent : T.coral;
+
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "5px 8px",
+        borderRadius: 999,
+        background: positive ? T.accentSoft : T.coralSoft,
+        color: tone,
+        fontSize: 11,
+        fontWeight: 900,
+        fontFamily: T.mono,
+      }}
+    >
+      {positive ? "+" : ""}{delta.toFixed(Math.abs(delta) >= 10 ? 0 : 1)}%
+    </span>
+  );
+}
+
+function AnalyticsTrendTile({ label, metricKey, comparison }) {
+  const metric = KPI_LIBRARY[metricKey] || { color: T.accent };
+
+  return (
+    <div style={{ padding: 14, borderRadius: 18, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+        <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 900 }}>{label}</div>
+        <AnalyticsDeltaBadge delta={comparison.delta} />
+      </div>
+      <div style={{ fontSize: 20, color: T.ink, fontWeight: 900, fontFamily: T.heading, letterSpacing: "-0.05em" }}>
+        {formatMetric(metricKey, comparison.recent)}
+      </div>
+      <Sparkline values={comparison.values} color={metric.color} />
+      <div style={{ fontSize: 11, color: T.inkSoft }}>Last 7 days vs previous 7 days</div>
+    </div>
+  );
+}
+
+function AnalyticsBarList({ items, fixedMax = null }) {
+  const max = fixedMax || Math.max(...items.map((item) => Number(item.value) || 0), 1);
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {items.map((item) => (
+        <div key={item.label}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 5, fontSize: 11 }}>
+            <span style={{ color: T.ink, fontWeight: 800 }}>{item.label}</span>
+            <span style={{ color: T.inkSoft, fontFamily: T.mono }}>{item.displayValue || `${Math.round(item.value)}%`}</span>
+          </div>
+          <div style={{ height: 9, borderRadius: 999, background: "rgba(22, 34, 24, 0.08)", overflow: "hidden" }}>
+            <div
+              style={{
+                width: `${Math.max(2, Math.min(100, (Number(item.value) || 0) / max * 100))}%`,
+                height: "100%",
+                borderRadius: 999,
+                background: item.color || T.accent,
+              }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AnalyticsCommandCenter({ client, ga4, seriesMap, dateRangeLabel, liveState }) {
+  if (!client || !ga4) {
+    return <EmptyState title="GA4 not connected" body="Enable the GA4 connection in Client Studio to bring analytics into the dashboard." />;
+  }
+
+  const gaSeries = seriesMap[`ga4:${client.id}`] || [];
+  const sessionsTrend = compareRecentSeries(gaSeries, "sessions");
+  const usersTrend = compareRecentSeries(gaSeries, "users");
+  const conversionsTrend = compareRecentSeries(gaSeries, "conversions");
+  const revenueTrend = compareRecentSeries(gaSeries, "revenue");
+  const channelItems = Object.entries(ga4.channels || {})
+    .map(([label, value]) => ({
+      label,
+      value: Number(value) || 0,
+      color: label === "Organic" ? T.accent : label === "Paid" ? T.sky : label === "Direct" ? T.amber : label === "Social" ? "#7b5cff" : T.coral,
+    }))
+    .sort((left, right) => right.value - left.value)
+    .slice(0, 6);
+  const paidSpend = (client.accounts || []).reduce((acc, account) => acc + (Number(account.spend) || 0), 0);
+  const paidClicks = (client.accounts || []).reduce((acc, account) => acc + (Number(account.clicks) || 0), 0);
+  const paidImpressions = (client.accounts || []).reduce((acc, account) => acc + (Number(account.impressions) || 0), 0);
+  const analyticsRevenue = Number(ga4.revenueCurrentPeriod) || 0;
+  const adsValue = Number(client.conversionValue) || 0;
+  const valueGap = analyticsRevenue ? ((adsValue - analyticsRevenue) / analyticsRevenue) * 100 : 0;
+  const sessionsPerPaidClick = paidClicks ? (Number(ga4.sessions || 0) / paidClicks) * 100 : 0;
+  const topChannel = channelItems[0];
+  const liveErrors = Array.isArray(liveState?.errors) ? liveState.errors.filter((item) => item?.clientId === client.id || !item?.clientId) : [];
+  const insightItems = [
+    sessionsTrend.delta < -10 ? `Sessions are down ${Math.abs(sessionsTrend.delta).toFixed(0)}% vs the previous 7 days.` : "",
+    conversionsTrend.delta < -10 ? `Conversions are down ${Math.abs(conversionsTrend.delta).toFixed(0)}%; check landing pages and offer quality.` : "",
+    Math.abs(valueGap) > 20 && analyticsRevenue > 0 ? `Ads conversion value and GA4 revenue differ by ${Math.abs(valueGap).toFixed(0)}%; check attribution and conversion mapping.` : "",
+    topChannel?.value > 55 ? `${topChannel.label} is ${Math.round(topChannel.value)}% of traffic, so channel concentration is high.` : "",
+    !gaSeries.length ? "No GA4 daily series returned yet; KPIs are still shown from the latest property summary." : "",
+  ].filter(Boolean);
+  const funnelItems = [
+    { label: "Ad impressions", value: paidImpressions, displayValue: formatNumber(paidImpressions), color: T.inkSoft },
+    { label: "Ad clicks", value: paidClicks, displayValue: formatNumber(paidClicks), color: T.sky },
+    { label: "GA4 sessions", value: Number(ga4.sessions) || 0, displayValue: formatNumber(ga4.sessions || 0), color: T.accent },
+    { label: client.category === "eshop" ? "Purchases" : "Leads", value: Number(ga4.purchasesOrLeads) || 0, displayValue: formatNumber(ga4.purchasesOrLeads || 0), color: T.coral },
+    { label: "Revenue", value: analyticsRevenue, displayValue: formatCurrency(analyticsRevenue), color: T.amber },
+  ];
+
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <div
+        style={{
+          padding: 22,
+          borderRadius: 28,
+          background: `linear-gradient(135deg, ${T.surfaceStrong} 0%, rgba(245, 124, 0, 0.12) 48%, rgba(15, 143, 102, 0.12) 100%)`,
+          border: `1px solid ${T.line}`,
+          boxShadow: T.shadow,
+          display: "grid",
+          gap: 16,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <PlatformChip platform="ga4" />
+              <div style={{ fontSize: "clamp(1.35rem, 2.2vw, 2rem)", fontWeight: 900, fontFamily: T.heading, color: T.ink, letterSpacing: "-0.06em" }}>{client.name} analytics</div>
+            </div>
+            <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft }}>{ga4.propertyName} | {dateRangeLabel}</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <ActionCue tone={liveState?.loading ? "info" : liveErrors.length ? "warning" : "success"}>
+              {liveState?.loading ? "Refreshing GA4" : liveErrors.length ? "Partial GA4 sync" : "Live analytics"}
+            </ActionCue>
+            <ActionCue tone={gaSeries.length ? "success" : "warning"}>
+              {gaSeries.length ? `${gaSeries.length} daily points` : "No daily series"}
+            </ActionCue>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: fitCols(132), gap: 10 }}>
+          <MetricTile label="Sessions" value={formatNumber(ga4.sessions)} />
+          <MetricTile label="Users" value={formatNumber(ga4.users)} />
+          <MetricTile label="Engaged Rate" value={`${Number(ga4.engagedRate || 0).toFixed(1)}%`} />
+          <MetricTile label="Conv. Rate" value={`${Number(ga4.conversionRate || 0).toFixed(1)}%`} />
+          <MetricTile label={client.category === "eshop" ? "Revenue" : "Leads"} value={client.category === "eshop" ? formatCurrency(analyticsRevenue) : formatNumber(ga4.purchasesOrLeads)} />
+          {client.category === "eshop" ? <MetricTile label="AOV" value={formatCurrency(ga4.aov)} /> : null}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: fitCols(210), gap: 12 }}>
+        <AnalyticsTrendTile label="Sessions" metricKey="sessions" comparison={sessionsTrend} />
+        <AnalyticsTrendTile label="Users" metricKey="users" comparison={usersTrend} />
+        <AnalyticsTrendTile label={client.category === "eshop" ? "Purchases" : "Leads"} metricKey="conversions" comparison={conversionsTrend} />
+        <AnalyticsTrendTile label="Revenue" metricKey="revenue" comparison={revenueTrend} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 18 }}>
+        <div style={{ padding: 18, borderRadius: 24, background: T.surface, border: `1px solid ${T.line}`, boxShadow: T.shadow, display: "grid", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 900, fontFamily: T.heading }}>Traffic mix</div>
+            <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>Where sessions are coming from.</div>
+          </div>
+          <AnalyticsBarList items={channelItems.length ? channelItems : [{ label: "Unassigned", value: 100, color: T.inkMute }]} fixedMax={100} />
+        </div>
+
+        <div style={{ padding: 18, borderRadius: 24, background: T.surface, border: `1px solid ${T.line}`, boxShadow: T.shadow, display: "grid", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 900, fontFamily: T.heading }}>Journey bridge</div>
+            <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>Paid media into site activity and outcomes.</div>
+          </div>
+          <AnalyticsBarList items={funnelItems} />
+          <div style={{ display: "grid", gridTemplateColumns: fitCols(120), gap: 10 }}>
+            <MetricTile label="Sessions / Paid Clicks" value={`${sessionsPerPaidClick.toFixed(0)}%`} subValue="Directional tracking sanity check" />
+            <MetricTile label="Ads vs GA4 Value" value={`${valueGap >= 0 ? "+" : ""}${valueGap.toFixed(0)}%`} subValue="Conversion value gap" accent={Math.abs(valueGap) > 20 ? T.coral : T.accent} />
+          </div>
+        </div>
+
+        <div style={{ padding: 18, borderRadius: 24, background: T.surface, border: `1px solid ${T.line}`, boxShadow: T.shadow, display: "grid", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 900, fontFamily: T.heading }}>Diagnostics</div>
+            <div style={{ marginTop: 5, fontSize: 12, color: T.inkSoft }}>What needs attention in the current range.</div>
+          </div>
+          {insightItems.length ? (
+            <div style={{ display: "grid", gap: 8 }}>
+              {insightItems.map((item) => (
+                <div key={item} style={{ padding: 11, borderRadius: 14, background: T.amberSoft, border: `1px solid ${T.amber}22`, color: T.ink, fontSize: 12, lineHeight: 1.45, fontWeight: 700 }}>
+                  {item}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ padding: 12, borderRadius: 16, background: T.accentSoft, border: `1px solid rgba(15, 143, 102, 0.16)`, color: T.accent, fontSize: 12, fontWeight: 800 }}>
+              No analytics red flags detected for this range.
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{ga4.insight}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function KpiSelector({ selected, onChange, available }) {
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -6066,7 +6292,7 @@ function FiltersBar({
   );
 }
 
-function AccountDateRangeControl({ value, onChange }) {
+function AccountDateRangeControl({ value, onChange, label = "Account data range" }) {
   const isCustom = value.preset === "CUSTOM";
   const customValid = isValidAccountDateRange(value);
   const inputStyle = {
@@ -6096,7 +6322,7 @@ function AccountDateRangeControl({ value, onChange }) {
       }}
     >
       <div>
-        <div style={{ fontSize: 12, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Account data range</div>
+        <div style={{ fontSize: 12, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>{label}</div>
         <div style={{ marginTop: 4, fontSize: 12, color: customValid ? T.inkSoft : T.coral }}>
           {isCustom
             ? customValid ? `${value.startDate} to ${value.endDate}` : "Choose a valid start and end date."
@@ -8099,7 +8325,10 @@ export default function AdPulse() {
     accountId: CLIENTS_BASE[0] ? ACCOUNTS_BASE.find((account) => account.clientId === CLIENTS_BASE[0].id)?.id || "" : "",
     metrics: ["spend", "revenue"],
   });
-  const [charts, setCharts] = useState([]);
+  const [charts, setCharts] = useState(() => {
+    const storedCharts = readStoredValue(STORAGE_KEYS.analyticsCharts, []);
+    return Array.isArray(storedCharts) ? storedCharts : [];
+  });
   const [gaClientId, setGaClientId] = useState(CLIENTS_BASE.find((client) => client.connections.ga4)?.id || CLIENTS_BASE[0]?.id || "");
   const [reportClientId, setReportClientId] = useState(CLIENTS_BASE[0]?.id || "");
   const [studioDraft, setStudioDraft] = useState(CLIENTS_BASE[0] || null);
@@ -8313,6 +8542,11 @@ export default function AdPulse() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(STORAGE_KEYS.clients, JSON.stringify(clients));
   }, [clients]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORAGE_KEYS.analyticsCharts, JSON.stringify(charts));
+  }, [charts]);
 
   useEffect(() => {
     fetchSetupStatus()
@@ -9212,6 +9446,38 @@ export default function AdPulse() {
     setCharts((current) => [...current, { ...chartForm, id: `chart-${Date.now()}` }]);
   }
 
+  function addChartPreset(preset) {
+    const targetClientId = preset.scope === "ga4"
+      ? gaClient?.id || chartForm.clientId || enriched[0]?.id || ""
+      : chartForm.clientId || gaClient?.id || enriched[0]?.id || "";
+    const targetClient = enriched.find((client) => client.id === targetClientId) || enriched[0] || null;
+
+    if (!targetClient) {
+      pushToast("Create or assign a client before adding analytics charts.", "warning", "Analytics");
+      return;
+    }
+
+    if (preset.scope === "ga4" && !targetClient.connections?.ga4) {
+      pushToast("This preset needs a GA4-linked client.", "warning", "Analytics");
+      return;
+    }
+
+    const accountId = preset.scope === "account" ? targetClient.accounts?.[0]?.id || "" : "";
+    if (preset.scope === "account" && !accountId) {
+      pushToast("This client has no ad account for that chart preset.", "warning", "Analytics");
+      return;
+    }
+
+    setCharts((current) => [...current, {
+      id: `chart-${preset.id}-${Date.now()}`,
+      clientId: targetClient.id,
+      accountId,
+      scope: preset.scope,
+      metrics: preset.metrics,
+    }]);
+    pushToast(`${preset.label} added to Analytics.`, "success", "Analytics");
+  }
+
   async function refreshIntegrations({ silent = false } = {}) {
     if (!silent) {
       setIntegrationState((current) => ({
@@ -9545,6 +9811,36 @@ export default function AdPulse() {
 
           {view === "analytics" ? (
             <div style={{ display: "grid", gap: 18 }}>
+              <div
+                style={{
+                  padding: 20,
+                  borderRadius: 26,
+                  background: T.surface,
+                  border: `1px solid ${T.line}`,
+                  boxShadow: T.shadow,
+                  display: "grid",
+                  gap: 16,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontSize: 22, fontWeight: 900, fontFamily: T.heading, color: T.ink, letterSpacing: "-0.06em" }}>Analytics workspace</div>
+                    <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft, maxWidth: 680, lineHeight: 1.55 }}>
+                      Live GA4, traffic mix, journey diagnostics and custom KPI boards in one place. The same date range feeds GA4, account series and report charts.
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <ActionCue tone={ga4LiveState.loading ? "info" : ga4LiveState.error ? "danger" : "success"}>
+                      {ga4LiveState.loading ? "Syncing analytics" : ga4LiveState.error ? "GA4 sync issue" : "Analytics synced"}
+                    </ActionCue>
+                    <ActionCue tone={gaVisibleClients.length ? "success" : "warning"}>
+                      {gaVisibleClients.length} GA4 client{gaVisibleClients.length === 1 ? "" : "s"}
+                    </ActionCue>
+                  </div>
+                </div>
+                <AccountDateRangeControl value={accountsDateRange} onChange={setAccountsDateRange} label="Analytics data range" />
+              </div>
+
               <div style={{ display: "grid", gridTemplateColumns: analyticsColumns, gap: 18 }}>
                 <div>
                   {gaClient ? (
@@ -9572,7 +9868,7 @@ export default function AdPulse() {
                           ))}
                         </select>
                       </div>
-                      <GaSummary client={gaClient} ga4={gaClient.ga4} />
+                      <AnalyticsCommandCenter client={gaClient} ga4={gaClient.ga4} seriesMap={dashboardSeriesMap} dateRangeLabel={reportDateRangeLabel} liveState={ga4LiveState} />
                     </>
                   ) : (
                     <EmptyState title="No GA4 properties in your access scope" body="Connect GA4 or assign a client with analytics access to this user." />
@@ -9594,11 +9890,22 @@ export default function AdPulse() {
                   <div>
                     <div style={{ fontSize: 16, fontWeight: 800, fontFamily: T.heading }}>Custom graph builder</div>
                     <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft }}>
-                      Choose a client, a specific account or GA4, then stack the KPIs you want to watch.
+                      Choose a client, a specific account or GA4, then stack the KPIs you want to watch. Saved boards survive refresh.
                     </div>
                   </div>
 
                   <div style={{ display: "grid", gap: 12 }}>
+                    <div>
+                      <div style={{ marginBottom: 8, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Quick boards</div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {ANALYTICS_CHART_PRESETS.map((preset) => (
+                          <Button key={preset.id} onClick={() => addChartPreset(preset)}>
+                            {preset.label}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+
                     <div>
                       <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Client</div>
                       <select
@@ -9683,7 +9990,10 @@ export default function AdPulse() {
                       />
                     </div>
 
-                    <Button onClick={addChart} tone="primary">Add custom graph</Button>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <Button onClick={addChart} tone="primary">Add custom graph</Button>
+                      {charts.length ? <Button onClick={() => setCharts([])}>Clear board</Button> : null}
+                    </div>
                   </div>
                 </div>
               </div>
