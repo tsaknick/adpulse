@@ -145,6 +145,7 @@ const STORAGE_KEYS = {
   users: "adpulse/users",
   clients: "adpulse/liveClients",
   providerProfiles: "adpulse/providerProfiles",
+  aiStrategy: "adpulse/aiStrategy",
 };
 
 const LEGACY_DEMO_CLIENT_STORAGE_KEY = "adpulse/clients";
@@ -910,12 +911,33 @@ function getAiPriorityTone(priority) {
   return "positive";
 }
 
+function getAiPriorityLabel(priority) {
+  if (priority === "now") return "Αμεσα";
+  if (priority === "later") return "Αργοτερα";
+  return "Επομενο";
+}
+
+function getAiConfidenceLabel(confidence) {
+  if (confidence === "high") return "Υψηλη βεβαιοτητα";
+  if (confidence === "low") return "Χαμηλη βεβαιοτητα";
+  return "Μεσαια βεβαιοτητα";
+}
+
 function getAiAreaLabel(area) {
-  if (area === "negative_keywords") return "Negative keywords";
-  if (area === "landing_page") return "Landing page";
-  return String(area || "strategy")
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
+  const labels = {
+    strategy: "Στρατηγικη",
+    budget: "Budget",
+    keyword: "Keywords",
+    negative_keywords: "Negative keywords",
+    creative: "Creative",
+    bidding: "Bidding",
+    audience: "Κοινο",
+    landing_page: "Landing page",
+    measurement: "Μετρηση",
+    structure: "Δομη",
+  };
+
+  return labels[area] || "Στρατηγικη";
 }
 
 function formatAiGeneratedAt(value) {
@@ -1152,6 +1174,33 @@ function buildSearchTermsAiPayload({
       scoreCandidateCount: Number(item.scoreCandidateCount) || 0,
     })),
   };
+}
+
+function getAccountAiStrategyKey(client, dateRangeLabel) {
+  if (!client?.id) return "";
+  return ["account", client.id, dateRangeLabel || ""].join(":");
+}
+
+function getSearchTermsAiStrategyKey({
+  selectedClient,
+  selectedAccount,
+  selectedCampaign,
+  selectedAdGroup,
+  isPerformanceMax,
+  dateRange,
+  termStatusFilter,
+}) {
+  if (!selectedClient?.id || !selectedAccount?.externalId || !selectedCampaign?.id) return "";
+
+  return [
+    "search_terms",
+    selectedClient.id,
+    selectedAccount.externalId,
+    selectedCampaign.id,
+    isPerformanceMax ? "campaign" : selectedAdGroup?.id || "",
+    dateRange || "",
+    termStatusFilter || "active",
+  ].join(":");
 }
 
 function tokenizeNegativeCandidate(value) {
@@ -1997,6 +2046,29 @@ function readStoredValue(key, fallback) {
   } catch (error) {
     return fallback;
   }
+}
+
+function readStoredAiStrategyResult(storageKey) {
+  if (!storageKey) return null;
+  const stored = readStoredValue(STORAGE_KEYS.aiStrategy, {});
+  return stored && typeof stored === "object" ? stored[storageKey] || null : null;
+}
+
+function writeStoredAiStrategyResult(storageKey, result) {
+  if (typeof window === "undefined" || !storageKey || !result) return;
+
+  const stored = readStoredValue(STORAGE_KEYS.aiStrategy, {});
+  const entries = Object.entries(stored && typeof stored === "object" ? stored : {})
+    .filter(([key]) => key !== storageKey)
+    .slice(-79);
+  const next = Object.fromEntries(entries);
+
+  next[storageKey] = {
+    ...result,
+    savedAt: new Date().toISOString(),
+  };
+
+  window.localStorage.setItem(STORAGE_KEYS.aiStrategy, JSON.stringify(next));
 }
 
 function hydrateUsers(value) {
@@ -3260,17 +3332,17 @@ function AiRecommendationCard({ item }) {
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.title}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <ToneBadge tone={getAiPriorityTone(item.priority)}>{String(item.priority || "next").toUpperCase()}</ToneBadge>
+          <ToneBadge tone={getAiPriorityTone(item.priority)}>{getAiPriorityLabel(item.priority)}</ToneBadge>
           <ToneBadge tone="neutral">{getAiAreaLabel(item.area)}</ToneBadge>
           <ToneBadge tone={item.confidence === "high" ? "positive" : item.confidence === "low" ? "warning" : "neutral"}>
-            {`${String(item.confidence || "medium").charAt(0).toUpperCase()}${String(item.confidence || "medium").slice(1)} confidence`}
+            {getAiConfidenceLabel(item.confidence)}
           </ToneBadge>
         </div>
       </div>
       <div style={{ fontSize: 12, color: T.ink, lineHeight: 1.6 }}>{item.action}</div>
       <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.why}</div>
       <div style={{ fontSize: 11, color: T.inkMute, lineHeight: 1.5 }}>
-        Expected impact: {item.expectedImpact}
+        Αναμενομενο αποτελεσμα: {item.expectedImpact}
       </div>
     </div>
   );
@@ -3292,23 +3364,19 @@ function AiStrategyOutput({ result }) {
 
       <div style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 10 }}>
         <div>
-          <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Detected strategy</div>
-          <div style={{ marginTop: 6, fontSize: 13, color: T.ink, lineHeight: 1.65 }}>{strategy.strategySummary}</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Diagnosis</div>
-          <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft, lineHeight: 1.65 }}>{strategy.performanceDiagnosis}</div>
+          <div style={{ fontSize: 11, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>Τι δεν παει καλα</div>
+          <div style={{ marginTop: 6, fontSize: 13, color: T.ink, lineHeight: 1.65 }}>{strategy.performanceDiagnosis}</div>
         </div>
       </div>
 
       <div style={{ display: "grid", gap: 10 }}>
-        <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Next best action</div>
+        <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Επομενη κινηση</div>
         <AiRecommendationCard item={strategy.nextBestAction} />
       </div>
 
       {strategy.recommendations?.length ? (
         <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Follow-up actions</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Επομενα βηματα</div>
           <div style={{ display: "grid", gap: 10 }}>
             {strategy.recommendations.map((item, index) => (
               <AiRecommendationCard key={`${item.title}-${index}`} item={item} />
@@ -3319,15 +3387,15 @@ function AiStrategyOutput({ result }) {
 
       {strategy.keywordOpportunities?.length ? (
         <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Keyword opportunities</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Προτασεις keywords</div>
           <div style={{ display: "grid", gridTemplateColumns: fitCols(220), gap: 10 }}>
             {strategy.keywordOpportunities.map((item, index) => (
               <div key={`${item.keyword}-${index}`} style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
                   <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.keyword}</div>
-                  <ToneBadge tone={getAiPriorityTone(item.priority)}>{String(item.priority || "next").toUpperCase()}</ToneBadge>
+                  <ToneBadge tone={getAiPriorityTone(item.priority)}>{getAiPriorityLabel(item.priority)}</ToneBadge>
                 </div>
-                <div style={{ fontSize: 11, color: T.inkMute }}>Suggested match type: {item.suggestedMatchType || "Review manually"}</div>
+                <div style={{ fontSize: 11, color: T.inkMute }}>Match type: {item.suggestedMatchType || "Για review"}</div>
                 <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.why}</div>
               </div>
             ))}
@@ -3337,15 +3405,15 @@ function AiStrategyOutput({ result }) {
 
       {strategy.negativeKeywordSuggestions?.length ? (
         <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Negative keyword suggestions</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Προτασεις negative keywords</div>
           <div style={{ display: "grid", gridTemplateColumns: fitCols(220), gap: 10 }}>
             {strategy.negativeKeywordSuggestions.map((item, index) => (
               <div key={`${item.keyword}-${index}`} style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
                   <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.keyword}</div>
-                  <ToneBadge tone={getAiPriorityTone(item.priority)}>{String(item.priority || "next").toUpperCase()}</ToneBadge>
+                  <ToneBadge tone={getAiPriorityTone(item.priority)}>{getAiPriorityLabel(item.priority)}</ToneBadge>
                 </div>
-                <div style={{ fontSize: 11, color: T.inkMute }}>Recommendation: {item.suggestedMatchType || "Negative keyword"}</div>
+                <div style={{ fontSize: 11, color: T.inkMute }}>Προταση: {item.suggestedMatchType || "Negative keyword"}</div>
                 <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.why}</div>
               </div>
             ))}
@@ -3355,7 +3423,7 @@ function AiStrategyOutput({ result }) {
 
       {strategy.budgetActions?.length ? (
         <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Budget actions</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Ενεργειες budget</div>
           <div style={{ display: "grid", gap: 10 }}>
             {strategy.budgetActions.map((item, index) => (
               <div key={`${item.channel}-${index}`} style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 6 }}>
@@ -3363,7 +3431,7 @@ function AiStrategyOutput({ result }) {
                   <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.channel || "Channel budget"}</div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {item.amountText ? <ToneBadge tone="neutral">{item.amountText}</ToneBadge> : null}
-                    <ToneBadge tone={getAiPriorityTone(item.priority)}>{String(item.priority || "next").toUpperCase()}</ToneBadge>
+                    <ToneBadge tone={getAiPriorityTone(item.priority)}>{getAiPriorityLabel(item.priority)}</ToneBadge>
                   </div>
                 </div>
                 <div style={{ fontSize: 12, color: T.ink }}>{item.direction}</div>
@@ -3376,13 +3444,13 @@ function AiStrategyOutput({ result }) {
 
       {strategy.experiments?.length ? (
         <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Experiments</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, fontFamily: T.heading }}>Πειραματα</div>
           <div style={{ display: "grid", gridTemplateColumns: fitCols(240), gap: 10 }}>
             {strategy.experiments.map((item, index) => (
               <div key={`${item.title}-${index}`} style={{ padding: 14, borderRadius: 16, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 8 }}>
                 <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{item.title}</div>
                 <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item.hypothesis}</div>
-                <div style={{ fontSize: 11, color: T.inkMute }}>Success metric: {item.successMetric}</div>
+                <div style={{ fontSize: 11, color: T.inkMute }}>Metric επιτυχιας: {item.successMetric}</div>
               </div>
             ))}
           </div>
@@ -3391,7 +3459,7 @@ function AiStrategyOutput({ result }) {
 
       {strategy.watchouts?.length ? (
         <div style={{ padding: 14, borderRadius: 16, background: T.amberSoft, border: `1px solid rgba(199, 147, 33, 0.16)`, display: "grid", gap: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: T.amber, fontFamily: T.heading }}>Watchouts</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.amber, fontFamily: T.heading }}>Προσοχη</div>
           <div style={{ display: "grid", gap: 6 }}>
             {strategy.watchouts.map((item, index) => (
               <div key={`${item}-${index}`} style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{item}</div>
@@ -4093,7 +4161,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
   const noConnections = Object.values(client.connections).every((value) => !value);
   const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
   const aiPayload = useMemo(() => buildAccountAiPayload(client, dateRangeLabel), [client, dateRangeLabel]);
-  const aiFingerprint = useMemo(() => JSON.stringify(aiPayload), [aiPayload]);
+  const aiStrategyKey = useMemo(() => getAccountAiStrategyKey(client, dateRangeLabel), [client, dateRangeLabel]);
   const groupedCampaigns = useMemo(
     () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, ads.filter((ad) => ad.campaignId === campaign.id)])),
     [ads, campaigns]
@@ -4112,8 +4180,15 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
   );
 
   useEffect(() => {
-    setAiState(createEmptyAiStrategistState());
-  }, [aiFingerprint]);
+    const saved = readStoredAiStrategyResult(aiStrategyKey);
+    setAiState(saved ? {
+      loading: false,
+      error: "",
+      data: saved,
+      generatedAt: saved?.generatedAt || "",
+      cached: !!saved?.cached,
+    } : createEmptyAiStrategistState());
+  }, [aiStrategyKey]);
 
   async function runAiStrategist() {
     setAiState((current) => ({ ...current, loading: true, error: "" }));
@@ -4122,7 +4197,9 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
       const payload = await fetchAiStrategy({
         scope: "account",
         context: aiPayload,
+        forceRefresh: true,
       });
+      writeStoredAiStrategyResult(aiStrategyKey, payload);
       setAiState({
         loading: false,
         error: "",
@@ -4131,13 +4208,11 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
         cached: !!payload?.cached,
       });
     } catch (error) {
-      setAiState({
+      setAiState((current) => ({
+        ...current,
         loading: false,
         error: error.message || "Could not run the AI strategist.",
-        data: null,
-        generatedAt: "",
-        cached: false,
-      });
+      }));
     }
   }
 
@@ -4279,7 +4354,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                       </div>
                     ) : null}
                   </div>
-                ) : aiState.error ? (
+                ) : aiState.error && !aiState.data ? (
                   <div style={{ display: "grid", gap: 10 }}>
                     <div style={{ padding: 12, borderRadius: 16, background: T.coralSoft, border: `1px solid rgba(215, 93, 66, 0.16)`, color: T.coral, fontSize: 12, fontWeight: 700 }}>
                       {aiState.error}
@@ -6824,7 +6899,15 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
     summary,
     termStatusFilter,
   ]);
-  const aiFingerprint = useMemo(() => JSON.stringify(aiPayload), [aiPayload]);
+  const aiStrategyKey = useMemo(() => getSearchTermsAiStrategyKey({
+    selectedClient,
+    selectedAccount,
+    selectedCampaign,
+    selectedAdGroup,
+    isPerformanceMax,
+    dateRange: selection.dateRange,
+    termStatusFilter,
+  }), [isPerformanceMax, selectedAccount, selectedAdGroup, selectedCampaign, selectedClient, selection.dateRange, termStatusFilter]);
   const tableColumns = isPerformanceMax
     ? [
       { key: "searchTerm", label: "Search term" },
@@ -6858,8 +6941,15 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
     ];
 
   useEffect(() => {
-    setAiState(createEmptyAiStrategistState());
-  }, [aiFingerprint]);
+    const saved = readStoredAiStrategyResult(aiStrategyKey);
+    setAiState(saved ? {
+      loading: false,
+      error: "",
+      data: saved,
+      generatedAt: saved?.generatedAt || "",
+      cached: !!saved?.cached,
+    } : createEmptyAiStrategistState());
+  }, [aiStrategyKey]);
 
   function setSortColumn(nextKey) {
     setSort((current) => (
@@ -6936,7 +7026,9 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
       const payload = await fetchAiStrategy({
         scope: "search_terms",
         context: aiPayload,
+        forceRefresh: true,
       });
+      writeStoredAiStrategyResult(aiStrategyKey, payload);
       setAiState({
         loading: false,
         error: "",
@@ -6945,13 +7037,11 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
         cached: !!payload?.cached,
       });
     } catch (error) {
-      setAiState({
+      setAiState((current) => ({
+        ...current,
         loading: false,
         error: error.message || "Could not run the AI strategist.",
-        data: null,
-        generatedAt: "",
-        cached: false,
-      });
+      }));
     }
   }
 
@@ -7188,7 +7278,7 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
               </div>
             ) : null}
           </div>
-        ) : aiState.error ? (
+        ) : aiState.error && !aiState.data ? (
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ padding: 12, borderRadius: 16, background: T.coralSoft, border: `1px solid rgba(215, 93, 66, 0.16)`, color: T.coral, fontSize: 12, fontWeight: 700 }}>
               {aiState.error}

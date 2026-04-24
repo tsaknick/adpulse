@@ -5092,12 +5092,13 @@ async function generateAiStrategy(input) {
 
   const scope = String(input.scope || "account").trim().toLowerCase() || "account";
   const context = input.context && typeof input.context === "object" ? input.context : {};
+  const forceRefresh = !!input.forceRefresh;
   const cachePayload = { scope, context };
 
   pruneAiStrategyCache();
   const cacheKey = getAiStrategyCacheKey(cachePayload);
   const cached = aiStrategyCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
     return {
       ...cached.value,
       cached: true,
@@ -5107,7 +5108,9 @@ async function generateAiStrategy(input) {
   const model = getAiStrategistModel();
   const systemPrompt = [
     "You are AdPulse Strategist, a senior paid media strategist.",
-    "Infer the real campaign strategy from the provided dashboard context.",
+    "Write every user-facing string in Greek.",
+    "Do not start with or include a general explanation of the campaign strategy.",
+    "Focus only on what is wrong with the current state, why it matters, and the next steps.",
     "Recommend the single highest-leverage next action first, then short follow-up actions.",
     "Use only the supplied data. If evidence is missing, say so instead of inventing facts.",
     "Respect the stated client target, date range, and connected channels.",
@@ -5118,8 +5121,10 @@ async function generateAiStrategy(input) {
     type: "object",
     additionalProperties: false,
     properties: {
-      strategySummary: { type: "string" },
-      performanceDiagnosis: { type: "string" },
+      performanceDiagnosis: {
+        type: "string",
+        description: "In Greek, summarize only what is wrong with the current account or search-term state. Do not explain the strategy.",
+      },
       nextBestAction: {
         type: "object",
         additionalProperties: false,
@@ -5219,7 +5224,6 @@ async function generateAiStrategy(input) {
       },
     },
     required: [
-      "strategySummary",
       "performanceDiagnosis",
       "nextBestAction",
       "recommendations",
@@ -5248,7 +5252,7 @@ async function generateAiStrategy(input) {
           content: [
             {
               type: "text",
-              text: `Analyze this AdPulse ${scope} context. Explain the strategy you detect, identify what is limiting performance, and recommend the highest-leverage next step plus short follow-ups. Ground every point in the supplied live data.`,
+              text: `Analyze this AdPulse ${scope} context. Reply in Greek. Do not explain the strategy. Identify what is wrong right now, what is limiting performance, and the highest-leverage next step plus short follow-ups. Ground every point in the supplied live data.`,
             },
             {
               type: "text",
@@ -5260,7 +5264,7 @@ async function generateAiStrategy(input) {
       tools: [
         {
           name: "record_adpulse_strategy",
-          description: "Return the AdPulse strategy analysis using the exact structured schema.",
+          description: "Return the AdPulse strategy analysis using the exact structured schema. Every user-facing string value must be Greek.",
           input_schema: schema,
         },
       ],
