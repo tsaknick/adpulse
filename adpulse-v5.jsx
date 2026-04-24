@@ -11165,4 +11165,32 @@ export default function AdPulse() {
               onUpdateUser={saveDashboardUser}
               onDeleteUser={deleteDashboardUser}
             />
-  
+          ) : null}
+
+          {view === "connections" ? (
+            <IntegrationHub
+              providerProfiles={providerProfiles}
+              clients={clients}
+              configured={integrationState.configured}
+              loading={integrationState.loading}
+              error={integrationState.error}
+              busyMap={integrationBusy}
+              onConnect={connectProviderProfile}
+              onSync={syncProviderProfile}
+              onDisconnect={disconnectProviderProfile}
+              layoutColumns={integrationColumns}
+              setupStatus={setupStatus}
+              aiForm={aiSetupForm}
+              onAiFormChange={(field, value) => {
+                setAiSetupForm((current) => ({ ...current, [field]: value }));
+                setAiSetupState((current) => ({ ...current, error: "", success: "" }));
+              }}
+              onSaveAiConfig={saveAiSetup}
+              aiSetupState={aiSetupState}
+            />
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}

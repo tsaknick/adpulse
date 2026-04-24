@@ -5383,4 +5383,178 @@ async function generateAiStrategy(input) {
     "Keep recommendations operational and specific.",
   ].join(" ");
 
-  const sche
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      performanceDiagnosis: {
+        type: "string",
+        description: "In Greek, summarize only what is wrong with the current account or search-term state. Do not explain the strategy.",
+      },
+      nextBestAction: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          area: {
+            type: "string",
+            enum: ["strategy", "budget", "keyword", "negative_keywords", "creative", "bidding", "audience", "landing_page", "measurement", "structure"],
+          },
+          priority: { type: "string", enum: ["now", "next", "later"] },
+          action: { type: "string" },
+          why: { type: "string" },
+          expectedImpact: { type: "string" },
+          confidence: { type: "string", enum: ["high", "medium", "low"] },
+        },
+        required: ["title", "area", "priority", "action", "why", "expectedImpact", "confidence"],
+      },
+      recommendations: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: "string" },
+            area: {
+              type: "string",
+              enum: ["strategy", "budget", "keyword", "negative_keywords", "creative", "bidding", "audience", "landing_page", "measurement", "structure"],
+            },
+            priority: { type: "string", enum: ["now", "next", "later"] },
+            action: { type: "string" },
+            why: { type: "string" },
+            expectedImpact: { type: "string" },
+            confidence: { type: "string", enum: ["high", "medium", "low"] },
+          },
+          required: ["title", "area", "priority", "action", "why", "expectedImpact", "confidence"],
+        },
+      },
+      keywordOpportunities: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            keyword: { type: "string" },
+            suggestedMatchType: { type: "string" },
+            why: { type: "string" },
+            priority: { type: "string", enum: ["now", "next", "later"] },
+          },
+          required: ["keyword", "suggestedMatchType", "why", "priority"],
+        },
+      },
+      negativeKeywordSuggestions: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            keyword: { type: "string" },
+            suggestedMatchType: { type: "string" },
+            why: { type: "string" },
+            priority: { type: "string", enum: ["now", "next", "later"] },
+          },
+          required: ["keyword", "suggestedMatchType", "why", "priority"],
+        },
+      },
+      budgetActions: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            channel: { type: "string" },
+            direction: { type: "string" },
+            amountText: { type: "string" },
+            why: { type: "string" },
+            priority: { type: "string", enum: ["now", "next", "later"] },
+          },
+          required: ["channel", "direction", "amountText", "why", "priority"],
+        },
+      },
+      experiments: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: "string" },
+            hypothesis: { type: "string" },
+            successMetric: { type: "string" },
+          },
+          required: ["title", "hypothesis", "successMetric"],
+        },
+      },
+      watchouts: {
+        type: "array",
+        items: { type: "string" },
+      },
+    },
+    required: [
+      "performanceDiagnosis",
+      "nextBestAction",
+      "recommendations",
+      "keywordOpportunities",
+      "negativeKeywordSuggestions",
+      "budgetActions",
+      "experiments",
+      "watchouts",
+    ],
+  };
+
+  const response = await fetchJson("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 2200,
+      system: systemPrompt,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Analyze this AdPulse ${scope} context. Reply in Greek. Do not explain the strategy. Identify what is wrong right now, what is limiting performance, and the highest-leverage next step plus short follow-ups. Ground every point in the supplied live data.`,
+            },
+            {
+              type: "text",
+              text: JSON.stringify(context, null, 2),
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          name: "record_adpulse_strategy",
+          description: "Return the AdPulse strategy analysis using the exact structured schema. Every user-facing string value must be Greek.",
+          input_schema: schema,
+        },
+      ],
+      tool_choice: {
+        type: "tool",
+        name: "record_adpulse_strategy",
+      },
+    }),
+  }, "Claude AI strategist");
+
+  const parsed = extractAnthropicStrategyInput(response);
+  const strategy = normalizeAiStrategyPayload(parsed);
+  const payload = {
+    ok: true,
+    cached: false,
+    model,
+    generatedAt: new Date().toISOString(),
+    strategy,
+  };
+
+  aiStrategyCache.set(cacheKey, {
+    expiresAt: Date.now() + AI_STRATEGY_CACHE_TTL,
+    value: payload,
+  });
+
+  return payload;
+}
