@@ -1961,7 +1961,86 @@ function buildSeriesMap(clients, accounts, ga4) {
   });
 
   clients.forEach((client) => {
-    const clientAccounts = clientBuckets[client.id];
+    const clientAccounts = clientBuckets[client.id] || [];
+    const liveGa4Series = Array.isArray(ga4[client.id]?.series) ? ga4[client.id].series : [];
+    const clientSeriesByKey = new Map();
+    let hasAccountDailySeries = false;
+    const hasLiveAccount = clientAccounts.some((account) => account.requestKey || String(account.id || "").startsWith("live-"));
+
+    clientAccounts.forEach((account) => {
+      const accountSeries = series[`account:${account.id}`] || [];
+      if (!accountSeries.length) return;
+
+      hasAccountDailySeries = true;
+      accountSeries.forEach((point, index) => {
+        const key = point.date || point.label || `point-${index}`;
+        const current = clientSeriesByKey.get(key) || {
+          date: point.date || "",
+          label: point.label || point.date || `Point ${index + 1}`,
+          spend: 0,
+          clicks: 0,
+          impressions: 0,
+          conversions: 0,
+          conversionValue: 0,
+          revenue: 0,
+          sessions: 0,
+          users: 0,
+        };
+
+        current.spend += Number(point.spend) || 0;
+        current.clicks += Number(point.clicks) || 0;
+        current.impressions += Number(point.impressions) || 0;
+        current.conversions += Number(point.conversions) || 0;
+        current.conversionValue += Number(point.conversionValue) || 0;
+        current.revenue += Number(point.revenue) || 0;
+        clientSeriesByKey.set(key, current);
+      });
+    });
+
+    liveGa4Series.forEach((point, index) => {
+      const key = point.date || point.label || `ga4-point-${index}`;
+      const current = clientSeriesByKey.get(key) || {
+        date: point.date || "",
+        label: point.label || point.date || `Point ${index + 1}`,
+        spend: 0,
+        clicks: 0,
+        impressions: 0,
+        conversions: 0,
+        conversionValue: 0,
+        revenue: 0,
+        sessions: 0,
+        users: 0,
+      };
+
+      current.sessions += Number(point.sessions) || 0;
+      current.users += Number(point.users) || 0;
+      current.revenue += Number(point.revenue) || 0;
+      if (!hasAccountDailySeries) {
+        current.conversions += Number(point.conversions) || 0;
+      }
+      clientSeriesByKey.set(key, current);
+    });
+
+    if (hasAccountDailySeries || liveGa4Series.length || hasLiveAccount || ga4[client.id]?.isLiveGa4) {
+      series[`client:${client.id}`] = Array.from(clientSeriesByKey.values())
+        .sort((left, right) => String(left.date || left.label).localeCompare(String(right.date || right.label)))
+        .map((point) => ({
+          ...point,
+          cpc: point.clicks ? +(point.spend / point.clicks).toFixed(2) : 0,
+          cpm: point.impressions ? +(point.spend / point.impressions * 1000).toFixed(2) : 0,
+          roas: point.spend ? +((point.revenue || point.conversionValue) / point.spend).toFixed(2) : 0,
+        }));
+      series[`ga4:${client.id}`] = liveGa4Series.map((point) => ({
+        date: point.date || "",
+        label: point.label || point.date || "",
+        sessions: Number(point.sessions) || 0,
+        users: Number(point.users) || 0,
+        revenue: Number(point.revenue) || 0,
+        conversions: Number(point.conversions) || 0,
+      }));
+      return;
+    }
+
     const spend = clientAccounts.reduce((acc, item) => acc + item.spend, 0);
     const clicks = clientAccounts.reduce((acc, item) => acc + item.clicks, 0);
     const conversions = clientAccounts.reduce((acc, item) => acc + item.conversions, 0);
@@ -2004,7 +2083,6 @@ function buildSeriesMap(clients, accounts, ga4) {
       };
     });
 
-    const liveGa4Series = Array.isArray(ga4[client.id]?.series) ? ga4[client.id].series : [];
     series[`ga4:${client.id}`] = liveGa4Series.length
       ? liveGa4Series.map((point) => ({
         label: point.label || point.date || "",
@@ -2013,13 +2091,7 @@ function buildSeriesMap(clients, accounts, ga4) {
         revenue: Number(point.revenue) || 0,
         conversions: Number(point.conversions) || 0,
       }))
-      : Array.from({ length: 30 }, (_, index) => ({
-        label: `Apr ${String(index + 1).padStart(2, "0")}`,
-        sessions: sessionsSeries[index],
-        users: usersSeries[index],
-        revenue: revenueSeries[index],
-        conversions: conversionSeries[index],
-      }));
+      : [];
   });
 
   return series;
@@ -2042,6 +2114,10 @@ function buildLiveGa4Summary(client, reports, liveState) {
       aov: 0,
       channels: { Unassigned: 0 },
       series: [],
+      previousSeries: [],
+      previousStartDate: "",
+      previousEndDate: "",
+      isLiveGa4: true,
       insight: liveState?.error || "Waiting for live GA4 data from the linked property.",
     };
   }
@@ -2067,6 +2143,7 @@ function buildLiveGa4Summary(client, reports, liveState) {
     .slice(0, 6)
     .map(([channel, value]) => [channel, sessions ? Math.round(value / sessions * 100) : 0]));
   const seriesByDate = new Map();
+  const previousSeriesByDate = new Map();
 
   propertyReports.forEach((report) => {
     (Array.isArray(report.series) ? report.series : []).forEach((point) => {
@@ -2078,6 +2155,17 @@ function buildLiveGa4Summary(client, reports, liveState) {
       current.conversions += Number(point.conversions) || 0;
       current.revenue += Number(point.revenue) || 0;
       seriesByDate.set(key, current);
+    });
+
+    (Array.isArray(report.previousSeries) ? report.previousSeries : []).forEach((point) => {
+      const key = point.date || point.label || "";
+      if (!key) return;
+      const current = previousSeriesByDate.get(key) || { date: key, label: point.label || key, sessions: 0, users: 0, conversions: 0, revenue: 0 };
+      current.sessions += Number(point.sessions) || 0;
+      current.users += Number(point.users) || 0;
+      current.conversions += Number(point.conversions) || 0;
+      current.revenue += Number(point.revenue) || 0;
+      previousSeriesByDate.set(key, current);
     });
   });
 
@@ -2094,6 +2182,10 @@ function buildLiveGa4Summary(client, reports, liveState) {
     aov: conversions ? +(revenue / conversions).toFixed(2) : 0,
     channels: Object.keys(channels).length ? channels : { Unassigned: 0 },
     series: Array.from(seriesByDate.values()).sort((left, right) => String(left.date).localeCompare(String(right.date))),
+    previousSeries: Array.from(previousSeriesByDate.values()).sort((left, right) => String(left.date).localeCompare(String(right.date))),
+    previousStartDate: propertyReports.find((report) => report.previousStartDate)?.previousStartDate || "",
+    previousEndDate: propertyReports.find((report) => report.previousEndDate)?.previousEndDate || "",
+    isLiveGa4: true,
     insight: liveState?.errors?.length
       ? `GA4 is partially synced: ${liveState.errors[0].error}`
       : `Live analytics from linked GA4 ${propertyReports.length === 1 ? "property" : "properties"}.`,
@@ -4034,18 +4126,169 @@ function Sparkline({ values, color }) {
   );
 }
 
-function compareRecentSeries(series, metricKey) {
+function summarizeSeriesMetric(series, metricKey) {
   const values = (Array.isArray(series) ? series : []).map((point) => Number(point?.[metricKey]) || 0);
-  if (!values.length) return { recent: 0, previous: 0, delta: 0, values: [] };
+  if (!values.length) return 0;
 
-  const windowSize = Math.min(7, Math.max(1, Math.floor(values.length / 2)));
-  const recentValues = values.slice(-windowSize);
-  const previousValues = values.slice(-(windowSize * 2), -windowSize);
-  const recent = recentValues.reduce((acc, value) => acc + value, 0);
-  const previous = previousValues.reduce((acc, value) => acc + value, 0);
-  const delta = previous ? ((recent - previous) / previous) * 100 : recent ? 100 : 0;
+  return ADDITIVE_METRICS.has(metricKey)
+    ? values.reduce((acc, value) => acc + value, 0)
+    : values.reduce((acc, value) => acc + value, 0) / values.length;
+}
 
-  return { recent, previous, delta, values };
+function comparePeriodSeries(currentSeries, previousSeries, metricKey) {
+  const current = summarizeSeriesMetric(currentSeries, metricKey);
+  const previous = summarizeSeriesMetric(previousSeries, metricKey);
+  const delta = previous ? ((current - previous) / previous) * 100 : current ? 100 : 0;
+
+  return {
+    current,
+    previous,
+    delta,
+    currentSeries: Array.isArray(currentSeries) ? currentSeries : [],
+    previousSeries: Array.isArray(previousSeries) ? previousSeries : [],
+  };
+}
+
+function InteractiveLineChart({
+  series,
+  metricKey,
+  color,
+  previousSeries = [],
+  currentLabel = "Selected period",
+  previousLabel = "Previous period",
+  height = 220,
+}) {
+  const [hoverIndex, setHoverIndex] = useState(null);
+  const points = Array.isArray(series) ? series : [];
+  const previousPoints = Array.isArray(previousSeries) ? previousSeries : [];
+  const currentValues = points.map((point) => Number(point?.[metricKey]) || 0);
+  const previousValues = previousPoints.map((point) => Number(point?.[metricKey]) || 0);
+  const allValues = [...currentValues, ...previousValues];
+  const metric = KPI_LIBRARY[metricKey] || { type: "number", label: metricKey };
+
+  if (!points.length) {
+    return (
+      <div style={{ padding: 18, borderRadius: 16, background: T.bgSoft, border: `1px dashed ${T.lineStrong}`, color: T.inkSoft, fontSize: 12, textAlign: "center" }}>
+        No live daily points returned for this chart.
+      </div>
+    );
+  }
+
+  const width = 680;
+  const padLeft = 62;
+  const padRight = 18;
+  const padTop = 18;
+  const padBottom = 42;
+  const chartWidth = width - padLeft - padRight;
+  const chartHeight = height - padTop - padBottom;
+  const maxValue = Math.max(...allValues, 1);
+  const minValue = Math.min(0, ...allValues);
+  const range = maxValue - minValue || 1;
+  const yTicks = buildChartTicks(maxValue, 4);
+  const xLabels = getSeriesAxisLabels(points);
+  const gradientId = `axis-chart-${hashSeed(`${metricKey}-${color}-${points.length}-${Math.round(maxValue)}`)}`;
+  const xFor = (index, length = points.length) => padLeft + (index / Math.max(length - 1, 1)) * chartWidth;
+  const yFor = (value) => padTop + chartHeight - ((value - minValue) / range) * chartHeight;
+  const buildPath = (values) => values.map((value, index) => {
+    const x = xFor(index, values.length);
+    const y = yFor(value);
+    return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(" ");
+  const currentPath = buildPath(currentValues);
+  const previousPath = previousValues.length ? buildPath(previousValues) : "";
+  const areaPath = `${currentPath} L ${xFor(currentValues.length - 1)} ${height - padBottom} L ${padLeft} ${height - padBottom} Z`;
+  const safeHoverIndex = hoverIndex == null ? null : Math.max(0, Math.min(points.length - 1, hoverIndex));
+  const hoverX = safeHoverIndex == null ? null : xFor(safeHoverIndex);
+  const hoverValue = safeHoverIndex == null ? null : currentValues[safeHoverIndex];
+  const previousHoverIndex = safeHoverIndex == null || !previousValues.length
+    ? null
+    : Math.max(0, Math.min(previousValues.length - 1, Math.round(safeHoverIndex / Math.max(points.length - 1, 1) * Math.max(previousValues.length - 1, 0))));
+  const previousHoverValue = previousHoverIndex == null ? null : previousValues[previousHoverIndex];
+  const hoverLabel = safeHoverIndex == null ? "" : points[safeHoverIndex]?.label || points[safeHoverIndex]?.date || `Point ${safeHoverIndex + 1}`;
+
+  function handleMove(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(rect.width, 1)));
+    const svgX = ratio * width;
+    const index = Math.round((svgX - padLeft) / Math.max(chartWidth, 1) * Math.max(points.length - 1, 0));
+    setHoverIndex(Math.max(0, Math.min(points.length - 1, index)));
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        style={{ width: "100%", display: "block", touchAction: "none", overflow: "visible" }}
+        onMouseMove={handleMove}
+        onMouseLeave={() => setHoverIndex(null)}
+      >
+        <defs>
+          <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity="0.18" />
+            <stop offset="100%" stopColor={color} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+
+        {yTicks.map((tick) => {
+          const y = yFor(tick);
+          return (
+            <g key={`${metricKey}-ytick-${tick}`}>
+              <line x1={padLeft} x2={width - padRight} y1={y} y2={y} stroke="rgba(22, 34, 24, 0.08)" />
+              <text x={padLeft - 10} y={y + 4} fontSize="10" fill={T.inkSoft} textAnchor="end">
+                {formatChartAxisValue(tick, metric.type)}
+              </text>
+            </g>
+          );
+        })}
+
+        <line x1={padLeft} x2={padLeft} y1={padTop} y2={height - padBottom} stroke="rgba(22, 34, 24, 0.16)" />
+        <line x1={padLeft} x2={width - padRight} y1={height - padBottom} y2={height - padBottom} stroke="rgba(22, 34, 24, 0.16)" />
+
+        {previousPath ? <path d={previousPath} fill="none" stroke={T.inkMute} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="5 6" opacity="0.72" /> : null}
+        <path d={areaPath} fill={`url(#${gradientId})`} />
+        <path d={currentPath} fill="none" stroke={color} strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
+
+        {xLabels.map((item) => (
+          <text key={`${metricKey}-xlabel-${item.index}`} x={xFor(item.index)} y={height - 14} fontSize="10" fill={T.inkSoft} textAnchor={item.index === 0 ? "start" : item.index === points.length - 1 ? "end" : "middle"}>
+            {item.label}
+          </text>
+        ))}
+
+        {hoverX != null ? (
+          <g>
+            <line x1={hoverX} x2={hoverX} y1={padTop} y2={height - padBottom} stroke={T.ink} strokeOpacity="0.28" strokeDasharray="4 4" />
+            <circle cx={hoverX} cy={yFor(hoverValue)} r="4" fill={color} stroke="#fff" strokeWidth="2" />
+            <rect
+              x={Math.min(width - 204, Math.max(padLeft, hoverX + 10))}
+              y={Math.max(4, yFor(hoverValue) - 44)}
+              width="194"
+              height={previousHoverValue == null ? 42 : 58}
+              rx="12"
+              fill={T.surfaceStrong}
+              stroke="rgba(22, 34, 24, 0.14)"
+            />
+            <text x={Math.min(width - 192, Math.max(padLeft + 12, hoverX + 22))} y={Math.max(22, yFor(hoverValue) - 24)} fontSize="10" fill={T.inkSoft}>
+              {hoverLabel}
+            </text>
+            <text x={Math.min(width - 192, Math.max(padLeft + 12, hoverX + 22))} y={Math.max(36, yFor(hoverValue) - 10)} fontSize="11" fill={color} fontWeight="800">
+              {currentLabel}: {formatMetric(metricKey, hoverValue)}
+            </text>
+            {previousHoverValue != null ? (
+              <text x={Math.min(width - 192, Math.max(padLeft + 12, hoverX + 22))} y={Math.max(50, yFor(hoverValue) + 4)} fontSize="11" fill={T.inkSoft} fontWeight="800">
+                {previousLabel}: {formatMetric(metricKey, previousHoverValue)}
+              </text>
+            ) : null}
+          </g>
+        ) : null}
+      </svg>
+      {previousValues.length ? (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", fontSize: 11, color: T.inkSoft }}>
+          <span><span style={{ display: "inline-block", width: 18, height: 3, borderRadius: 999, background: color, marginRight: 6 }} />{currentLabel}</span>
+          <span><span style={{ display: "inline-block", width: 18, height: 3, borderRadius: 999, background: T.inkMute, marginRight: 6, opacity: 0.7 }} />{previousLabel}</span>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function AnalyticsDeltaBadge({ delta }) {
@@ -4081,10 +4324,18 @@ function AnalyticsTrendTile({ label, metricKey, comparison }) {
         <AnalyticsDeltaBadge delta={comparison.delta} />
       </div>
       <div style={{ fontSize: 20, color: T.ink, fontWeight: 900, fontFamily: T.heading, letterSpacing: "-0.05em" }}>
-        {formatMetric(metricKey, comparison.recent)}
+        {formatMetric(metricKey, comparison.current)}
       </div>
-      <Sparkline values={comparison.values} color={metric.color} />
-      <div style={{ fontSize: 11, color: T.inkSoft }}>Last 7 days vs previous 7 days</div>
+      <InteractiveLineChart
+        series={comparison.currentSeries}
+        previousSeries={comparison.previousSeries}
+        metricKey={metricKey}
+        color={metric.color}
+        height={190}
+      />
+      <div style={{ fontSize: 11, color: T.inkSoft }}>
+        Selected period vs previous equivalent period. Previous total: {formatMetric(metricKey, comparison.previous)}.
+      </div>
     </div>
   );
 }
@@ -4122,10 +4373,12 @@ function AnalyticsCommandCenter({ client, ga4, seriesMap, dateRangeLabel, liveSt
   }
 
   const gaSeries = seriesMap[`ga4:${client.id}`] || [];
-  const sessionsTrend = compareRecentSeries(gaSeries, "sessions");
-  const usersTrend = compareRecentSeries(gaSeries, "users");
-  const conversionsTrend = compareRecentSeries(gaSeries, "conversions");
-  const revenueTrend = compareRecentSeries(gaSeries, "revenue");
+  const previousGaSeries = Array.isArray(ga4.previousSeries) ? ga4.previousSeries : [];
+  const previousRangeLabel = ga4.previousStartDate && ga4.previousEndDate ? `${ga4.previousStartDate} - ${ga4.previousEndDate}` : "Previous period";
+  const sessionsTrend = comparePeriodSeries(gaSeries, previousGaSeries, "sessions");
+  const usersTrend = comparePeriodSeries(gaSeries, previousGaSeries, "users");
+  const conversionsTrend = comparePeriodSeries(gaSeries, previousGaSeries, "conversions");
+  const revenueTrend = comparePeriodSeries(gaSeries, previousGaSeries, "revenue");
   const channelItems = Object.entries(ga4.channels || {})
     .map(([label, value]) => ({
       label,
@@ -4144,11 +4397,12 @@ function AnalyticsCommandCenter({ client, ga4, seriesMap, dateRangeLabel, liveSt
   const topChannel = channelItems[0];
   const liveErrors = Array.isArray(liveState?.errors) ? liveState.errors.filter((item) => item?.clientId === client.id || !item?.clientId) : [];
   const insightItems = [
-    sessionsTrend.delta < -10 ? `Sessions are down ${Math.abs(sessionsTrend.delta).toFixed(0)}% vs the previous 7 days.` : "",
-    conversionsTrend.delta < -10 ? `Conversions are down ${Math.abs(conversionsTrend.delta).toFixed(0)}%; check landing pages and offer quality.` : "",
+    sessionsTrend.delta < -10 ? `Sessions are down ${Math.abs(sessionsTrend.delta).toFixed(0)}% vs the previous equivalent period.` : "",
+    conversionsTrend.delta < -10 ? `Conversions are down ${Math.abs(conversionsTrend.delta).toFixed(0)}% vs the previous equivalent period; check landing pages and offer quality.` : "",
     Math.abs(valueGap) > 20 && analyticsRevenue > 0 ? `Ads conversion value and GA4 revenue differ by ${Math.abs(valueGap).toFixed(0)}%; check attribution and conversion mapping.` : "",
     topChannel?.value > 55 ? `${topChannel.label} is ${Math.round(topChannel.value)}% of traffic, so channel concentration is high.` : "",
-    !gaSeries.length ? "No GA4 daily series returned yet; KPIs are still shown from the latest property summary." : "",
+    !gaSeries.length ? "No live GA4 daily stream returned for the selected period, so no synthetic trend chart is drawn." : "",
+    gaSeries.length && !previousGaSeries.length ? "Previous-period GA4 daily stream did not return, so comparison deltas may be incomplete." : "",
   ].filter(Boolean);
   const funnelItems = [
     { label: "Ad impressions", value: paidImpressions, displayValue: formatNumber(paidImpressions), color: T.inkSoft },
@@ -4178,13 +4432,19 @@ function AnalyticsCommandCenter({ client, ga4, seriesMap, dateRangeLabel, liveSt
               <div style={{ fontSize: "clamp(1.35rem, 2.2vw, 2rem)", fontWeight: 900, fontFamily: T.heading, color: T.ink, letterSpacing: "-0.06em" }}>{client.name} analytics</div>
             </div>
             <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft }}>{ga4.propertyName} | {dateRangeLabel}</div>
+            <div style={{ marginTop: 6, fontSize: 11, color: T.inkSoft, lineHeight: 1.5 }}>
+              Charts use GA4 Analytics Data API daily rows only. If GA4 does not return daily rows, AdPulse now shows an empty-state instead of generated fallback data.
+            </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <ActionCue tone={liveState?.loading ? "info" : liveErrors.length ? "warning" : "success"}>
               {liveState?.loading ? "Refreshing GA4" : liveErrors.length ? "Partial GA4 sync" : "Live analytics"}
             </ActionCue>
             <ActionCue tone={gaSeries.length ? "success" : "warning"}>
-              {gaSeries.length ? `${gaSeries.length} daily points` : "No daily series"}
+              {gaSeries.length ? `${gaSeries.length} selected-period points` : "No selected-period daily rows"}
+            </ActionCue>
+            <ActionCue tone={previousGaSeries.length ? "success" : "warning"}>
+              {previousGaSeries.length ? `${previousGaSeries.length} previous-period points` : "No previous-period rows"}
             </ActionCue>
           </div>
         </div>
@@ -4204,6 +4464,9 @@ function AnalyticsCommandCenter({ client, ga4, seriesMap, dateRangeLabel, liveSt
         <AnalyticsTrendTile label="Users" metricKey="users" comparison={usersTrend} />
         <AnalyticsTrendTile label={client.category === "eshop" ? "Purchases" : "Leads"} metricKey="conversions" comparison={conversionsTrend} />
         <AnalyticsTrendTile label="Revenue" metricKey="revenue" comparison={revenueTrend} />
+      </div>
+      <div style={{ fontSize: 11, color: T.inkSoft, fontWeight: 700 }}>
+        Comparison baseline: {previousRangeLabel}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 18 }}>
@@ -5031,11 +5294,12 @@ function GaSummary({ client, ga4 }) {
   );
 }
 
-function ChartCard({ chart, clients, accounts, seriesMap, onRemove }) {
+function ChartCard({ chart, clients, accounts, seriesMap, dateRangeLabel, onRemove }) {
   const client = clients.find((item) => item.id === chart.clientId);
   const account = chart.scope === "account" ? accounts.find((item) => item.id === chart.accountId) : null;
   const seriesKey = chart.scope === "client" ? `client:${chart.clientId}` : chart.scope === "ga4" ? `ga4:${chart.clientId}` : `account:${chart.accountId}`;
   const series = seriesMap[seriesKey] || [];
+  const previousSeries = chart.scope === "ga4" && client?.ga4 ? client.ga4.previousSeries || [] : [];
   const title = chart.scope === "account" && account ? `${client?.name || "Client"} / ${account.name}` : chart.scope === "ga4" ? `${client?.name || "Client"} / GA4` : client?.name || "Client";
   const subtitle = chart.scope === "account" ? "Specific ad account" : chart.scope === "ga4" ? "Google Analytics 4" : "Client summary";
 
@@ -5054,7 +5318,7 @@ function ChartCard({ chart, clients, accounts, seriesMap, onRemove }) {
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-start" }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 800, fontFamily: T.heading, color: T.ink }}>{title}</div>
-          <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft }}>{subtitle} | Last 30 days</div>
+          <div style={{ marginTop: 4, fontSize: 11, color: T.inkSoft }}>{subtitle} | {dateRangeLabel}</div>
         </div>
         <Button onClick={onRemove}>Remove</Button>
       </div>
@@ -5083,7 +5347,7 @@ function ChartCard({ chart, clients, accounts, seriesMap, onRemove }) {
                   {formatMetric(metricKey, summaryValue)}
                 </div>
               </div>
-              <Sparkline values={values} color={metric.color} />
+              <InteractiveLineChart series={series} previousSeries={previousSeries} metricKey={metricKey} color={metric.color} />
             </div>
           );
         })}
@@ -9067,12 +9331,12 @@ export default function AdPulse() {
 
   const redClients = enriched.filter((client) => !client.health.ok);
   const greenClients = enriched.filter((client) => client.health.ok);
-  const gaVisibleClients = enriched.filter((client) => client.connections.ga4);
+  const gaVisibleClients = enriched.filter((client) => client.connections.ga4 && client.ga4?.isLiveGa4);
   const currentUserAssignedClients = currentUser?.role === "director" ? clients : clients.filter((client) => client.assignedUserIds?.includes(currentUser?.id));
   const chartAccounts = enriched.find((client) => client.id === chartForm.clientId)?.accounts || [];
   const allDashboardAccounts = useMemo(() => enriched.flatMap((client) => client.accounts || []), [enriched]);
   const dashboardGa4ByClient = useMemo(() => Object.fromEntries(enriched
-    .filter((client) => client.ga4)
+    .filter((client) => client.ga4?.isLiveGa4)
     .map((client) => [client.id, client.ga4])), [enriched]);
   const dashboardSeriesMap = useMemo(() => buildSeriesMap(enriched, allDashboardAccounts, dashboardGa4ByClient), [allDashboardAccounts, dashboardGa4ByClient, enriched]);
   const reportDateRangeLabel = getAccountDateRangeLabel(accountsDateRange);
@@ -10001,7 +10265,7 @@ export default function AdPulse() {
               {charts.length ? (
                 <div style={{ display: "grid", gridTemplateColumns: chartColumns, gap: 18 }}>
                   {charts.map((chart) => (
-                    <ChartCard key={chart.id} chart={chart} clients={enriched} accounts={allDashboardAccounts} seriesMap={dashboardSeriesMap} onRemove={() => setCharts((current) => current.filter((item) => item.id !== chart.id))} />
+                    <ChartCard key={chart.id} chart={chart} clients={enriched} accounts={allDashboardAccounts} seriesMap={dashboardSeriesMap} dateRangeLabel={reportDateRangeLabel} onRemove={() => setCharts((current) => current.filter((item) => item.id !== chart.id))} />
                   ))}
                 </div>
               ) : (

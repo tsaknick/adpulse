@@ -2530,6 +2530,9 @@ async function fetchGa4LiveOverview(payload) {
       aov: toNumber(report?.aov),
       channels: report?.channels || {},
       series: Array.isArray(report?.series) ? report.series : [],
+      previousSeries: Array.isArray(report?.previousSeries) ? report.previousSeries : [],
+      previousStartDate: report?.previousStartDate || "",
+      previousEndDate: report?.previousEndDate || "",
       insight: report?.insight || "Live GA4 property linked.",
       requestKey: request.key,
       connectionId: request.connectionId,
@@ -2624,7 +2627,10 @@ async function fetchGa4LivePropertyReport({ context, propertyId, dateRange }) {
   });
 
   let dailyReport = null;
+  let previousDailyReport = null;
   let dailyError = "";
+  let previousDailyError = "";
+  const previousDateRange = getPreviousLiveDateRange(dateRange);
 
   try {
     dailyReport = await fetchGa4RunReport({
@@ -2641,6 +2647,21 @@ async function fetchGa4LivePropertyReport({ context, propertyId, dateRange }) {
     dailyError = error.message || "Could not fetch GA4 daily trend.";
   }
 
+  try {
+    previousDailyReport = await fetchGa4RunReport({
+      tokenBundle,
+      propertyId,
+      dateRange: previousDateRange,
+      dimensions: ["date"],
+      metricNames: channelResult.metricNames,
+      orderBys: [{ dimension: { dimensionName: "date" } }],
+      limit: 400,
+      label: `GA4 previous daily report ${propertyId}`,
+    });
+  } catch (error) {
+    previousDailyError = error.message || "Could not fetch GA4 previous period trend.";
+  }
+
   const summary = normalizeGa4PropertySummary({
     report: channelResult.report,
     metricNames: channelResult.metricNames,
@@ -2651,9 +2672,12 @@ async function fetchGa4LivePropertyReport({ context, propertyId, dateRange }) {
   return {
     ...summary,
     asset,
-    dataStatus: dailyError ? "partial" : "ready",
-    dataError: dailyError,
-    series: dailyReport ? normalizeGa4DailySeries(dailyReport, channelResult.metricNames) : [],
+    dataStatus: dailyError || previousDailyError ? "partial" : "ready",
+    dataError: [dailyError, previousDailyError].filter(Boolean).join(" | "),
+    series: dailyReport ? normalizeGa4DailySeries(dailyReport, dateRange) : [],
+    previousSeries: previousDailyReport ? normalizeGa4DailySeries(previousDailyReport, previousDateRange) : [],
+    previousStartDate: previousDateRange.startDate,
+    previousEndDate: previousDateRange.endDate,
   };
 }
 
@@ -2750,12 +2774,14 @@ function normalizeGa4PropertySummary({ report, metricNames, asset, propertyId })
   };
 }
 
-function normalizeGa4DailySeries(report) {
+function normalizeGa4DailySeries(report, dateRange) {
   const rows = Array.isArray(report?.rows) ? report.rows : [];
+  const byDate = new Map();
 
-  return rows.map((row) => {
+  rows.forEach((row) => {
     const rawDate = String(row.dimensionValues?.[0]?.value || "");
     const date = rawDate.replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
+    if (!sanitizeIsoDate(date)) return;
     const sessions = Math.round(getGa4MetricValue(report, row, [], "sessions"));
     const users = Math.round(getGa4MetricValue(report, row, [], "totalUsers"));
     const revenue = getGa4MetricValue(report, row, [], "totalRevenue");
@@ -2763,13 +2789,28 @@ function normalizeGa4DailySeries(report) {
     const keyEvents = getGa4MetricValue(report, row, [], "keyEvents") || getGa4MetricValue(report, row, [], "conversions");
     const conversions = keyEvents || transactions;
 
-    return {
+    byDate.set(date, {
       date,
+      label: formatDailySeriesLabel(date),
       sessions,
       users,
       conversions: +conversions.toFixed(2),
       revenue: +revenue.toFixed(2),
-    };
+    });
+  });
+
+  const dates = buildDailySeriesDates(dateRange);
+  if (!dates.length) {
+    return Array.from(byDate.values()).sort((left, right) => String(left.date).localeCompare(String(right.date)));
+  }
+
+  return dates.map((date) => byDate.get(date) || {
+    date,
+    label: formatDailySeriesLabel(date),
+    sessions: 0,
+    users: 0,
+    conversions: 0,
+    revenue: 0,
   });
 }
 
@@ -3985,6 +4026,25 @@ function normalizeLiveDateRange(payload = {}) {
     endDate: window.endDate,
     googleCondition: `  AND segments.date DURING ${fallbackId}`,
     dayCount: getGoogleAdsBudgetDayCount(fallbackId),
+  };
+}
+
+function getPreviousLiveDateRange(dateRange) {
+  const startDate = sanitizeIsoDate(dateRange?.startDate);
+  const endDate = sanitizeIsoDate(dateRange?.endDate);
+  const dayCount = Math.max(1, Number(dateRange?.dayCount) || countInclusiveDays(startDate, endDate));
+  const currentStart = new Date(`${startDate}T00:00:00Z`);
+  const previousEnd = addUtcDays(currentStart, -1);
+  const previousStart = addUtcDays(previousEnd, -(dayCount - 1));
+  const previousStartDate = formatUtcDate(previousStart);
+  const previousEndDate = formatUtcDate(previousEnd);
+
+  return {
+    id: "PREVIOUS_PERIOD",
+    startDate: previousStartDate,
+    endDate: previousEndDate,
+    googleCondition: `  AND segments.date BETWEEN '${previousStartDate}' AND '${previousEndDate}'`,
+    dayCount,
   };
 }
 
