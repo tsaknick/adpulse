@@ -3332,8 +3332,8 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
         "WHERE metrics.clicks > 0",
         ...extraConditions,
         dateRange.googleCondition,
-        "ORDER BY metrics.conversions DESC",
-        "LIMIT 20",
+        "ORDER BY metrics.clicks DESC",
+        "LIMIT 50",
       ].join(" "),
       label: `Google Ads geography report ${labelSuffix} ${customerId}`,
     });
@@ -3359,8 +3359,8 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
         "WHERE campaign.status != REMOVED",
         "  AND metrics.clicks > 0",
         dateRange.googleCondition,
-        "ORDER BY metrics.conversions DESC",
-        "LIMIT 50",
+        "ORDER BY metrics.clicks DESC",
+        "LIMIT 100",
       ].join(" "),
       label: `Google Ads geography report location-view ${customerId}`,
     });
@@ -3368,24 +3368,59 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
     return (response.results || []).map(normalizeGoogleAdsLocationViewReportRow).filter(Boolean);
   };
 
+  // Returns true when every row resolves to a country-level constant with no
+  // region or city granularity — i.e. the API collapsed everything into one
+  // country bucket, which happens when campaigns target a whole country and
+  // geographic_view matches at the same coarse level.
+  const isCountryLevelOnly = (rows) =>
+    rows.length > 0 &&
+    rows.every(
+      (row) =>
+        row.mostSpecificResource &&
+        row.mostSpecificResource === row.countryResource &&
+        !row.regionResource &&
+        !row.cityResource
+    );
+
+  // user_location_view reports the PHYSICAL location of the user at click time —
+  // it always provides city/municipality granularity regardless of campaign
+  // targeting, so try it first.
+  // geographic_view includes "location of interest" and collapses to country
+  // level when the campaign targets a whole country (e.g. Greece), so it is
+  // tried second and skipped if it only returns country-level rows.
   const attempts = [
-    { viewName: "geographic_view", labelSuffix: "geo-target", extraConditions: [] },
     { viewName: "user_location_view", labelSuffix: "user-location", extraConditions: [] },
+    { viewName: "geographic_view", labelSuffix: "geo-target", extraConditions: [] },
     { viewName: "campaign", labelSuffix: "campaign-segments", extraConditions: ["  AND campaign.status != REMOVED"] },
     { viewName: "customer", labelSuffix: "customer-segments", extraConditions: [] },
   ];
   const messages = [];
   let rows = [];
+  let countryLevelFallback = []; // best country-level result in case nothing more granular is found
 
   for (const attempt of attempts) {
     try {
-      rows = await fetchRows(attempt.viewName, attempt.labelSuffix, attempt.extraConditions);
-      if (rows.length) break;
+      const fetched = await fetchRows(attempt.viewName, attempt.labelSuffix, attempt.extraConditions);
+      if (fetched.length && !isCountryLevelOnly(fetched)) {
+        // Got municipality/city/region data — use it
+        rows = fetched;
+        break;
+      } else if (fetched.length && !countryLevelFallback.length) {
+        // Only country-level data so far — save as fallback and keep trying
+        countryLevelFallback = fetched;
+      }
     } catch (error) {
       messages.push(error.message || `Could not fetch ${attempt.labelSuffix} geography rows for ${customerId}.`);
     }
   }
 
+  // If no granular rows were found, use the best country-level result we saw
+  if (!rows.length && countryLevelFallback.length) {
+    rows = countryLevelFallback;
+  }
+
+  // Last resort: location_view shows the locations the advertiser targeted.
+  // If campaigns target specific municipalities this will contain them.
   if (!rows.length) {
     try {
       rows = await fetchLocationViewRows();
@@ -3499,7 +3534,7 @@ async function fetchGoogleAdsGeoTargetNames({ customerId, tokenBundle, loginCust
         "  geo_target_constant.target_type",
         "FROM geo_target_constant",
         `WHERE geo_target_constant.resource_name IN (${quoted})`,
-        "LIMIT 200",
+        "LIMIT 500",
       ].join(" "),
       label: `Google Ads geo target names ${customerId}`,
     });
