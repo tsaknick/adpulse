@@ -39,7 +39,7 @@ const GOOGLE_ADS_LIVE_ALLOWED_DATE_RANGES = new Set([
   "LAST_MONTH",
   "CUSTOM",
 ]);
-const DEFAULT_OPENAI_STRATEGIST_MODEL = "gpt-5.4";
+const DEFAULT_ANTHROPIC_STRATEGIST_MODEL = "claude-sonnet-4-6";
 const AI_STRATEGY_CACHE_TTL = Number(process.env.ADPULSE_AI_STRATEGY_CACHE_TTL || 15 * 60 * 1000);
 
 loadEnvFile(path.join(__dirname, ".env.local"));
@@ -4879,7 +4879,7 @@ function getSetupStatus() {
       GOOGLE_ADS_DEVELOPER_TOKEN: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
       META_APP_ID: !!process.env.META_APP_ID,
       META_APP_SECRET: !!process.env.META_APP_SECRET,
-      OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+      ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
     },
     masked: {
       GOOGLE_CLIENT_ID: mask(process.env.GOOGLE_CLIENT_ID || ""),
@@ -4887,8 +4887,8 @@ function getSetupStatus() {
       GOOGLE_ADS_DEVELOPER_TOKEN: mask(process.env.GOOGLE_ADS_DEVELOPER_TOKEN || ""),
       META_APP_ID: mask(process.env.META_APP_ID || ""),
       META_APP_SECRET: mask(process.env.META_APP_SECRET || ""),
-      OPENAI_API_KEY: mask(process.env.OPENAI_API_KEY || ""),
-      OPENAI_STRATEGIST_MODEL: String(process.env.OPENAI_STRATEGIST_MODEL || "").trim(),
+      ANTHROPIC_API_KEY: mask(process.env.ANTHROPIC_API_KEY || ""),
+      ANTHROPIC_STRATEGIST_MODEL: String(process.env.ANTHROPIC_STRATEGIST_MODEL || "").trim(),
     },
     allReady: !!(
       process.env.GOOGLE_CLIENT_ID &&
@@ -4903,7 +4903,7 @@ function getSetupStatus() {
 const ALLOWED_SETUP_KEYS = new Set([
   "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_ADS_DEVELOPER_TOKEN",
   "META_APP_ID", "META_APP_SECRET", "META_CONFIG_ID", "META_API_VERSION",
-  "OPENAI_API_KEY", "OPENAI_STRATEGIST_MODEL",
+  "ANTHROPIC_API_KEY", "ANTHROPIC_STRATEGIST_MODEL",
 ]);
 
 function saveSetupCredentials(input) {
@@ -4966,8 +4966,8 @@ function saveSetupCredentials(input) {
 }
 
 function getAiStrategistModel() {
-  const configured = String(process.env.OPENAI_STRATEGIST_MODEL || "").trim();
-  return configured || DEFAULT_OPENAI_STRATEGIST_MODEL;
+  const configured = String(process.env.ANTHROPIC_STRATEGIST_MODEL || "").trim();
+  return configured || DEFAULT_ANTHROPIC_STRATEGIST_MODEL;
 }
 
 function pruneAiStrategyCache() {
@@ -4984,31 +4984,28 @@ function getAiStrategyCacheKey(payload) {
   return crypto.createHash("sha1").update(JSON.stringify(payload || {})).digest("hex");
 }
 
-function extractOpenAiOutputText(payload) {
-  if (typeof payload?.output_text === "string" && payload.output_text.trim()) {
-    return payload.output_text.trim();
-  }
-
-  const chunks = [];
-
-  for (const item of payload?.output || []) {
-    if (item?.type !== "message") continue;
-
-    for (const content of item.content || []) {
-      if (content?.type === "refusal" && content.refusal) {
-        throw new Error(`OpenAI AI strategist refused the request: ${content.refusal}`);
-      }
-
-      if (content?.type === "output_text" && content.text) {
-        chunks.push(content.text);
-      }
+function extractAnthropicStrategyInput(payload) {
+  for (const block of payload?.content || []) {
+    if (block?.type === "tool_use" && block.name === "record_adpulse_strategy" && block.input && typeof block.input === "object") {
+      return block.input;
     }
   }
 
-  const combined = chunks.join("\n").trim();
-  if (combined) return combined;
+  const text = (payload?.content || [])
+    .filter((block) => block?.type === "text" && block.text)
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
 
-  throw new Error("OpenAI AI strategist returned no structured output.");
+  if (text) {
+    try {
+      return JSON.parse(text);
+    } catch (_) {
+      throw new Error("Claude AI strategist returned text instead of structured strategy JSON.");
+    }
+  }
+
+  throw new Error("Claude AI strategist returned no structured output.");
 }
 
 function normalizeAiStrategyPayload(payload) {
@@ -5084,9 +5081,9 @@ function normalizeAiStrategyPayload(payload) {
 }
 
 async function generateAiStrategy(input) {
-  const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
   if (!apiKey) {
-    throw new Error("AI strategist is not configured. Add OPENAI_API_KEY from the Connections screen.");
+    throw new Error("AI strategist is not configured. Add ANTHROPIC_API_KEY from the Connections screen.");
   }
 
   if (!input || typeof input !== "object") {
@@ -5234,39 +5231,47 @@ async function generateAiStrategy(input) {
     ],
   };
 
-  const response = await fetchJson("https://api.openai.com/v1/responses", {
+  const response = await fetchJson("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
       model,
-      reasoning: { effort: "medium" },
-      max_output_tokens: 1800,
-      input: [
-        { role: "system", content: systemPrompt },
+      max_tokens: 2200,
+      system: systemPrompt,
+      messages: [
         {
           role: "user",
-          content: `Analyze this AdPulse ${scope} context. Explain the strategy you detect, identify what is limiting performance, and recommend the highest-leverage next step plus short follow-ups. Ground every point in the supplied live data.`,
-        },
-        {
-          role: "user",
-          content: JSON.stringify(context, null, 2),
+          content: [
+            {
+              type: "text",
+              text: `Analyze this AdPulse ${scope} context. Explain the strategy you detect, identify what is limiting performance, and recommend the highest-leverage next step plus short follow-ups. Ground every point in the supplied live data.`,
+            },
+            {
+              type: "text",
+              text: JSON.stringify(context, null, 2),
+            },
+          ],
         },
       ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "adpulse_strategy_response",
-          schema,
-          strict: true,
+      tools: [
+        {
+          name: "record_adpulse_strategy",
+          description: "Return the AdPulse strategy analysis using the exact structured schema.",
+          input_schema: schema,
         },
+      ],
+      tool_choice: {
+        type: "tool",
+        name: "record_adpulse_strategy",
       },
     }),
-  }, "OpenAI AI strategist");
+  }, "Claude AI strategist");
 
-  const parsed = JSON.parse(extractOpenAiOutputText(response));
+  const parsed = extractAnthropicStrategyInput(response);
   const strategy = normalizeAiStrategyPayload(parsed);
   const payload = {
     ok: true,

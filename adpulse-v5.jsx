@@ -2414,36 +2414,36 @@ function IntegrationHub({
       >
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-start" }}>
           <div style={{ minWidth: 0 }}>
-            <ToneBadge tone={setupStatus?.configured?.OPENAI_API_KEY ? "positive" : "warning"}>
-              {setupStatus?.configured?.OPENAI_API_KEY ? "AI strategist enabled" : "AI strategist optional"}
+            <ToneBadge tone={setupStatus?.configured?.ANTHROPIC_API_KEY ? "positive" : "warning"}>
+              {setupStatus?.configured?.ANTHROPIC_API_KEY ? "AI strategist enabled" : "AI strategist optional"}
             </ToneBadge>
             <div style={{ marginTop: 10, fontSize: 18, fontWeight: 800, fontFamily: T.heading }}>AI strategist</div>
             <div style={{ marginTop: 6, fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
-              Connect an OpenAI API key to enable strategy-level recommendations on the Accounts and Search Terms screens. This layer reasons over the live dashboard context instead of using a fixed recommendation rule list.
+              Connect an Anthropic API key to enable Claude Sonnet strategy recommendations on the Accounts and Search Terms screens. This layer reasons over the live dashboard context instead of using a fixed recommendation rule list.
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {setupStatus?.masked?.OPENAI_API_KEY ? <ToneBadge tone="neutral">{setupStatus.masked.OPENAI_API_KEY}</ToneBadge> : null}
-            <ToneBadge tone="neutral">{setupStatus?.masked?.OPENAI_STRATEGIST_MODEL || "gpt-5.4"}</ToneBadge>
+            {setupStatus?.masked?.ANTHROPIC_API_KEY ? <ToneBadge tone="neutral">{setupStatus.masked.ANTHROPIC_API_KEY}</ToneBadge> : null}
+            <ToneBadge tone="neutral">{setupStatus?.masked?.ANTHROPIC_STRATEGIST_MODEL || "claude-sonnet-4-6"}</ToneBadge>
           </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: fitCols(240), gap: 12 }}>
           <div>
-            <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>OpenAI API key</div>
+            <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Anthropic API key</div>
             <input
-              value={aiForm.OPENAI_API_KEY}
-              onChange={(event) => onAiFormChange("OPENAI_API_KEY", event.target.value)}
-              placeholder="sk-..."
+              value={aiForm.ANTHROPIC_API_KEY}
+              onChange={(event) => onAiFormChange("ANTHROPIC_API_KEY", event.target.value)}
+              placeholder="sk-ant-..."
               style={{ width: "100%", boxSizing: "border-box", padding: "12px 13px", borderRadius: 14, border: `1px solid ${T.line}`, background: T.surfaceStrong, color: T.ink, fontSize: 13, outline: "none", fontFamily: T.mono }}
             />
           </div>
           <div>
             <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>Model</div>
             <input
-              value={aiForm.OPENAI_STRATEGIST_MODEL}
-              onChange={(event) => onAiFormChange("OPENAI_STRATEGIST_MODEL", event.target.value)}
-              placeholder="gpt-5.4"
+              value={aiForm.ANTHROPIC_STRATEGIST_MODEL}
+              onChange={(event) => onAiFormChange("ANTHROPIC_STRATEGIST_MODEL", event.target.value)}
+              placeholder="claude-sonnet-4-6"
               style={{ width: "100%", boxSizing: "border-box", padding: "12px 13px", borderRadius: 14, border: `1px solid ${T.line}`, background: T.surfaceStrong, color: T.ink, fontSize: 13, outline: "none", fontFamily: T.mono }}
             />
           </div>
@@ -4264,14 +4264,14 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                         ? "Strategy ready"
                         : aiReady
                           ? "Ready to analyze"
-                          : "Needs OpenAI key"}
+                          : "Needs Claude key"}
                   </ActionCue>
                 </div>
 
                 {!aiReady ? (
                   <div style={{ display: "grid", gap: 10 }}>
                     <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
-                      Add an OpenAI API key to enable the strategist layer. Once configured, AdPulse will analyze live account structure, pacing, efficiency, budgets, and client goals before suggesting the next best move.
+                      Add an Anthropic API key to enable the Claude strategist layer. Once configured, AdPulse will analyze live account structure, pacing, efficiency, budgets, and client goals before suggesting the next best move.
                     </div>
                     {onOpenConnections ? (
                       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -7173,14 +7173,14 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
                 ? "Strategy ready"
                 : aiReady
                   ? "Ready to analyze"
-                  : "Needs OpenAI key"}
+                  : "Needs Claude key"}
           </ActionCue>
         </div>
 
         {!aiReady ? (
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
-              Add an OpenAI API key to enable model-backed keyword and negative-mining recommendations. The strategist uses the live term table, client target, thresholds, and current campaign slice instead of a static rule list.
+              Add an Anthropic API key to enable Claude-backed keyword and negative-mining recommendations. The strategist uses the live term table, client target, thresholds, and current campaign slice instead of a static rule list.
             </div>
             {onOpenConnections ? (
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -7499,8 +7499,8 @@ function SetupWizard({ onComplete }) {
     GOOGLE_ADS_DEVELOPER_TOKEN: "",
     META_APP_ID: "",
     META_APP_SECRET: "",
-    OPENAI_API_KEY: "",
-    OPENAI_STRATEGIST_MODEL: "",
+    ANTHROPIC_API_KEY: "",
+    ANTHROPIC_STRATEGIST_MODEL: "",
   });
 
   useEffect(() => {
@@ -7540,8 +7540,8 @@ function SetupWizard({ onComplete }) {
           GOOGLE_ADS_DEVELOPER_TOKEN: "",
           META_APP_ID: "",
           META_APP_SECRET: "",
-          OPENAI_API_KEY: "",
-          OPENAI_STRATEGIST_MODEL: "",
+          ANTHROPIC_API_KEY: "",
+          ANTHROPIC_STRATEGIST_MODEL: "",
         });
         if (result.status?.allReady) setTimeout(() => onComplete?.(), 1500);
       } else {
@@ -7690,18 +7690,18 @@ function SetupWizard({ onComplete }) {
               <div>
                 <div style={{ fontSize: 12, fontWeight: 800, color: T.ink }}>AI strategist (optional)</div>
                 <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft, lineHeight: 1.5 }}>
-                  Add an OpenAI API key now if you want model-backed strategy recommendations on the Accounts and Search Terms screens.
+                  Add an Anthropic API key now if you want Claude Sonnet strategy recommendations on the Accounts and Search Terms screens.
                 </div>
               </div>
               <div>
-                <label style={lS}>OpenAI API key</label>
-                <input value={form.OPENAI_API_KEY} onChange={(e) => updateField("OPENAI_API_KEY", e.target.value)}
-                  placeholder="sk-..." style={iS} />
+                <label style={lS}>Anthropic API key</label>
+                <input value={form.ANTHROPIC_API_KEY} onChange={(e) => updateField("ANTHROPIC_API_KEY", e.target.value)}
+                  placeholder="sk-ant-..." style={iS} />
               </div>
               <div>
                 <label style={lS}>Strategist model</label>
-                <input value={form.OPENAI_STRATEGIST_MODEL} onChange={(e) => updateField("OPENAI_STRATEGIST_MODEL", e.target.value)}
-                  placeholder="gpt-5.4" style={iS} />
+                <input value={form.ANTHROPIC_STRATEGIST_MODEL} onChange={(e) => updateField("ANTHROPIC_STRATEGIST_MODEL", e.target.value)}
+                  placeholder="claude-sonnet-4-6" style={iS} />
               </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
@@ -7809,7 +7809,7 @@ export default function AdPulse() {
   const [currentUserId, setCurrentUserId] = useState(() => readStoredValue(STORAGE_KEYS.session, null));
   const [setupComplete, setSetupComplete] = useState(null);
   const [setupStatus, setSetupStatus] = useState(null);
-  const [aiSetupForm, setAiSetupForm] = useState({ OPENAI_API_KEY: "", OPENAI_STRATEGIST_MODEL: "" });
+  const [aiSetupForm, setAiSetupForm] = useState({ ANTHROPIC_API_KEY: "", ANTHROPIC_STRATEGIST_MODEL: "" });
   const [aiSetupState, setAiSetupState] = useState({ saving: false, error: "", success: "" });
   const [openMap, setOpenMap] = useState({});
   const [toasts, setToasts] = useState([]);
@@ -8497,7 +8497,7 @@ export default function AdPulse() {
   const alertColumns = viewportWidth >= 1200 ? "repeat(2, minmax(0, 1fr))" : "1fr";
   const studioColumns = viewportWidth >= 1380 ? "minmax(300px, 330px) minmax(0, 1fr)" : "1fr";
   const integrationColumns = viewportWidth >= 1520 ? "repeat(3, minmax(0, 1fr))" : viewportWidth >= 1020 ? "repeat(2, minmax(0, 1fr))" : "1fr";
-  const aiConfigured = !!setupStatus?.configured?.OPENAI_API_KEY;
+  const aiConfigured = !!setupStatus?.configured?.ANTHROPIC_API_KEY;
   const navItems = [
     { key: "overview", label: "Overview" },
     { key: "accounts", label: "Accounts" },
@@ -8811,7 +8811,7 @@ export default function AdPulse() {
         error: "",
         success: result.message || "AI settings saved.",
       });
-      setAiSetupForm({ OPENAI_API_KEY: "", OPENAI_STRATEGIST_MODEL: "" });
+      setAiSetupForm({ ANTHROPIC_API_KEY: "", ANTHROPIC_STRATEGIST_MODEL: "" });
       pushToast("AI strategist settings saved.", "success", "Connections");
     } catch (error) {
       setAiSetupState({
