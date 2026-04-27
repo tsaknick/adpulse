@@ -22,6 +22,8 @@ const GOOGLE_ADS_LIVE_AD_LIMIT = Number(process.env.ADPULSE_GOOGLE_LIVE_AD_LIMIT
 const META_API_VERSION = process.env.META_API_VERSION || "v23.0";
 const META_ADS_LIVE_CAMPAIGN_LIMIT = Number(process.env.ADPULSE_META_LIVE_CAMPAIGN_LIMIT || 500);
 const META_ADS_LIVE_AD_LIMIT = Number(process.env.ADPULSE_META_LIVE_AD_LIMIT || 500);
+const TIKTOK_ADS_LIVE_CAMPAIGN_LIMIT = Number(process.env.ADPULSE_TIKTOK_LIVE_CAMPAIGN_LIMIT || 500);
+const TIKTOK_ADS_LIVE_AD_LIMIT = Number(process.env.ADPULSE_TIKTOK_LIVE_AD_LIMIT || 500);
 const SEARCH_TERM_ALLOWED_TAGS = new Set(["good", "bad", "neutral"]);
 const USER_ALLOWED_ROLES = new Set(["director", "account"]);
 const SEARCH_TERM_ALLOWED_SCOPE_LEVELS = new Set(["ad_group", "campaign"]);
@@ -66,6 +68,13 @@ const PROVIDERS = {
     scopeLabel: "Business access",
     scopes: ["ads_read", "ads_management", "business_management", "read_insights"],
     requiredEnv: ["META_APP_ID", "META_APP_SECRET"],
+  },
+  tiktok_ads: {
+    platform: "tiktok_ads",
+    label: "TikTok Ads",
+    scopeLabel: "Advertiser access",
+    scopes: [],
+    requiredEnv: ["TIKTOK_APP_ID", "TIKTOK_APP_SECRET"],
   },
 };
 
@@ -243,6 +252,19 @@ const server = http.createServer(async (request, response) => {
       }
 
       const payload = await fetchMetaAdsLiveOverview(parsed);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/tiktok-ads/live-overview") {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const payload = await fetchTikTokAdsLiveOverview(parsed);
       sendJson(response, 200, payload);
       return;
     }
@@ -653,16 +675,19 @@ function normalizeStoredClient(value) {
     budgets: {
       google_ads: Number(value?.budgets?.google_ads) || 0,
       meta_ads: Number(value?.budgets?.meta_ads) || 0,
+      tiktok_ads: Number(value?.budgets?.tiktok_ads) || 0,
     },
     connections: {
       google_ads: value?.connections?.google_ads === true,
       meta_ads: value?.connections?.meta_ads === true,
+      tiktok_ads: value?.connections?.tiktok_ads === true,
       ga4: value?.connections?.ga4 === true,
     },
     linkedProfiles: value?.linkedProfiles && typeof value.linkedProfiles === "object" ? value.linkedProfiles : {},
     linkedAssets: {
       google_ads: normalizeIdList(value?.linkedAssets?.google_ads),
       meta_ads: normalizeIdList(value?.linkedAssets?.meta_ads),
+      tiktok_ads: normalizeIdList(value?.linkedAssets?.tiktok_ads),
       ga4: normalizeIdList(value?.linkedAssets?.ga4),
     },
     rules: value?.rules && typeof value.rules === "object" ? value.rules : {},
@@ -901,7 +926,7 @@ async function handleAuthStart(request, response, providerKey) {
 async function handleAuthCallback(request, response, providerKey, url) {
   const provider = PROVIDERS[providerKey];
   const state = url.searchParams.get("state");
-  const code = url.searchParams.get("code");
+  const code = url.searchParams.get("auth_code") || url.searchParams.get("code");
   const oauthError = url.searchParams.get("error") || url.searchParams.get("error_reason");
   const pending = state ? pendingStates.get(state) : null;
 
@@ -981,6 +1006,16 @@ function buildAuthorizationUrl(providerKey, state, redirectUri) {
     return `https://www.facebook.com/${META_API_VERSION}/dialog/oauth?${params.toString()}`;
   }
 
+  if (providerKey === "tiktok_ads") {
+    const params = new URLSearchParams({
+      app_id: process.env.TIKTOK_APP_ID,
+      redirect_uri: redirectUri,
+      state,
+    });
+
+    return `https://business-api.tiktok.com/portal/auth?${params.toString()}`;
+  }
+
   const params = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID,
     redirect_uri: redirectUri,
@@ -1035,6 +1070,30 @@ async function exchangeAuthCode(providerKey, code, redirectUri) {
       expiresAt: expiresIn ? Date.now() + expiresIn * 1000 : null,
       tokenType: token.token_type || "bearer",
       scope: PROVIDERS.meta_ads.scopes.join(","),
+    };
+  }
+
+  if (providerKey === "tiktok_ads") {
+    const token = await fetchTikTokBusinessJson("https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        app_id: process.env.TIKTOK_APP_ID,
+        secret: process.env.TIKTOK_APP_SECRET,
+        auth_code: code,
+      }),
+    }, "TikTok auth token exchange");
+    const data = token?.data && typeof token.data === "object" ? token.data : token;
+
+    return {
+      accessToken: String(data?.access_token || "").trim(),
+      refreshToken: String(data?.refresh_token || "").trim(),
+      expiresAt: toNumber(data?.expires_in) ? Date.now() + toNumber(data.expires_in) * 1000 : null,
+      tokenType: String(data?.token_type || "Bearer").trim() || "Bearer",
+      scope: "",
     };
   }
 
@@ -1115,6 +1174,8 @@ async function syncConnectionPayload({ platform, id, existingConnection, tokenBu
   const refreshed = await ensureProviderToken(platform, existingConnection, tokenBundle);
   const syncResult = platform === "google_ads"
     ? await syncGoogleAds(existingConnection, refreshed)
+    : platform === "tiktok_ads"
+      ? await syncTikTokAds(existingConnection, refreshed)
     : platform === "ga4"
       ? await syncGa4(existingConnection, refreshed)
       : await syncMetaAds(existingConnection, refreshed);
@@ -1166,9 +1227,10 @@ async function ensureProviderToken(platform, existingConnection, tokenBundle) {
     return tokenBundle;
   }
 
-  if (platform === "meta_ads") {
+  if (platform === "meta_ads" || platform === "tiktok_ads") {
     if (tokenBundle?.expiresAt && tokenBundle.expiresAt < Date.now() + 60_000) {
-      throw new Error("The Meta token expired. Reconnect this login from the Connections screen.");
+      const providerLabel = PROVIDERS[platform]?.label || "This";
+      throw new Error(`The ${providerLabel} token expired. Reconnect this login from the Connections screen.`);
     }
 
     return tokenBundle;
@@ -1711,6 +1773,85 @@ async function syncMetaAds(existingConnection, tokenBundle) {
     email: user.email || existingConnection?.email || "",
     externalId: accounts[0]?.business?.id || accounts[0]?.account_id || user.id || "",
     note: `${assets.length} Meta ad account${assets.length === 1 ? "" : "s"} synced from the consented business login.`,
+    assets,
+  };
+}
+
+async function syncTikTokAds(existingConnection, tokenBundle) {
+  const accessToken = String(tokenBundle?.accessToken || "").trim();
+  if (!accessToken) {
+    throw new Error("Missing TikTok Ads access token.");
+  }
+
+  const advertiserPayload = await fetchTikTokBusinessJson(buildTikTokBusinessUrl("/open_api/v1.3/oauth2/advertiser/get/", {
+    app_id: process.env.TIKTOK_APP_ID,
+    secret: process.env.TIKTOK_APP_SECRET,
+  }), {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      "Access-Token": accessToken,
+    },
+  }, "TikTok advertiser list");
+  const advertiserRows = getTikTokResponseRows(advertiserPayload);
+  const advertiserIds = Array.from(new Set(advertiserRows
+    .map((row) => sanitizeTikTokAdvertiserId(row?.advertiser_id || row?.id || row))
+    .filter(Boolean)));
+
+  if (!advertiserIds.length) {
+    return {
+      name: existingConnection?.name || "TikTok Ads",
+      email: existingConnection?.email || "",
+      externalId: existingConnection?.externalId || "",
+      note: "No TikTok advertiser accounts were returned for this login yet.",
+      assets: [],
+      status: "attention",
+      lastError: "No TikTok advertiser access was returned for this login.",
+    };
+  }
+
+  let advertiserInfoRows = [];
+  try {
+    const advertiserInfoPayload = await fetchTikTokBusinessJson(buildTikTokBusinessUrl("/open_api/v1.3/advertiser/info/", {
+      advertiser_ids: JSON.stringify(advertiserIds),
+    }), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "Access-Token": accessToken,
+      },
+    }, "TikTok advertiser info");
+    advertiserInfoRows = getTikTokResponseRows(advertiserInfoPayload);
+  } catch (_) {
+    advertiserInfoRows = advertiserIds.map((advertiserId) => ({ advertiser_id: advertiserId }));
+  }
+
+  const assets = advertiserInfoRows.map((row) => {
+    const advertiserId = sanitizeTikTokAdvertiserId(row?.advertiser_id || row?.id || row);
+    if (!advertiserId) return null;
+
+    return {
+      id: `tiktok_ads:${existingConnection?.id || "pending"}:${advertiserId}`,
+      platform: "tiktok_ads",
+      externalId: advertiserId,
+      name: String(row?.advertiser_name || row?.name || `TikTok advertiser ${advertiserId}`).trim() || `TikTok advertiser ${advertiserId}`,
+      subtitle: String(row?.bc_name || row?.business_name || row?.timezone || "TikTok ad account").trim() || "TikTok ad account",
+      type: "Ad account",
+      parentExternalId: String(row?.bc_id || row?.business_center_id || "").trim(),
+      connectionId: existingConnection?.id || null,
+      health: "healthy",
+      currency: String(row?.currency || "").trim(),
+      timezone: String(row?.timezone || row?.timezone_name || "").trim(),
+    };
+  }).filter(Boolean);
+
+  const primaryAsset = assets[0] || null;
+
+  return {
+    name: existingConnection?.name || (primaryAsset ? `${primaryAsset.name} TikTok` : "TikTok Ads"),
+    email: existingConnection?.email || "",
+    externalId: primaryAsset?.parentExternalId || primaryAsset?.externalId || existingConnection?.externalId || "",
+    note: `${assets.length} TikTok ad account${assets.length === 1 ? "" : "s"} synced from the consented advertiser access.`,
     assets,
   };
 }
@@ -2485,6 +2626,190 @@ async function fetchMetaAdsLiveOverview(payload) {
   return response;
 }
 
+async function fetchTikTokAdsLiveOverview(payload) {
+  const dateRange = normalizeLiveDateRange(payload);
+  const requests = Array.isArray(payload?.requests)
+    ? payload.requests.map(normalizeTikTokAdsLiveRequest).filter(Boolean)
+    : [];
+
+  if (!requests.length) {
+    return {
+      generatedAt: new Date().toISOString(),
+      dateRange: dateRange.id,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      accounts: [],
+      campaigns: [],
+      ads: [],
+      errors: [],
+    };
+  }
+
+  const connectionIds = Array.from(new Set(requests.map((item) => item.connectionId)));
+  const contextEntries = await Promise.all(connectionIds.map(async (connectionId) => ([
+    connectionId,
+    await getTikTokAdsConnectionContext(connectionId),
+  ])));
+  const contextMap = new Map(contextEntries);
+
+  const uniqueTargets = [];
+  const targetKeys = new Set();
+  requests.forEach((request) => {
+    const targetKey = `${request.connectionId}:${request.advertiserId}`;
+    if (targetKeys.has(targetKey)) return;
+    targetKeys.add(targetKey);
+    uniqueTargets.push({
+      connectionId: request.connectionId,
+      advertiserId: request.advertiserId,
+    });
+  });
+
+  const settledTargets = await Promise.allSettled(uniqueTargets.map(async (target) => {
+    const context = contextMap.get(target.connectionId);
+    return {
+      targetKey: `${target.connectionId}:${target.advertiserId}`,
+      report: await fetchTikTokAdsLiveAdvertiserReport({
+        context,
+        advertiserId: target.advertiserId,
+        dateRange,
+      }),
+    };
+  }));
+
+  const reportMap = new Map();
+  settledTargets.forEach((result, index) => {
+    const target = uniqueTargets[index];
+    const targetKey = `${target.connectionId}:${target.advertiserId}`;
+
+    if (result.status === "fulfilled") {
+      reportMap.set(targetKey, result.value.report);
+      return;
+    }
+
+    reportMap.set(targetKey, {
+      advertiserId: target.advertiserId,
+      asset: null,
+      dataStatus: "error",
+      dataError: result.reason?.message || "Could not fetch TikTok Ads live data.",
+      account: null,
+      campaigns: [],
+      ads: [],
+    });
+  });
+
+  const response = {
+    generatedAt: new Date().toISOString(),
+    dateRange: dateRange.id,
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+    accounts: [],
+    campaigns: [],
+    ads: [],
+    errors: [],
+  };
+
+  requests.forEach((request) => {
+    const targetKey = `${request.connectionId}:${request.advertiserId}`;
+    const report = reportMap.get(targetKey) || null;
+    const context = contextMap.get(request.connectionId);
+    const fallbackAsset = context?.connection?.assets?.find((asset) => sanitizeTikTokAdvertiserId(asset.externalId) === request.advertiserId) || null;
+    const asset = report?.asset || fallbackAsset;
+    const accountId = `live-tiktok-account:${request.key}`;
+    const monthlyBudget = request.budgetHint;
+
+    response.accounts.push({
+      id: accountId,
+      clientId: request.clientId,
+      platform: "tiktok_ads",
+      name: report?.account?.name || asset?.name || `TikTok Ads ${request.advertiserId}`,
+      status: report?.account?.status || "active",
+      monthlyBudget,
+      spend: toNumber(report?.account?.spend),
+      impressions: toNumber(report?.account?.impressions),
+      clicks: toNumber(report?.account?.clicks),
+      conversions: toNumber(report?.account?.conversions),
+      conversionValue: toNumber(report?.account?.conversionValue),
+      ctr: toNumber(report?.account?.ctr),
+      cpc: toNumber(report?.account?.cpc),
+      cpm: toNumber(report?.account?.cpm),
+      roas: toNumber(report?.account?.roas),
+      series: Array.isArray(report?.account?.series) ? report.account.series : [],
+      accountLabel: report?.account?.name || asset?.name || `TikTok Ads ${request.advertiserId}`,
+      requestKey: request.key,
+      connectionId: request.connectionId,
+      assetId: request.assetId,
+      advertiserId: request.advertiserId,
+      currency: report?.account?.currency || asset?.currency || "",
+      timezone: report?.account?.timezone || asset?.timezone || "",
+      dataStatus: report?.dataStatus || "ready",
+      dataError: report?.dataError || "",
+    });
+
+    (report?.campaigns || []).forEach((campaign) => {
+      const campaignId = `live-tiktok-campaign:${request.key}:${campaign.rawCampaignId}`;
+      response.campaigns.push({
+        id: campaignId,
+        clientId: request.clientId,
+        accountId,
+        platform: "tiktok_ads",
+        name: campaign.name,
+        objective: campaign.objective,
+        status: campaign.status,
+        budget: campaign.budget,
+        spend: campaign.spend,
+        impressions: campaign.impressions,
+        clicks: campaign.clicks,
+        conversions: campaign.conversions,
+        conversionValue: campaign.conversionValue,
+        reach: campaign.reach,
+        cpc: campaign.cpc,
+        cpm: campaign.cpm,
+        requestKey: request.key,
+        connectionId: request.connectionId,
+        advertiserId: request.advertiserId,
+        externalId: campaign.rawCampaignId,
+        dataStatus: report?.dataStatus || "ready",
+        dataError: report?.dataError || "",
+      });
+    });
+
+    (report?.ads || []).forEach((ad) => {
+      response.ads.push({
+        id: `live-tiktok-ad:${request.key}:${ad.rawAdId}`,
+        clientId: request.clientId,
+        accountId,
+        campaignId: `live-tiktok-campaign:${request.key}:${ad.rawCampaignId}`,
+        platform: "tiktok_ads",
+        name: ad.name,
+        format: ad.format,
+        status: ad.status,
+        spend: ad.spend,
+        clicks: ad.clicks,
+        impressions: ad.impressions,
+        conversions: ad.conversions,
+        conversionValue: ad.conversionValue,
+        reach: ad.reach,
+        ctr: ad.ctr,
+        requestKey: request.key,
+        connectionId: request.connectionId,
+        advertiserId: request.advertiserId,
+        externalId: ad.rawAdId,
+      });
+    });
+
+    if (report?.dataError) {
+      response.errors.push({
+        requestKey: request.key,
+        connectionId: request.connectionId,
+        advertiserId: request.advertiserId,
+        error: report.dataError,
+      });
+    }
+  });
+
+  return response;
+}
+
 async function fetchGa4LiveOverview(payload) {
   const dateRange = normalizeLiveDateRange(payload);
   const requests = Array.isArray(payload?.requests)
@@ -2652,6 +2977,24 @@ function normalizeMetaAdsLiveRequest(value) {
     connectionId,
     assetId: String(value?.assetId || "").trim(),
     adAccountId,
+    budgetHint: Math.max(0, toNumber(value?.budgetHint)),
+  };
+}
+
+function normalizeTikTokAdsLiveRequest(value) {
+  const connectionId = String(value?.connectionId || "").trim();
+  const advertiserId = sanitizeTikTokAdvertiserId(value?.advertiserId || value?.accountId || value?.externalId);
+
+  if (!connectionId || !advertiserId) {
+    return null;
+  }
+
+  return {
+    key: String(value?.key || `${connectionId}:${advertiserId}`).trim(),
+    clientId: String(value?.clientId || "").trim(),
+    connectionId,
+    assetId: String(value?.assetId || "").trim(),
+    advertiserId,
     budgetHint: Math.max(0, toNumber(value?.budgetHint)),
   };
 }
@@ -3891,6 +4234,436 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
   };
 }
 
+function getTikTokMetricValue(source, keys) {
+  for (const key of keys) {
+    if (source && source[key] != null && source[key] !== "") {
+      return toNumber(source[key]);
+    }
+  }
+
+  return 0;
+}
+
+async function fetchTikTokReportWithFallback({ accessToken, advertiserId, dataLevel, dimensionAttempts, dateRange, pageSize, label }) {
+  const metricAttempts = [
+    ["spend", "impressions", "clicks", "ctr", "cpc", "cpm", "conversions", "conversion_value"],
+    ["spend", "impressions", "clicks", "ctr", "cpc", "cpm", "conversion", "conversion_value"],
+    ["spend", "impressions", "clicks", "ctr", "cpc", "cpm", "conversions"],
+    ["spend", "impressions", "clicks", "ctr", "cpc", "cpm", "conversion"],
+    ["spend", "impressions", "clicks", "ctr", "cpc", "cpm"],
+  ];
+  let lastError = null;
+
+  for (const dimensions of dimensionAttempts) {
+    for (const metricNames of metricAttempts) {
+      try {
+        const report = await fetchTikTokIntegratedReport({
+          accessToken,
+          advertiserId,
+          dataLevel,
+          dimensions,
+          metricNames,
+          dateRange,
+          pageSize,
+          label,
+        });
+
+        return {
+          ...report,
+          dimensions,
+          metricNames,
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+  }
+
+  throw lastError || new Error(`${label} could not be fetched.`);
+}
+
+async function fetchTikTokIntegratedReport({ accessToken, advertiserId, dataLevel, dimensions, metricNames, dateRange, pageSize, label }) {
+  const rows = [];
+  let totalMetrics = {};
+  let page = 1;
+  let totalPages = 1;
+
+  while (page <= totalPages) {
+    const payload = await fetchTikTokBusinessJson(buildTikTokBusinessUrl("/open_api/v1.3/report/integrated/get/", {
+      advertiser_id: advertiserId,
+      service_type: "AUCTION",
+      report_type: "BASIC",
+      data_level: dataLevel,
+      dimensions: JSON.stringify(dimensions),
+      metrics: JSON.stringify(metricNames),
+      start_date: dateRange.startDate,
+      end_date: dateRange.endDate,
+      page,
+      page_size: pageSize,
+      enable_total_metrics: "true",
+      multi_adv_report_in_utc_time: "true",
+    }), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "Access-Token": accessToken,
+      },
+    }, `${label} page ${page}`);
+    const pageRows = getTikTokResponseRows(payload);
+
+    rows.push(...pageRows);
+    if (!Object.keys(totalMetrics).length) {
+      totalMetrics = getTikTokTotalMetrics(payload);
+    }
+
+    const pageInfo = getTikTokPageInfo(payload);
+    totalPages = Math.max(
+      1,
+      toNumber(pageInfo?.total_page)
+      || toNumber(pageInfo?.total_pages)
+      || toNumber(pageInfo?.page_total)
+      || toNumber(pageInfo?.total_page_number)
+      || 1,
+    );
+
+    if (!pageRows.length || page >= totalPages) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return {
+    rows,
+    totalMetrics,
+  };
+}
+
+function buildTikTokLiveCampaign(campaign) {
+  const spend = toNumber(campaign.spend);
+  const impressions = Math.round(toNumber(campaign.impressions));
+  const clicks = Math.round(toNumber(campaign.clicks));
+  const conversions = toNumber(campaign.conversions);
+  const conversionValue = toNumber(campaign.conversionValue);
+  const budget = toNumber(campaign.budget);
+  const reach = Math.round(toNumber(campaign.reach));
+
+  return {
+    rawCampaignId: campaign.rawCampaignId,
+    name: campaign.name || `Campaign ${campaign.rawCampaignId}`,
+    status: campaign.status || "active",
+    objective: campaign.objective || "TikTok Ads",
+    budget: +budget.toFixed(2),
+    spend: +spend.toFixed(2),
+    impressions,
+    clicks,
+    conversions: +conversions.toFixed(2),
+    conversionValue: +conversionValue.toFixed(2),
+    reach,
+    cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
+    cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
+  };
+}
+
+function normalizeTikTokCampaignReportRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => {
+      const rawCampaignId = sanitizeTikTokAdvertiserId(row?.campaign_id || row?.campaignId || row?.campaign);
+      if (!rawCampaignId) return null;
+
+      const spend = getTikTokMetricValue(row, ["spend", "stat_cost", "cost"]);
+      const impressions = getTikTokMetricValue(row, ["impressions", "show_cnt"]);
+      const clicks = getTikTokMetricValue(row, ["clicks", "click_cnt"]);
+      const conversions = getTikTokMetricValue(row, ["conversions", "conversion", "convert_cnt", "results"]);
+      const conversionValue = getTikTokMetricValue(row, ["conversion_value", "total_conversion_value", "stat_pay_amount"]);
+      const reach = getTikTokMetricValue(row, ["reach", "reach_cnt"]);
+
+      return buildTikTokLiveCampaign({
+        rawCampaignId,
+        name: String(row?.campaign_name || row?.campaignName || `Campaign ${rawCampaignId}`).trim() || `Campaign ${rawCampaignId}`,
+        status: "active",
+        objective: String(row?.objective_type || row?.objective || "TikTok Ads").trim() || "TikTok Ads",
+        budget: 0,
+        spend,
+        impressions,
+        clicks,
+        conversions,
+        conversionValue,
+        reach,
+      });
+    })
+    .filter((campaign) => campaign && (campaign.spend > 0 || campaign.impressions > 0 || campaign.clicks > 0 || campaign.conversions > 0))
+    .sort((left, right) => right.spend - left.spend || left.name.localeCompare(right.name));
+}
+
+function normalizeTikTokAdReportRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => {
+      const rawAdId = sanitizeTikTokAdvertiserId(row?.ad_id || row?.adId || row?.ad);
+      const rawCampaignId = sanitizeTikTokAdvertiserId(row?.campaign_id || row?.campaignId || row?.campaign);
+      if (!rawAdId || !rawCampaignId) return null;
+
+      const spend = getTikTokMetricValue(row, ["spend", "stat_cost", "cost"]);
+      const impressions = getTikTokMetricValue(row, ["impressions", "show_cnt"]);
+      const clicks = getTikTokMetricValue(row, ["clicks", "click_cnt"]);
+      const conversions = getTikTokMetricValue(row, ["conversions", "conversion", "convert_cnt", "results"]);
+      const conversionValue = getTikTokMetricValue(row, ["conversion_value", "total_conversion_value", "stat_pay_amount"]);
+      const reach = getTikTokMetricValue(row, ["reach", "reach_cnt"]);
+
+      return {
+        rawAdId,
+        rawCampaignId,
+        campaignName: String(row?.campaign_name || row?.campaignName || `Campaign ${rawCampaignId}`).trim() || `Campaign ${rawCampaignId}`,
+        name: String(row?.ad_name || row?.adName || `Ad ${rawAdId}`).trim() || `Ad ${rawAdId}`,
+        format: String(row?.ad_format || row?.placement_type || row?.ad_type || "TikTok ad").trim() || "TikTok ad",
+        status: "live",
+        spend: +spend.toFixed(2),
+        impressions: Math.round(impressions),
+        clicks: Math.round(clicks),
+        conversions: +conversions.toFixed(2),
+        conversionValue: +conversionValue.toFixed(2),
+        reach: Math.round(reach),
+        ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
+      };
+    })
+    .filter((ad) => ad && (ad.spend > 0 || ad.impressions > 0 || ad.clicks > 0 || ad.conversions > 0))
+    .sort((left, right) => right.spend - left.spend || left.name.localeCompare(right.name));
+}
+
+function normalizeTikTokDailySeriesRows(rows, dateRange) {
+  const byDate = new Map();
+
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const date = sanitizeIsoDate(row?.stat_time_day || row?.date || row?.stat_time_day_start || "");
+    if (!date) return;
+
+    const spend = getTikTokMetricValue(row, ["spend", "stat_cost", "cost"]);
+    const impressions = getTikTokMetricValue(row, ["impressions", "show_cnt"]);
+    const clicks = getTikTokMetricValue(row, ["clicks", "click_cnt"]);
+    const conversions = getTikTokMetricValue(row, ["conversions", "conversion", "convert_cnt", "results"]);
+    const conversionValue = getTikTokMetricValue(row, ["conversion_value", "total_conversion_value", "stat_pay_amount"]);
+
+    byDate.set(date, {
+      date,
+      label: formatDailySeriesLabel(date),
+      spend: +spend.toFixed(2),
+      impressions: Math.round(impressions),
+      clicks: Math.round(clicks),
+      conversions: +conversions.toFixed(2),
+      conversionValue: +conversionValue.toFixed(2),
+      cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
+      cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
+      ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
+      roas: spend ? +(conversionValue / spend).toFixed(2) : 0,
+      revenue: +conversionValue.toFixed(2),
+    });
+  });
+
+  const dates = buildDailySeriesDates(dateRange);
+  if (!dates.length) {
+    return Array.from(byDate.values()).sort((left, right) => String(left.date).localeCompare(String(right.date)));
+  }
+
+  return dates.map((date) => byDate.get(date) || {
+    date,
+    label: formatDailySeriesLabel(date),
+    spend: 0,
+    impressions: 0,
+    clicks: 0,
+    conversions: 0,
+    conversionValue: 0,
+    cpc: 0,
+    cpm: 0,
+    ctr: 0,
+    roas: 0,
+    revenue: 0,
+  });
+}
+
+function mapTikTokAccountStatus(spend, activeCampaigns) {
+  return spend > 0 || activeCampaigns > 0 ? "active" : "paused";
+}
+
+async function fetchTikTokAdsLiveAdvertiserReport({ context, advertiserId, dateRange }) {
+  if (!context?.connection) {
+    throw new Error("TikTok Ads connection context is missing.");
+  }
+
+  const { connection, tokenBundle } = context;
+  assertTikTokAdvertiserAccess(connection, advertiserId);
+
+  const accessToken = tokenBundle.accessToken;
+  const asset = connection.assets?.find((item) => sanitizeTikTokAdvertiserId(item.externalId) === advertiserId) || null;
+  const errors = [];
+  let advertiserInfo = null;
+  let advertiserSummary = null;
+  let campaignReport = null;
+  let adReport = null;
+  let dailyReport = null;
+
+  try {
+    const advertiserInfoPayload = await fetchTikTokBusinessJson(buildTikTokBusinessUrl("/open_api/v1.3/advertiser/info/", {
+      advertiser_ids: JSON.stringify([advertiserId]),
+    }), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "Access-Token": accessToken,
+      },
+    }, `TikTok advertiser info ${advertiserId}`);
+    advertiserInfo = getTikTokResponseRows(advertiserInfoPayload)[0] || null;
+  } catch (error) {
+    errors.push(error.message || `Could not fetch TikTok advertiser ${advertiserId}.`);
+  }
+
+  try {
+    advertiserSummary = await fetchTikTokReportWithFallback({
+      accessToken,
+      advertiserId,
+      dataLevel: "ADVERTISER",
+      dimensionAttempts: [["advertiser_id"]],
+      dateRange,
+      pageSize: 10,
+      label: `TikTok advertiser summary ${advertiserId}`,
+    });
+  } catch (error) {
+    errors.push(error.message || `Could not fetch TikTok advertiser summary for ${advertiserId}.`);
+  }
+
+  try {
+    campaignReport = await fetchTikTokReportWithFallback({
+      accessToken,
+      advertiserId,
+      dataLevel: "CAMPAIGN",
+      dimensionAttempts: [["campaign_id", "campaign_name"], ["campaign_id"]],
+      dateRange,
+      pageSize: TIKTOK_ADS_LIVE_CAMPAIGN_LIMIT,
+      label: `TikTok campaigns ${advertiserId}`,
+    });
+  } catch (error) {
+    errors.push(error.message || `Could not fetch TikTok campaigns for ${advertiserId}.`);
+  }
+
+  try {
+    adReport = await fetchTikTokReportWithFallback({
+      accessToken,
+      advertiserId,
+      dataLevel: "AD",
+      dimensionAttempts: [["campaign_id", "campaign_name", "ad_id", "ad_name"], ["campaign_id", "ad_id", "ad_name"], ["campaign_id", "ad_id"]],
+      dateRange,
+      pageSize: TIKTOK_ADS_LIVE_AD_LIMIT,
+      label: `TikTok ads ${advertiserId}`,
+    });
+  } catch (error) {
+    errors.push(error.message || `Could not fetch TikTok ads for ${advertiserId}.`);
+  }
+
+  try {
+    dailyReport = await fetchTikTokReportWithFallback({
+      accessToken,
+      advertiserId,
+      dataLevel: "ADVERTISER",
+      dimensionAttempts: [["stat_time_day"], ["date"]],
+      dateRange,
+      pageSize: 400,
+      label: `TikTok daily summary ${advertiserId}`,
+    });
+  } catch (error) {
+    errors.push(error.message || `Could not fetch TikTok daily trend for ${advertiserId}.`);
+  }
+
+  const ads = normalizeTikTokAdReportRows(adReport?.rows || []);
+  const campaignMap = new Map(
+    normalizeTikTokCampaignReportRows(campaignReport?.rows || [])
+      .map((campaign) => [campaign.rawCampaignId, campaign])
+  );
+  const adCampaignAggregates = ads.reduce((acc, ad) => {
+    const current = acc.get(ad.rawCampaignId) || {
+      rawCampaignId: ad.rawCampaignId,
+      name: ad.campaignName || `Campaign ${ad.rawCampaignId}`,
+      status: "active",
+      objective: "TikTok Ads",
+      budget: 0,
+      reach: 0,
+      spend: 0,
+      impressions: 0,
+      clicks: 0,
+      conversions: 0,
+      conversionValue: 0,
+    };
+
+    current.spend += ad.spend;
+    current.reach += ad.reach;
+    current.impressions += ad.impressions;
+    current.clicks += ad.clicks;
+    current.conversions += ad.conversions;
+    current.conversionValue += ad.conversionValue;
+    acc.set(ad.rawCampaignId, current);
+    return acc;
+  }, new Map());
+
+  adCampaignAggregates.forEach((campaign, campaignId) => {
+    if (!campaignMap.has(campaignId)) {
+      campaignMap.set(campaignId, buildTikTokLiveCampaign(campaign));
+    }
+  });
+
+  const campaigns = Array.from(campaignMap.values())
+    .map(buildTikTokLiveCampaign)
+    .sort((left, right) => right.spend - left.spend || left.name.localeCompare(right.name));
+  const summarySource = Object.keys(advertiserSummary?.totalMetrics || {}).length
+    ? advertiserSummary.totalMetrics
+    : advertiserSummary?.rows?.[0] || {};
+  const spend = Object.keys(summarySource).length
+    ? getTikTokMetricValue(summarySource, ["spend", "stat_cost", "cost"])
+    : campaigns.reduce((acc, campaign) => acc + campaign.spend, 0);
+  const impressions = Object.keys(summarySource).length
+    ? getTikTokMetricValue(summarySource, ["impressions", "show_cnt"])
+    : campaigns.reduce((acc, campaign) => acc + campaign.impressions, 0);
+  const clicks = Object.keys(summarySource).length
+    ? getTikTokMetricValue(summarySource, ["clicks", "click_cnt"])
+    : campaigns.reduce((acc, campaign) => acc + campaign.clicks, 0);
+  const conversions = Object.keys(summarySource).length
+    ? getTikTokMetricValue(summarySource, ["conversions", "conversion", "convert_cnt", "results"])
+    : campaigns.reduce((acc, campaign) => acc + campaign.conversions, 0);
+  const conversionValue = Object.keys(summarySource).length
+    ? getTikTokMetricValue(summarySource, ["conversion_value", "total_conversion_value", "stat_pay_amount"])
+    : campaigns.reduce((acc, campaign) => acc + campaign.conversionValue, 0);
+  const reach = Object.keys(summarySource).length
+    ? getTikTokMetricValue(summarySource, ["reach", "reach_cnt"])
+    : campaigns.reduce((acc, campaign) => acc + (campaign.reach || 0), 0);
+  const activeCampaigns = campaigns.filter((campaign) => campaign.status !== "stopped").length;
+  const dataStatus = errors.length ? (campaigns.length || ads.length || spend > 0 ? "partial" : "error") : "ready";
+  const dailySeries = normalizeTikTokDailySeriesRows(dailyReport?.rows || [], dateRange);
+
+  return {
+    advertiserId,
+    asset,
+    dataStatus,
+    dataError: errors.join(" | "),
+    account: {
+      name: advertiserInfo?.advertiser_name || advertiserInfo?.name || asset?.name || `TikTok Ads ${advertiserId}`,
+      status: mapTikTokAccountStatus(spend, activeCampaigns),
+      monthlyBudget: 0,
+      spend: +spend.toFixed(2),
+      reach: Math.round(reach),
+      impressions: Math.round(impressions),
+      clicks: Math.round(clicks),
+      conversions: +conversions.toFixed(2),
+      conversionValue: +conversionValue.toFixed(2),
+      ctr: impressions ? +(clicks / impressions * 100).toFixed(2) : 0,
+      cpc: clicks ? +(spend / clicks).toFixed(2) : 0,
+      cpm: impressions ? +(spend / impressions * 1000).toFixed(2) : 0,
+      roas: spend ? +(conversionValue / spend).toFixed(2) : 0,
+      currency: String(advertiserInfo?.currency || asset?.currency || "").trim(),
+      timezone: String(advertiserInfo?.timezone || advertiserInfo?.timezone_name || asset?.timezone || "").trim(),
+      series: dailySeries,
+    },
+    campaigns,
+    ads,
+  };
+}
+
 async function getGoogleAdsCatalogForCustomer({ connection, customerId, tokenBundle, loginCustomerIds, asset }) {
   const storedCatalog = connection.googleAdsCatalogs?.[customerId];
   if (storedCatalog?.campaigns?.length || storedCatalog?.adGroups?.length) {
@@ -4383,6 +5156,34 @@ async function getMetaAdsConnectionContext(connectionId) {
   };
 }
 
+async function getTikTokAdsConnectionContext(connectionId) {
+  const store = readStore();
+  const connection = store.connections.find((item) => item.id === connectionId);
+
+  if (!connection) {
+    throw new Error("Connection not found.");
+  }
+
+  if (connection.platform !== "tiktok_ads") {
+    throw new Error("This endpoint is only available for TikTok Ads connections.");
+  }
+
+  const refreshedTokens = await ensureProviderToken("tiktok_ads", connection, connection.tokens);
+  const tokenChanged = JSON.stringify(refreshedTokens || null) !== JSON.stringify(connection.tokens || null);
+  const hydratedConnection = tokenChanged
+    ? { ...connection, tokens: refreshedTokens, updatedAt: new Date().toISOString() }
+    : connection;
+
+  if (tokenChanged) {
+    upsertConnection(hydratedConnection);
+  }
+
+  return {
+    connection: hydratedConnection,
+    tokenBundle: refreshedTokens,
+  };
+}
+
 async function getGa4ConnectionContext(connectionId) {
   const store = readStore();
   const connection = store.connections.find((item) => item.id === connectionId);
@@ -4418,6 +5219,13 @@ function assertMetaAdAccountAccess(connection, adAccountId) {
   }
 }
 
+function assertTikTokAdvertiserAccess(connection, advertiserId) {
+  const allowedAdvertiserIds = new Set((connection.assets || []).map((asset) => sanitizeTikTokAdvertiserId(asset.externalId)).filter(Boolean));
+  if (allowedAdvertiserIds.size && !allowedAdvertiserIds.has(advertiserId)) {
+    throw new Error("This TikTok advertiser is not available under the selected connection.");
+  }
+}
+
 function assertGa4PropertyAccess(connection, propertyId) {
   const allowedPropertyIds = new Set((connection.assets || []).map((asset) => sanitizeGoogleAdsId(asset.externalId)).filter(Boolean));
   if (allowedPropertyIds.size && !allowedPropertyIds.has(propertyId)) {
@@ -4435,6 +5243,19 @@ function buildMetaGraphUrl(pathname, params = {}) {
   });
 
   return `https://graph.facebook.com/${META_API_VERSION}/${cleanPath}?${query.toString()}`;
+}
+
+function buildTikTokBusinessUrl(pathname, params = {}) {
+  const cleanPath = String(pathname || "").replace(/^\/+/, "");
+  const query = new URLSearchParams();
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value == null || value === "") return;
+    query.set(key, String(value));
+  });
+
+  const serialized = query.toString();
+  return `https://business-api.tiktok.com/${cleanPath}${serialized ? `?${serialized}` : ""}`;
 }
 
 async function fetchMetaGraphPages(initialUrl, label) {
@@ -4984,6 +5805,11 @@ function sanitizeMetaAdAccountId(value) {
   return normalized || "";
 }
 
+function sanitizeTikTokAdvertiserId(value) {
+  const normalized = String(value || "").replace(/\D/g, "");
+  return normalized || "";
+}
+
 function sanitizeSearchTermDateRange(value) {
   const normalized = String(value || "LAST_30_DAYS").trim().toUpperCase();
   return SEARCH_TERM_ALLOWED_DATE_RANGES.has(normalized) ? normalized : "LAST_30_DAYS";
@@ -4992,6 +5818,31 @@ function sanitizeSearchTermDateRange(value) {
 function toNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getTikTokResponseData(payload) {
+  return payload?.data && typeof payload.data === "object" ? payload.data : payload;
+}
+
+function getTikTokResponseRows(payload) {
+  const data = getTikTokResponseData(payload);
+
+  if (Array.isArray(data?.list)) return data.list;
+  if (Array.isArray(data?.stats_data)) return data.stats_data;
+  if (Array.isArray(data?.advertiser_ids)) return data.advertiser_ids.map((advertiserId) => ({ advertiser_id: advertiserId }));
+  if (Array.isArray(payload?.list)) return payload.list;
+  if (Array.isArray(payload?.stats_data)) return payload.stats_data;
+  return [];
+}
+
+function getTikTokPageInfo(payload) {
+  const data = getTikTokResponseData(payload);
+  return data?.page_info && typeof data.page_info === "object" ? data.page_info : {};
+}
+
+function getTikTokTotalMetrics(payload) {
+  const data = getTikTokResponseData(payload);
+  return data?.total_metrics && typeof data.total_metrics === "object" ? data.total_metrics : {};
 }
 
 async function fetchGoogleUser(accessToken) {
@@ -5024,11 +5875,23 @@ async function fetchJson(url, options = {}, label = "Request") {
   return payload;
 }
 
+async function fetchTikTokBusinessJson(url, options = {}, label = "TikTok request") {
+  const payload = await fetchJson(url, options, label);
+  const code = toNumber(payload?.code);
+
+  if (code && code !== 0) {
+    throw new Error(`${label} failed: ${formatRemoteError(payload)}`);
+  }
+
+  return payload;
+}
+
 function formatRemoteError(payload) {
   if (!payload) return "No response body.";
   if (typeof payload === "string") return payload;
   if (payload.error?.message) return payload.error.message;
   if (payload.error_description) return payload.error_description;
+  if (payload.code && payload.message) return `${payload.message} (code ${payload.code})`;
   if (payload.message) return payload.message;
   return JSON.stringify(payload);
 }
@@ -5145,6 +6008,8 @@ function getSetupStatus() {
       GOOGLE_ADS_DEVELOPER_TOKEN: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
       META_APP_ID: !!process.env.META_APP_ID,
       META_APP_SECRET: !!process.env.META_APP_SECRET,
+      TIKTOK_APP_ID: !!process.env.TIKTOK_APP_ID,
+      TIKTOK_APP_SECRET: !!process.env.TIKTOK_APP_SECRET,
       ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
     },
     masked: {
@@ -5153,6 +6018,8 @@ function getSetupStatus() {
       GOOGLE_ADS_DEVELOPER_TOKEN: mask(process.env.GOOGLE_ADS_DEVELOPER_TOKEN || ""),
       META_APP_ID: mask(process.env.META_APP_ID || ""),
       META_APP_SECRET: mask(process.env.META_APP_SECRET || ""),
+      TIKTOK_APP_ID: mask(process.env.TIKTOK_APP_ID || ""),
+      TIKTOK_APP_SECRET: mask(process.env.TIKTOK_APP_SECRET || ""),
       ANTHROPIC_API_KEY: mask(process.env.ANTHROPIC_API_KEY || ""),
       ANTHROPIC_STRATEGIST_MODEL: String(process.env.ANTHROPIC_STRATEGIST_MODEL || "").trim(),
     },
@@ -5169,6 +6036,7 @@ function getSetupStatus() {
 const ALLOWED_SETUP_KEYS = new Set([
   "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_ADS_DEVELOPER_TOKEN",
   "META_APP_ID", "META_APP_SECRET", "META_CONFIG_ID", "META_API_VERSION",
+  "TIKTOK_APP_ID", "TIKTOK_APP_SECRET",
   "ANTHROPIC_API_KEY", "ANTHROPIC_STRATEGIST_MODEL",
 ]);
 

@@ -11,6 +11,7 @@ import {
   fetchGoogleAdsReportDetails,
   fetchIntegrationSnapshot,
   fetchMetaAdsLiveOverview,
+  fetchTikTokAdsLiveOverview,
   fetchUsers,
   fetchSearchTermHierarchy,
   fetchSearchTermTags,
@@ -105,6 +106,7 @@ const CALENDAR = buildCalendarWindow();
 const PLATFORM_META = {
   google_ads: { label: "Google Ads", short: "G", color: "#4285F4", tint: "rgba(66, 133, 244, 0.10)" },
   meta_ads: { label: "Meta Ads", short: "M", color: "#1877F2", tint: "rgba(24, 119, 242, 0.10)" },
+  tiktok_ads: { label: "TikTok Ads", short: "TT", color: "#FF0050", tint: "rgba(255, 0, 80, 0.10)" },
   ga4: { label: "Google Analytics", short: "GA", color: "#F57C00", tint: "rgba(245, 124, 0, 0.10)" },
 };
 
@@ -292,6 +294,10 @@ const CONNECTION_GUIDE = {
   meta_ads: {
     title: "Login with Meta",
     body: "Grant Meta ad account and business permissions, then sync every accessible ad account from that user access.",
+  },
+  tiktok_ads: {
+    title: "Login with TikTok",
+    body: "Grant TikTok advertiser access and AdPulse will sync every accessible advertiser account from that login.",
   },
   ga4: {
     title: "Login with Google",
@@ -890,7 +896,7 @@ function describeBudgetPerformance(summary, targetMode) {
 
 function buildBudgetRecommendations(client) {
   const targetMode = getClientTargetMode(client.focus);
-  const connectedPlatforms = ["google_ads", "meta_ads"].filter((platform) => client.connections?.[platform] || (client.budgets?.[platform] || 0) > 0);
+  const connectedPlatforms = ["google_ads", "meta_ads", "tiktok_ads"].filter((platform) => client.connections?.[platform] || (client.budgets?.[platform] || 0) > 0);
   const summaries = connectedPlatforms.map((platform) => {
     const accounts = (client.accounts || []).filter((account) => account.platform === platform);
     const budget = Number(client.budgets?.[platform]) || accounts.reduce((acc, account) => acc + (Number(account.monthlyBudget) || 0), 0);
@@ -1064,7 +1070,7 @@ function summarizeAiCampaign(campaign) {
 }
 
 function buildAccountAiPayload(client, dateRangeLabel) {
-  const grouped = ["google_ads", "meta_ads"].map((platform) => {
+  const grouped = ["google_ads", "meta_ads", "tiktok_ads"].map((platform) => {
     const accounts = (client.accounts || []).filter((account) => account.platform === platform);
     const spend = accounts.reduce((acc, account) => acc + (Number(account.spend) || 0), 0);
     const clicks = accounts.reduce((acc, account) => acc + (Number(account.clicks) || 0), 0);
@@ -1345,6 +1351,7 @@ function getClientLogoText(name) {
 function defaultScopeForPlatform(platform) {
   if (platform === "google_ads") return "Manager account";
   if (platform === "meta_ads") return "Business Manager";
+  if (platform === "tiktok_ads") return "Advertiser access";
   return "Analytics portfolio";
 }
 
@@ -1352,6 +1359,7 @@ function getEmptyLinkedAssets() {
   return {
     google_ads: [],
     meta_ads: [],
+    tiktok_ads: [],
     ga4: [],
   };
 }
@@ -1367,7 +1375,7 @@ function getLinkedAssetExternalId(platform, value) {
     raw = parts.at(-1) || "";
   }
 
-  if (platform === "google_ads" || platform === "meta_ads" || platform === "ga4") {
+  if (platform === "google_ads" || platform === "meta_ads" || platform === "tiktok_ads" || platform === "ga4") {
     return sanitizeGoogleAdsId(raw);
   }
 
@@ -1416,6 +1424,18 @@ function createEmptyGoogleAdsReportState() {
 }
 
 function createEmptyMetaAdsLiveState() {
+  return {
+    loading: false,
+    error: "",
+    generatedAt: "",
+    accounts: [],
+    campaigns: [],
+    ads: [],
+    errors: [],
+  };
+}
+
+function createEmptyTikTokAdsLiveState() {
   return {
     loading: false,
     error: "",
@@ -1675,10 +1695,12 @@ function createLiveClientDraft(seed = Date.now()) {
     budgets: {
       google_ads: 0,
       meta_ads: 0,
+      tiktok_ads: 0,
     },
     connections: {
       google_ads: false,
       meta_ads: false,
+      tiktok_ads: false,
       ga4: false,
     },
     linkedProfiles: {},
@@ -1706,15 +1728,18 @@ function getClientEditorFingerprint(client) {
     budgets: {
       google_ads: Number(client?.budgets?.google_ads) || 0,
       meta_ads: Number(client?.budgets?.meta_ads) || 0,
+      tiktok_ads: Number(client?.budgets?.tiktok_ads) || 0,
     },
     connections: {
       google_ads: client?.connections?.google_ads === true,
       meta_ads: client?.connections?.meta_ads === true,
+      tiktok_ads: client?.connections?.tiktok_ads === true,
       ga4: client?.connections?.ga4 === true,
     },
     linkedAssets: {
       google_ads: [...(client?.linkedAssets?.google_ads || [])].sort(),
       meta_ads: [...(client?.linkedAssets?.meta_ads || [])].sort(),
+      tiktok_ads: [...(client?.linkedAssets?.tiktok_ads || [])].sort(),
       ga4: [...(client?.linkedAssets?.ga4 || [])].sort(),
     },
     assignedUserIds: [...(client?.assignedUserIds || [])].sort(),
@@ -2391,7 +2416,7 @@ function hydrateClients(value) {
 
 function evaluateHealth(client, accounts, campaigns, ga4) {
   const flags = [];
-  const connectedPlatforms = ["google_ads", "meta_ads"].filter((platform) => client.connections[platform]);
+  const connectedPlatforms = ["google_ads", "meta_ads", "tiktok_ads"].filter((platform) => client.connections[platform]);
   const totalBudget = connectedPlatforms.reduce((acc, platform) => acc + (client.budgets[platform] || 0), 0);
   const totalSpend = accounts.reduce((acc, account) => acc + account.spend, 0);
   const targetSpend = totalBudget * CALENDAR.spendProgress;
@@ -7627,7 +7652,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
       >
         <div>
           <div style={{ fontSize: 18, fontWeight: 800, fontFamily: T.heading }}>No live clients yet</div>
-          <div style={{ marginTop: 6, fontSize: 13, color: T.inkSoft }}>Demo clients have been removed. Create a client, then link synced Google, Meta or GA4 assets here.</div>
+          <div style={{ marginTop: 6, fontSize: 13, color: T.inkSoft }}>Demo clients have been removed. Create a client, then link synced Google, Meta, TikTok or GA4 assets here.</div>
         </div>
         {canEditCoreSettings ? <Button onClick={onCreateClient} tone="primary">Add client</Button> : null}
       </div>
@@ -7987,7 +8012,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
           >
             <div style={{ fontSize: 16, fontWeight: 800, fontFamily: T.heading }}>Channel budgets</div>
             <div style={{ display: "grid", gap: 12 }}>
-              {["google_ads", "meta_ads"].map((platform) => (
+              {["google_ads", "meta_ads", "tiktok_ads"].map((platform) => (
                 <div key={platform}>
                   <div style={{ marginBottom: 6, fontSize: 11, color: T.inkMute, textTransform: "uppercase", fontWeight: 800, letterSpacing: "0.08em" }}>
                     {PLATFORM_META[platform].label}
@@ -8001,7 +8026,7 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
                 </div>
               ))}
             </div>
-            <MetricTile label="Monthly total" value={formatCurrency((draft.budgets.google_ads || 0) + (draft.budgets.meta_ads || 0))} subValue="Used by the pace alert engine" />
+            <MetricTile label="Monthly total" value={formatCurrency((draft.budgets.google_ads || 0) + (draft.budgets.meta_ads || 0) + (draft.budgets.tiktok_ads || 0))} subValue="Used by the pace alert engine" />
           </div>
 
           <div
@@ -9223,6 +9248,8 @@ function SetupWizard({ onComplete }) {
     GOOGLE_ADS_DEVELOPER_TOKEN: "",
     META_APP_ID: "",
     META_APP_SECRET: "",
+    TIKTOK_APP_ID: "",
+    TIKTOK_APP_SECRET: "",
     ANTHROPIC_API_KEY: "",
     ANTHROPIC_STRATEGIST_MODEL: "",
   });
@@ -9264,6 +9291,8 @@ function SetupWizard({ onComplete }) {
           GOOGLE_ADS_DEVELOPER_TOKEN: "",
           META_APP_ID: "",
           META_APP_SECRET: "",
+          TIKTOK_APP_ID: "",
+          TIKTOK_APP_SECRET: "",
           ANTHROPIC_API_KEY: "",
           ANTHROPIC_STRATEGIST_MODEL: "",
         });
@@ -9304,7 +9333,7 @@ function SetupWizard({ onComplete }) {
   const steps = [
     { label: "Google Cloud", desc: "OAuth Client" },
     { label: "Google Ads", desc: "Dev Token" },
-    { label: "Meta", desc: "App ID + Secret" },
+    { label: "Meta / TikTok", desc: "App credentials" },
     { label: "Done", desc: "Ready" },
   ];
 
@@ -9455,6 +9484,24 @@ function SetupWizard({ onComplete }) {
               <input value={form.META_APP_SECRET} onChange={(e) => updateField("META_APP_SECRET", e.target.value)}
                 placeholder="abcdef123456..." style={iS} />
             </div>
+            <div style={{ padding: 14, borderRadius: 16, background: T.bgSoft, border: `1px solid ${T.line}`, display: "grid", gap: 12, marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: T.ink }}>TikTok Ads (optional)</div>
+                <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft, lineHeight: 1.5 }}>
+                  Save these only if you want TikTok advertiser logins in the Connections tab.
+                </div>
+              </div>
+              <div>
+                <label style={lS}>TikTok App ID</label>
+                <input value={form.TIKTOK_APP_ID} onChange={(e) => updateField("TIKTOK_APP_ID", e.target.value)}
+                  placeholder="1234567890123456789" style={iS} />
+              </div>
+              <div>
+                <label style={lS}>TikTok App Secret</label>
+                <input value={form.TIKTOK_APP_SECRET} onChange={(e) => updateField("TIKTOK_APP_SECRET", e.target.value)}
+                  placeholder="tiktok-secret..." style={iS} />
+              </div>
+            </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => setStep(1)} style={btnSecondary}>← Back</button>
               <button onClick={handleSave} disabled={saving}
@@ -9529,6 +9576,7 @@ export default function AdPulse() {
   const [googleAdsLiveState, setGoogleAdsLiveState] = useState(() => createEmptyGoogleAdsLiveState());
   const [googleAdsReportState, setGoogleAdsReportState] = useState(() => createEmptyGoogleAdsReportState());
   const [metaAdsLiveState, setMetaAdsLiveState] = useState(() => createEmptyMetaAdsLiveState());
+  const [tiktokAdsLiveState, setTikTokAdsLiveState] = useState(() => createEmptyTikTokAdsLiveState());
   const [ga4LiveState, setGa4LiveState] = useState(() => createEmptyGa4LiveState());
   const [integrationBusy, setIntegrationBusy] = useState({});
   const [currentUserId, setCurrentUserId] = useState(() => readStoredValue(STORAGE_KEYS.session, null));
@@ -9599,6 +9647,20 @@ export default function AdPulse() {
         ]))
     )
   ), [providerProfiles]);
+  const tiktokAdsAssetLookup = useMemo(() => (
+    new Map(
+      providerProfiles
+        .filter((profile) => profile.platform === "tiktok_ads")
+        .flatMap((profile) => (profile.assets || []).map((asset) => [
+          asset.id,
+          {
+            ...asset,
+            connectionId: profile.id,
+            connectionStatus: profile.status,
+          },
+        ]))
+    )
+  ), [providerProfiles]);
   const ga4AssetLookup = useMemo(() => (
     new Map(
       providerProfiles
@@ -9651,6 +9713,25 @@ export default function AdPulse() {
       }));
     })
   ), [accessibleClients, metaAdsAssetLookup]);
+  const tiktokAdsLiveRequests = useMemo(() => (
+    accessibleClients.flatMap((client) => {
+      const linkedAssets = (client.linkedAssets?.tiktok_ads || [])
+        .map((assetId) => tiktokAdsAssetLookup.get(assetId))
+        .filter((asset) => asset && sanitizeGoogleAdsId(asset.externalId));
+
+      if (!linkedAssets.length) return [];
+
+      const budgetHints = splitTotal(client.budgets.tiktok_ads || 0, linkedAssets.length, `${client.id}-tiktok-live-budget`);
+      return linkedAssets.map((asset, index) => ({
+        key: `${client.id}:${asset.id}`,
+        clientId: client.id,
+        connectionId: asset.connectionId,
+        assetId: asset.id,
+        advertiserId: sanitizeGoogleAdsId(asset.externalId),
+        budgetHint: budgetHints[index] || 0,
+      }));
+    })
+  ), [accessibleClients, tiktokAdsAssetLookup]);
   const ga4LiveRequests = useMemo(() => (
     accessibleClients.flatMap((client) => {
       const linkedAssets = (client.linkedAssets?.ga4 || [])
@@ -9968,6 +10049,53 @@ export default function AdPulse() {
   }, [accountsDateRangePayload, currentUser, metaAdsLiveRequests]);
 
   useEffect(() => {
+    if (!currentUser || !tiktokAdsLiveRequests.length) {
+      setTikTokAdsLiveState(createEmptyTikTokAdsLiveState());
+      return;
+    }
+
+    let cancelled = false;
+    setTikTokAdsLiveState((current) => ({
+      ...current,
+      loading: true,
+      error: "",
+    }));
+
+    fetchTikTokAdsLiveOverview({
+      ...accountsDateRangePayload,
+      requests: tiktokAdsLiveRequests,
+    })
+      .then((data) => {
+        if (cancelled) return;
+        setTikTokAdsLiveState({
+          loading: false,
+          error: "",
+          generatedAt: data?.generatedAt || "",
+          accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+          campaigns: Array.isArray(data?.campaigns) ? data.campaigns : [],
+          ads: Array.isArray(data?.ads) ? data.ads : [],
+          errors: Array.isArray(data?.errors) ? data.errors : [],
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setTikTokAdsLiveState({
+          loading: false,
+          error: error.message || "Could not load TikTok Ads live data.",
+          generatedAt: "",
+          accounts: [],
+          campaigns: [],
+          ads: [],
+          errors: [],
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accountsDateRangePayload, currentUser, tiktokAdsLiveRequests]);
+
+  useEffect(() => {
     if (!currentUser || !ga4LiveRequests.length) {
       setGa4LiveState(createEmptyGa4LiveState());
       return;
@@ -10089,22 +10217,29 @@ export default function AdPulse() {
       const liveMetaAccounts = metaAdsLiveState.accounts.filter((account) => account.clientId === client.id);
       const liveMetaCampaigns = metaAdsLiveState.campaigns.filter((campaign) => campaign.clientId === client.id);
       const liveMetaAds = metaAdsLiveState.ads.filter((ad) => ad.clientId === client.id);
+      const liveTikTokAccounts = tiktokAdsLiveState.accounts.filter((account) => account.clientId === client.id);
+      const liveTikTokCampaigns = tiktokAdsLiveState.campaigns.filter((campaign) => campaign.clientId === client.id);
+      const liveTikTokAds = tiktokAdsLiveState.ads.filter((ad) => ad.clientId === client.id);
       const liveGa4Reports = ga4LiveState.properties.filter((property) => property.clientId === client.id);
       const linkedAssetCounts = {
         google_ads: Array.isArray(client.linkedAssets?.google_ads) ? client.linkedAssets.google_ads.length : 0,
         meta_ads: Array.isArray(client.linkedAssets?.meta_ads) ? client.linkedAssets.meta_ads.length : 0,
+        tiktok_ads: Array.isArray(client.linkedAssets?.tiktok_ads) ? client.linkedAssets.tiktok_ads.length : 0,
         ga4: Array.isArray(client.linkedAssets?.ga4) ? client.linkedAssets.ga4.length : 0,
       };
       const hasLinkedGoogleAssets = linkedAssetCounts.google_ads > 0;
       const hasLinkedMetaAssets = linkedAssetCounts.meta_ads > 0;
+      const hasLinkedTikTokAssets = linkedAssetCounts.tiktok_ads > 0;
       const hasLinkedGa4Assets = linkedAssetCounts.ga4 > 0;
-      const hasStoredLinkedAssets = hasLinkedGoogleAssets || hasLinkedMetaAssets || hasLinkedGa4Assets;
+      const hasStoredLinkedAssets = hasLinkedGoogleAssets || hasLinkedMetaAssets || hasLinkedTikTokAssets || hasLinkedGa4Assets;
       const useLiveGoogle = hasLinkedGoogleAssets;
       const useLiveMeta = hasLinkedMetaAssets;
+      const useLiveTikTok = hasLinkedTikTokAssets;
       const useLiveGa4 = hasLinkedGa4Assets;
       const syncingPlatforms = [
         hasLinkedGoogleAssets && googleAdsLiveState.loading ? "google_ads" : "",
         hasLinkedMetaAssets && metaAdsLiveState.loading ? "meta_ads" : "",
+        hasLinkedTikTokAssets && tiktokAdsLiveState.loading ? "tiktok_ads" : "",
         hasLinkedGa4Assets && ga4LiveState.loading ? "ga4" : "",
       ].filter(Boolean);
 
@@ -10112,23 +10247,27 @@ export default function AdPulse() {
       const effectiveConnections = {
         google_ads: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedGoogleAssets : client.connections.google_ads,
         meta_ads: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedMetaAssets : client.connections.meta_ads,
+        tiktok_ads: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedTikTokAssets : client.connections.tiktok_ads,
         ga4: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedGa4Assets : client.connections.ga4,
       };
 
       const visibleAccounts = [
-        ...ACCOUNTS_BASE.filter((account) => account.clientId === client.id && effectiveConnections[account.platform] && (!useLiveGoogle || account.platform !== "google_ads") && (!useLiveMeta || account.platform !== "meta_ads")),
+        ...ACCOUNTS_BASE.filter((account) => account.clientId === client.id && effectiveConnections[account.platform] && (!useLiveGoogle || account.platform !== "google_ads") && (!useLiveMeta || account.platform !== "meta_ads") && (!useLiveTikTok || account.platform !== "tiktok_ads")),
         ...(useLiveGoogle ? liveGoogleAccounts : []),
         ...(useLiveMeta ? liveMetaAccounts : []),
+        ...(useLiveTikTok ? liveTikTokAccounts : []),
       ];
       const visibleCampaigns = [
-        ...CAMPAIGNS_BASE.filter((campaign) => campaign.clientId === client.id && effectiveConnections[campaign.platform] && (!useLiveGoogle || campaign.platform !== "google_ads") && (!useLiveMeta || campaign.platform !== "meta_ads")),
+        ...CAMPAIGNS_BASE.filter((campaign) => campaign.clientId === client.id && effectiveConnections[campaign.platform] && (!useLiveGoogle || campaign.platform !== "google_ads") && (!useLiveMeta || campaign.platform !== "meta_ads") && (!useLiveTikTok || campaign.platform !== "tiktok_ads")),
         ...(useLiveGoogle ? liveGoogleCampaigns : []),
         ...(useLiveMeta ? liveMetaCampaigns : []),
+        ...(useLiveTikTok ? liveTikTokCampaigns : []),
       ];
       const visibleAds = [
-        ...ADS_BASE.filter((ad) => ad.clientId === client.id && effectiveConnections[ad.platform] && (!useLiveGoogle || ad.platform !== "google_ads") && (!useLiveMeta || ad.platform !== "meta_ads")),
+        ...ADS_BASE.filter((ad) => ad.clientId === client.id && effectiveConnections[ad.platform] && (!useLiveGoogle || ad.platform !== "google_ads") && (!useLiveMeta || ad.platform !== "meta_ads") && (!useLiveTikTok || ad.platform !== "tiktok_ads")),
         ...(useLiveGoogle ? liveGoogleAds : []),
         ...(useLiveMeta ? liveMetaAds : []),
+        ...(useLiveTikTok ? liveTikTokAds : []),
       ];
       const ga4 = effectiveConnections.ga4
         ? useLiveGa4 ? buildLiveGa4Summary(client, liveGa4Reports, ga4LiveState) : GA4_BASE[client.id]
@@ -10140,12 +10279,13 @@ export default function AdPulse() {
       const conversionValue = visibleAccounts.reduce((acc, account) => acc + getConversionValue(account), 0);
       const googleBudget = effectiveConnections.google_ads ? client.budgets.google_ads : 0;
       const metaBudget = effectiveConnections.meta_ads ? client.budgets.meta_ads : 0;
-      const totalBudget = googleBudget + metaBudget;
+      const tiktokBudget = effectiveConnections.tiktok_ads ? client.budgets.tiktok_ads : 0;
+      const totalBudget = googleBudget + metaBudget + tiktokBudget;
       const roas = spend ? conversionValue / spend : 0;
       const activeCampaigns = visibleCampaigns.filter((campaign) => !isStoppedCampaign(campaign)).length;
       const stoppedCampaigns = visibleCampaigns.filter((campaign) => isStoppedCampaign(campaign)).length;
       const liveAds = visibleAds.filter((ad) => ad.status === "live" || ad.status === "learning").length;
-      const shouldPauseHealthChecks = (effectiveConnections.google_ads || effectiveConnections.meta_ads) && visibleAccounts.length === 0;
+      const shouldPauseHealthChecks = (effectiveConnections.google_ads || effectiveConnections.meta_ads || effectiveConnections.tiktok_ads) && visibleAccounts.length === 0;
       const health = shouldPauseHealthChecks
         ? { ok: true, flags: [], score: 0 }
         : evaluateHealth({
@@ -10154,6 +10294,7 @@ export default function AdPulse() {
             ...client.budgets,
             google_ads: googleBudget,
             meta_ads: metaBudget,
+            tiktok_ads: tiktokBudget,
           },
         }, visibleAccounts, visibleCampaigns, ga4);
 
@@ -10182,10 +10323,10 @@ export default function AdPulse() {
         health,
       };
     });
-  }, [accessibleClients, ga4LiveState, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.loading, metaAdsLiveState.accounts, metaAdsLiveState.ads, metaAdsLiveState.campaigns, metaAdsLiveState.loading, providerProfiles]);
+  }, [accessibleClients, ga4LiveState, googleAdsLiveState.accounts, googleAdsLiveState.ads, googleAdsLiveState.campaigns, googleAdsLiveState.loading, metaAdsLiveState.accounts, metaAdsLiveState.ads, metaAdsLiveState.campaigns, metaAdsLiveState.loading, providerProfiles, tiktokAdsLiveState.accounts, tiktokAdsLiveState.ads, tiktokAdsLiveState.campaigns, tiktokAdsLiveState.loading]);
 
   useEffect(() => {
-    if (googleAdsLiveState.loading || metaAdsLiveState.loading) return;
+    if (googleAdsLiveState.loading || metaAdsLiveState.loading || tiktokAdsLiveState.loading) return;
     if (!enriched.length) return;
 
     const now = new Date().toISOString();
@@ -10261,7 +10402,7 @@ export default function AdPulse() {
         // Status memory is a convenience layer; do not interrupt the dashboard if it cannot sync.
       });
     });
-  }, [clients, enriched, googleAdsLiveState.loading, metaAdsLiveState.loading]);
+  }, [clients, enriched, googleAdsLiveState.loading, metaAdsLiveState.loading, tiktokAdsLiveState.loading]);
 
   const filteredClients = useMemo(() => {
     let list = enriched;

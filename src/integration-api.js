@@ -157,6 +157,14 @@ export function fetchMetaAdsLiveOverview(payload) {
   });
 }
 
+export function fetchTikTokAdsLiveOverview(payload) {
+  return request("/tiktok-ads/live-overview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchGa4LiveOverview(payload) {
   return request("/ga4/live-overview", {
     method: "POST",
