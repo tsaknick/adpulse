@@ -184,7 +184,7 @@ const REPORT_SECTION_OPTIONS = [
   { id: "google_keywords", label: "Google keyword table", description: "Top keyword performance rows." },
   { id: "meta_overview", label: "Meta overview", description: "Meta KPIs, click trend and top campaign spend." },
   { id: "meta_campaigns", label: "Meta campaign table", description: "Top Meta campaign rows." },
-  { id: "meta_ads", label: "Meta ads table", description: "Meta ad-level performance rows." },
+  { id: "meta_ads", label: "Meta ad previews", description: "Meta ad-level performance with creative preview cards." },
   { id: "analytics", label: "GA4 analytics", description: "Live GA4 sessions, engagement, revenue/leads and traffic mix." },
   { id: "definitions", label: "Metric definitions", description: "Plain-English KPI definitions for the client." },
 ];
@@ -6152,9 +6152,50 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
       </html>
     `);
     printWindow.document.close();
+
+    const waitForImages = () => new Promise((resolve) => {
+      const images = Array.from(printWindow.document.images || []).filter((image) => image.currentSrc || image.src);
+      if (!images.length) {
+        resolve();
+        return;
+      }
+
+      let remaining = images.length;
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        resolve();
+      };
+      const markDone = () => {
+        remaining -= 1;
+        if (remaining <= 0) finish();
+      };
+
+      const timeoutId = printWindow.setTimeout(finish, 3200);
+      images.forEach((image) => {
+        if (image.complete) {
+          markDone();
+          return;
+        }
+
+        image.addEventListener("load", markDone, { once: true });
+        image.addEventListener("error", markDone, { once: true });
+      });
+
+      Promise.resolve().then(() => {
+        if (remaining <= 0) {
+          printWindow.clearTimeout(timeoutId);
+          finish();
+        }
+      });
+    });
+
     printWindow.focus();
     printWindow.setTimeout(() => {
-      printWindow.print();
+      waitForImages().finally(() => {
+        printWindow.print();
+      });
     }, 350);
   }
 
@@ -7053,24 +7094,129 @@ function ReportGoogleKeywordPage({ details, loading }) {
   );
 }
 
-function ReportAdsTablePage({ ads }) {
-  const columns = [
-    { label: "Ad name", render: (row) => row.name },
-    { label: "Impressions", align: "right", render: (row) => formatReportNumber(row.impressions) },
-    { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
-    { label: "Reach", align: "right", render: (row) => formatReportNumber(row.reach) },
-    { label: "Purchases", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
-    { label: "Cost / Purchase", align: "right", render: (row) => formatReportCurrency(row.conversions ? row.spend / row.conversions : 0) },
-    { label: "Purchase Value", align: "right", render: (row) => formatReportCurrency(row.conversionValue || 0) },
-    { label: "ROAS", align: "right", render: (row) => formatMetric("roas", row.spend ? (row.conversionValue || 0) / row.spend : 0) },
-    { label: "Spend", align: "right", render: (row) => formatReportCurrency(row.spend) },
-  ];
+function chunkReportItems(items, size) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length || size <= 0) return [];
+
+  const chunks = [];
+  for (let index = 0; index < rows.length; index += size) {
+    chunks.push(rows.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function formatMetaPreviewCta(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "Shop now";
+
+  return normalized
+    .toLowerCase()
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function ReportMetaAdPreviewCard({ ad }) {
+  const roas = ad.spend ? (Number(ad.conversionValue) || 0) / ad.spend : 0;
+  const costPerPurchase = ad.conversions ? ad.spend / ad.conversions : 0;
 
   return (
-    <ReportPage accent={PLATFORM_META.meta_ads.color}>
-      <ReportHeader title="Ads Performance" platform="meta_ads" />
-      <ReportTable columns={columns} rows={ads.slice(0, 14)} emptyLabel="No Meta ad-level rows were found for this client." />
-    </ReportPage>
+    <div style={{ padding: 18, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: 14, alignContent: "start" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+        <div style={{ fontSize: 15, fontWeight: 900, color: T.ink, lineHeight: 1.25 }}>{ad.name}</div>
+        <ToneBadge tone={ad.status === "paused" ? "neutral" : ad.status === "learning" ? "warning" : "positive"}>{ad.status}</ToneBadge>
+      </div>
+
+      <div style={{ borderRadius: 20, overflow: "hidden", background: T.bgSoft, border: `1px solid ${T.line}`, minHeight: 340, display: "grid", placeItems: "center" }}>
+        {ad.previewImageUrl ? (
+          <img
+            src={ad.previewImageUrl}
+            alt={ad.name}
+            loading="eager"
+            referrerPolicy="no-referrer"
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        ) : (
+          <div style={{ padding: 24, textAlign: "center", color: T.inkSoft, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>Preview unavailable</div>
+            <div style={{ marginTop: 6, fontSize: 12 }}>Meta did not return a creative image for this ad, but its performance metrics are included below.</div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <ToneBadge tone="neutral">{ad.format || "Ad"}</ToneBadge>
+          {ad.previewCallToAction ? <ToneBadge tone="positive">{formatMetaPreviewCta(ad.previewCallToAction)}</ToneBadge> : null}
+        </div>
+        {ad.previewBody ? <div style={{ fontSize: 12, color: T.ink, lineHeight: 1.55 }}>{ad.previewBody}</div> : null}
+        {ad.previewHeadline ? <div style={{ fontSize: 18, fontWeight: 900, fontFamily: T.heading, color: T.ink, letterSpacing: "-0.04em", lineHeight: 1.08 }}>{ad.previewHeadline}</div> : null}
+        {ad.previewCaption ? <div style={{ fontSize: 11, color: T.inkSoft }}>{ad.previewCaption}</div> : null}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 }}>
+        <ReportKpiTile label="Purchases" value={formatReportNumber(ad.conversions, 2)} />
+        <ReportKpiTile label="Cost / Purchase" value={formatReportCurrency(costPerPurchase)} />
+        <ReportKpiTile label="Purchase Value" value={formatReportCurrency(ad.conversionValue || 0)} />
+        <ReportKpiTile label="ROAS" value={formatMetric("roas", roas)} />
+        <ReportKpiTile label="Spend" value={formatReportCurrency(ad.spend)} />
+        <ReportKpiTile label="CTR (%)" value={formatReportPercent(ad.ctr)} />
+      </div>
+    </div>
+  );
+}
+
+function ReportAdsTablePage({ ads }) {
+  const rows = ads.slice(0, 10);
+  const hasCreativePreview = rows.some((row) => row.previewImageUrl);
+  const pages = chunkReportItems(rows, 2);
+
+  if (!rows.length) {
+    return (
+      <ReportPage accent={PLATFORM_META.meta_ads.color}>
+        <ReportHeader title="Ads Performance" platform="meta_ads" />
+        <div style={{ padding: 24, borderRadius: 24, background: "#fff", border: `1px solid ${T.line}`, color: T.inkSoft }}>
+          No Meta ad-level rows were found for this client.
+        </div>
+      </ReportPage>
+    );
+  }
+
+  if (!hasCreativePreview) {
+    const columns = [
+      { label: "Ad name", render: (row) => row.name },
+      { label: "Impressions", align: "right", render: (row) => formatReportNumber(row.impressions) },
+      { label: "Clicks", align: "right", render: (row) => formatReportNumber(row.clicks) },
+      { label: "Reach", align: "right", render: (row) => formatReportNumber(row.reach) },
+      { label: "Purchases", align: "right", render: (row) => formatReportNumber(row.conversions, 2) },
+      { label: "Cost / Purchase", align: "right", render: (row) => formatReportCurrency(row.conversions ? row.spend / row.conversions : 0) },
+      { label: "Purchase Value", align: "right", render: (row) => formatReportCurrency(row.conversionValue || 0) },
+      { label: "ROAS", align: "right", render: (row) => formatMetric("roas", row.spend ? (row.conversionValue || 0) / row.spend : 0) },
+      { label: "Spend", align: "right", render: (row) => formatReportCurrency(row.spend) },
+    ];
+
+    return (
+      <ReportPage accent={PLATFORM_META.meta_ads.color}>
+        <ReportHeader title="Ads Performance" platform="meta_ads" />
+        <ReportTable columns={columns} rows={rows} emptyLabel="No Meta ad-level rows were found for this client." />
+      </ReportPage>
+    );
+  }
+
+  return (
+    <>
+      {pages.map((pageAds, index) => (
+        <ReportPage key={`meta-ad-preview-page-${index}`} accent={PLATFORM_META.meta_ads.color}>
+          <ReportHeader title={index === 0 ? "Ads Performance" : "Ads Performance (cont.)"} platform="meta_ads" />
+          <div style={{ display: "grid", gridTemplateColumns: pageAds.length === 1 ? "1fr" : "1fr 1fr", gap: 18 }}>
+            {pageAds.map((ad) => (
+              <ReportMetaAdPreviewCard key={ad.id} ad={ad} />
+            ))}
+          </div>
+        </ReportPage>
+      ))}
+    </>
   );
 }
 

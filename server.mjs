@@ -2606,6 +2606,11 @@ async function fetchMetaAdsLiveOverview(payload) {
         conversionValue: ad.conversionValue,
         reach: ad.reach,
         ctr: ad.ctr,
+        previewImageUrl: ad.previewImageUrl || "",
+        previewHeadline: ad.previewHeadline || "",
+        previewBody: ad.previewBody || "",
+        previewCaption: ad.previewCaption || "",
+        previewCallToAction: ad.previewCallToAction || "",
         requestKey: request.key,
         connectionId: request.connectionId,
         adAccountId: request.adAccountId,
@@ -2624,6 +2629,29 @@ async function fetchMetaAdsLiveOverview(payload) {
   });
 
   return response;
+}
+
+async function fetchMetaAdRowsWithCreativePreview({ actId, accessToken, adAccountId }) {
+  const fieldAttempts = [
+    "id,name,status,effective_status,creative{object_type,image_url,thumbnail_url,object_story_spec,asset_feed_spec,title,body},campaign{id,name}",
+    "id,name,status,effective_status,creative{object_type,image_url,thumbnail_url,object_story_spec,title,body},campaign{id,name}",
+    "id,name,status,effective_status,creative{object_type},campaign{id,name}",
+  ];
+  let lastError = null;
+
+  for (const fields of fieldAttempts) {
+    try {
+      return await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/ads`, {
+        fields,
+        limit: String(META_ADS_LIVE_AD_LIMIT),
+        access_token: accessToken,
+      }), `Meta ads ${adAccountId}`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error(`Could not fetch Meta ads for ${adAccountId}.`);
 }
 
 async function fetchTikTokAdsLiveOverview(payload) {
@@ -4094,11 +4122,11 @@ async function fetchMetaAdsLiveAccountReport({ context, adAccountId, dateRange }
   }
 
   try {
-    adRows = await fetchMetaGraphPages(buildMetaGraphUrl(`${actId}/ads`, {
-      fields: "id,name,status,effective_status,creative{object_type},campaign{id,name}",
-      limit: String(META_ADS_LIVE_AD_LIMIT),
-      access_token: accessToken,
-    }), `Meta ads ${adAccountId}`);
+    adRows = await fetchMetaAdRowsWithCreativePreview({
+      actId,
+      accessToken,
+      adAccountId,
+    });
   } catch (error) {
     errors.push(error.message || `Could not fetch Meta ads for ${adAccountId}.`);
   }
@@ -5370,13 +5398,20 @@ function normalizeMetaAdRow(row) {
   const rawAdId = String(row?.id || "").trim();
   if (!rawAdId) return null;
 
+  const creative = row.creative && typeof row.creative === "object" ? row.creative : {};
+
   return {
     rawAdId,
     name: row.name || `Ad ${rawAdId}`,
     status: mapMetaAdStatus(row.effective_status || row.status),
-    format: describeMetaCreativeFormat(row.creative?.object_type),
+    format: describeMetaCreativeFormat(creative.object_type),
     rawCampaignId: String(row.campaign?.id || "").trim(),
     campaignName: row.campaign?.name || "",
+    previewImageUrl: pickMetaCreativePreviewImage(creative),
+    previewHeadline: pickMetaCreativeHeadline(creative),
+    previewBody: pickMetaCreativeBody(creative),
+    previewCaption: pickMetaCreativeCaption(creative),
+    previewCallToAction: pickMetaCreativeCallToAction(creative),
   };
 }
 
@@ -5400,6 +5435,11 @@ function normalizeMetaAdInsightRow(row, adStatusMap) {
     name: row.ad_name || statusRecord.name || `Ad ${rawAdId}`,
     format: statusRecord.format || "Ad",
     status: statusRecord.status || "live",
+    previewImageUrl: statusRecord.previewImageUrl || "",
+    previewHeadline: statusRecord.previewHeadline || "",
+    previewBody: statusRecord.previewBody || "",
+    previewCaption: statusRecord.previewCaption || "",
+    previewCallToAction: statusRecord.previewCallToAction || "",
     spend: +spend.toFixed(2),
     reach,
     impressions,
@@ -5526,6 +5566,130 @@ function describeMetaCreativeFormat(objectType) {
   if (normalized.includes("PHOTO") || normalized.includes("IMAGE")) return "Static";
   if (normalized.includes("SHARE")) return "Post";
   return "Ad";
+}
+
+function pickMetaCreativePreviewImage(creative) {
+  const objectStorySpec = creative?.object_story_spec && typeof creative.object_story_spec === "object"
+    ? creative.object_story_spec
+    : {};
+  const assetFeedSpec = creative?.asset_feed_spec && typeof creative.asset_feed_spec === "object"
+    ? creative.asset_feed_spec
+    : {};
+  const linkData = objectStorySpec.link_data && typeof objectStorySpec.link_data === "object"
+    ? objectStorySpec.link_data
+    : {};
+  const photoData = objectStorySpec.photo_data && typeof objectStorySpec.photo_data === "object"
+    ? objectStorySpec.photo_data
+    : {};
+  const videoData = objectStorySpec.video_data && typeof objectStorySpec.video_data === "object"
+    ? objectStorySpec.video_data
+    : {};
+  const templateData = objectStorySpec.template_data && typeof objectStorySpec.template_data === "object"
+    ? objectStorySpec.template_data
+    : {};
+  const carouselChildren = Array.isArray(linkData.child_attachments) ? linkData.child_attachments : [];
+  const assetImages = Array.isArray(assetFeedSpec.images) ? assetFeedSpec.images : [];
+  const photoImages = Array.isArray(photoData.images) ? photoData.images : [];
+
+  const candidates = [
+    creative?.image_url,
+    creative?.thumbnail_url,
+    linkData.picture,
+    photoData.image_url,
+    photoImages[0]?.url,
+    videoData.image_url,
+    videoData.thumbnail_url,
+    templateData.picture,
+    carouselChildren[0]?.picture,
+    assetImages[0]?.url,
+  ];
+
+  return candidates
+    .map((value) => String(value || "").trim())
+    .find(Boolean) || "";
+}
+
+function pickMetaCreativeHeadline(creative) {
+  const objectStorySpec = creative?.object_story_spec && typeof creative.object_story_spec === "object"
+    ? creative.object_story_spec
+    : {};
+  const linkData = objectStorySpec.link_data && typeof objectStorySpec.link_data === "object"
+    ? objectStorySpec.link_data
+    : {};
+  const videoData = objectStorySpec.video_data && typeof objectStorySpec.video_data === "object"
+    ? objectStorySpec.video_data
+    : {};
+  const templateData = objectStorySpec.template_data && typeof objectStorySpec.template_data === "object"
+    ? objectStorySpec.template_data
+    : {};
+
+  return [
+    linkData.name,
+    templateData.name,
+    videoData.title,
+    creative?.title,
+  ].map((value) => String(value || "").trim()).find(Boolean) || "";
+}
+
+function pickMetaCreativeBody(creative) {
+  const objectStorySpec = creative?.object_story_spec && typeof creative.object_story_spec === "object"
+    ? creative.object_story_spec
+    : {};
+  const linkData = objectStorySpec.link_data && typeof objectStorySpec.link_data === "object"
+    ? objectStorySpec.link_data
+    : {};
+  const videoData = objectStorySpec.video_data && typeof objectStorySpec.video_data === "object"
+    ? objectStorySpec.video_data
+    : {};
+  const templateData = objectStorySpec.template_data && typeof objectStorySpec.template_data === "object"
+    ? objectStorySpec.template_data
+    : {};
+
+  return [
+    linkData.message,
+    templateData.message,
+    videoData.message,
+    creative?.body,
+  ].map((value) => String(value || "").trim()).find(Boolean) || "";
+}
+
+function pickMetaCreativeCaption(creative) {
+  const objectStorySpec = creative?.object_story_spec && typeof creative.object_story_spec === "object"
+    ? creative.object_story_spec
+    : {};
+  const linkData = objectStorySpec.link_data && typeof objectStorySpec.link_data === "object"
+    ? objectStorySpec.link_data
+    : {};
+  const templateData = objectStorySpec.template_data && typeof objectStorySpec.template_data === "object"
+    ? objectStorySpec.template_data
+    : {};
+
+  return [
+    linkData.caption,
+    templateData.caption,
+    linkData.link,
+  ].map((value) => String(value || "").trim()).find(Boolean) || "";
+}
+
+function pickMetaCreativeCallToAction(creative) {
+  const objectStorySpec = creative?.object_story_spec && typeof creative.object_story_spec === "object"
+    ? creative.object_story_spec
+    : {};
+  const linkData = objectStorySpec.link_data && typeof objectStorySpec.link_data === "object"
+    ? objectStorySpec.link_data
+    : {};
+  const videoData = objectStorySpec.video_data && typeof objectStorySpec.video_data === "object"
+    ? objectStorySpec.video_data
+    : {};
+  const templateData = objectStorySpec.template_data && typeof objectStorySpec.template_data === "object"
+    ? objectStorySpec.template_data
+    : {};
+
+  return [
+    linkData.call_to_action?.type,
+    templateData.call_to_action?.type,
+    videoData.call_to_action?.type,
+  ].map((value) => String(value || "").trim()).find(Boolean) || "";
 }
 
 function normalizeMetaBudgetAmount(value, currency = "") {
