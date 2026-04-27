@@ -3905,6 +3905,72 @@ function groupClientsByReportingGroup(clients) {
     .sort((left, right) => left.label.localeCompare(right.label));
 }
 
+function getOverviewClientKpis(client, { compactLabels = false } = {}) {
+  const normalizedTarget = normalizeClientTarget(client?.focus);
+  const normalizedLower = normalizedTarget.toLowerCase();
+  const targetMode = normalizedLower === "leads" ? "traffic" : getClientTargetMode(normalizedTarget);
+  const budgetLabel = compactLabels ? "Budget" : "Monthly Budget";
+  const spendLabel = compactLabels ? "Spend" : "Spend MTD";
+  const spend = Number(client?.spend) || 0;
+  const impressions = Number(client?.impressions) || 0;
+  const clicks = Number(client?.clicks) || 0;
+  const conversions = Number(client?.conversions) || 0;
+  const conversionValue = Number(client?.conversionValue) || 0;
+  const ga4Revenue = Number(client?.ga4?.revenueCurrentPeriod) || 0;
+  const ctr = Number(client?.ctr) || 0;
+  const cpc = Number(client?.cpc) || 0;
+  const roas = Number(client?.roas) || 0;
+  const cpm = impressions > 0 ? spend / impressions * 1000 : 0;
+  const costPerConversion = conversions > 0 ? spend / conversions : 0;
+  const base = [
+    { label: budgetLabel, value: formatCurrency(client?.totalBudget || 0) },
+    { label: spendLabel, value: formatCurrency(spend) },
+  ];
+
+  if (targetMode === "awareness") {
+    return [
+      ...base,
+      { label: "Impressions", value: formatNumber(impressions) },
+      { label: "CPM", value: formatMetric("cpm", cpm) },
+      { label: "CTR", value: formatPercent(ctr) },
+    ];
+  }
+
+  if (targetMode === "traffic") {
+    return [
+      ...base,
+      { label: "Clicks", value: formatNumber(clicks) },
+      { label: "CPC", value: formatMetric("cpc", cpc) },
+      { label: "CTR", value: formatPercent(ctr) },
+    ];
+  }
+
+  if (targetMode === "revenue") {
+    const valueLabel = ga4Revenue > 0 ? "Revenue" : "Conv. Value";
+    const valueAmount = ga4Revenue > 0 ? ga4Revenue : conversionValue;
+
+    return [
+      ...base,
+      { label: valueLabel, value: formatCurrency(valueAmount) },
+      { label: "ROAS", value: formatMetric("roas", roas), accent: roas >= 3 ? T.accent : T.coral },
+      { label: "Conversions", value: formatNumber(conversions) },
+    ];
+  }
+
+  const conversionLabel = normalizedLower === "app installs"
+    ? "Installs"
+    : normalizedLower === "store visits"
+      ? "Visits"
+      : "Conversions";
+
+  return [
+    ...base,
+    { label: conversionLabel, value: formatNumber(conversions) },
+    { label: "CPA", value: conversions > 0 ? formatMetric("cpc", costPerConversion) : "No data" },
+    { label: "CTR", value: formatPercent(ctr) },
+  ];
+}
+
 function getSearchTermScoreTone(score) {
   if (score >= 70) return "positive";
   if (score <= 34) return "danger";
@@ -4634,9 +4700,22 @@ function KpiSelector({ selected, onChange, available }) {
   );
 }
 
+function getLiveDataNotice(item) {
+  if (item?.dataStatus === "error" || (!item?.dataStatus && item?.dataError)) {
+    return { tone: "warning", label: "Live data warning", color: T.coral };
+  }
+
+  if (item?.dataStatus === "partial") {
+    return { tone: "neutral", label: "Partial live data", color: T.inkSoft };
+  }
+
+  return null;
+}
+
 function OverviewCard({ client, users, onOpenAccounts, onEdit, onResolveIssue }) {
   const noConnections = Object.values(client.connections).every((value) => !value);
   const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
+  const overviewKpis = getOverviewClientKpis(client);
 
   return (
     <div
@@ -4675,11 +4754,15 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit, onResolveIssue })
       <AssignedUsersStrip client={client} users={users} />
 
       <div style={{ display: "grid", gridTemplateColumns: fitCols(128), gap: 10 }}>
-        <MetricTile label="Monthly Budget" value={formatCurrency(client.totalBudget)} />
-        <MetricTile label="Spend MTD" value={formatCurrency(client.spend)} />
-        <MetricTile label="Conv. Value" value={formatCurrency(client.conversionValue)} />
-        <MetricTile label="ROAS" value={formatMetric("roas", client.roas)} accent={client.roas >= 3 ? T.accent : T.coral} />
-        <MetricTile label={client.category === "eshop" ? "Revenue" : "Conversions"} value={client.category === "eshop" ? formatCurrency(client.ga4?.revenueCurrentPeriod || 0) : formatNumber(client.conversions)} subValue={client.category === "eshop" ? CALENDAR.revenueRangeLabel : "Client-level conversion volume"} />
+        {overviewKpis.map((item) => (
+          <MetricTile
+            key={`${client.id}-${item.label}`}
+            label={item.label}
+            value={item.value}
+            subValue={item.subValue}
+            accent={item.accent}
+          />
+        ))}
       </div>
 
       {!awaitingLiveData ? (
@@ -4706,37 +4789,43 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit, onResolveIssue })
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
           {client.accounts.slice(0, 3).map((account) => (
-            <div
-              key={account.id}
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                justifyContent: "space-between",
-                gap: 10,
-                alignItems: "center",
-                padding: "10px 12px",
-                borderRadius: 16,
-                background: T.surfaceStrong,
-                border: `1px solid ${T.line}`,
-              }}
-            >
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", minWidth: 0, flex: "1 1 220px" }}>
-                <PlatformChip platform={account.platform} />
-                <div style={{ minWidth: 0, flex: "1 1 160px" }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{account.name}</div>
-                  <div style={{ fontSize: 11, color: T.inkSoft }}>{formatCurrency(account.spend)} of {formatCurrency(account.monthlyBudget)}</div>
-                  {account.dataError ? <div style={{ marginTop: 4, fontSize: 10, color: T.coral }}>Live data warning</div> : null}
+            (() => {
+              const liveDataNotice = getLiveDataNotice(account);
+
+              return (
+                <div
+                  key={account.id}
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    alignItems: "center",
+                    padding: "10px 12px",
+                    borderRadius: 16,
+                    background: T.surfaceStrong,
+                    border: `1px solid ${T.line}`,
+                  }}
+                >
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", minWidth: 0, flex: "1 1 220px" }}>
+                    <PlatformChip platform={account.platform} />
+                    <div style={{ minWidth: 0, flex: "1 1 160px" }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{account.name}</div>
+                      <div style={{ fontSize: 11, color: T.inkSoft }}>{formatCurrency(account.spend)} of {formatCurrency(account.monthlyBudget)}</div>
+                      {liveDataNotice ? <div style={{ marginTop: 4, fontSize: 10, color: liveDataNotice.color }}>{liveDataNotice.label}</div> : null}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginLeft: "auto" }}>
+                    <div style={{ fontSize: 11, fontFamily: T.mono, color: T.inkSoft }}>
+                      CPC {formatMetric("cpc", account.cpc)}
+                    </div>
+                    <div style={{ fontSize: 11, fontFamily: T.mono, color: T.inkSoft }}>
+                      CPM {formatMetric("cpm", account.cpm)}
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginLeft: "auto" }}>
-                <div style={{ fontSize: 11, fontFamily: T.mono, color: T.inkSoft }}>
-                  CPC {formatMetric("cpc", account.cpc)}
-                </div>
-                <div style={{ fontSize: 11, fontFamily: T.mono, color: T.inkSoft }}>
-                  CPM {formatMetric("cpm", account.cpm)}
-                </div>
-              </div>
-            </div>
+              );
+            })()
           ))}
         </div>
       )}
@@ -4752,6 +4841,7 @@ function OverviewCard({ client, users, onOpenAccounts, onEdit, onResolveIssue })
 function OverviewRow({ client, users, onOpenAccounts, onEdit, onResolveIssue }) {
   const noConnections = Object.values(client.connections).every((value) => !value);
   const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
+  const overviewKpis = getOverviewClientKpis(client, { compactLabels: true });
 
   return (
     <div
@@ -4787,11 +4877,15 @@ function OverviewRow({ client, users, onOpenAccounts, onEdit, onResolveIssue }) 
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: fitCols(108), gap: 10, flex: "1 1 420px" }}>
-          <MetricTile label="Budget" value={formatCurrency(client.totalBudget)} />
-          <MetricTile label="Spend" value={formatCurrency(client.spend)} />
-          <MetricTile label="Conv. Value" value={formatCurrency(client.conversionValue)} />
-          <MetricTile label="Conv." value={formatNumber(client.conversions)} />
-          <MetricTile label="ROAS" value={formatMetric("roas", client.roas)} accent={client.roas >= 3 ? T.accent : T.coral} />
+          {overviewKpis.map((item) => (
+            <MetricTile
+              key={`${client.id}-${item.label}`}
+              label={item.label}
+              value={item.value}
+              subValue={item.subValue}
+              accent={item.accent}
+            />
+          ))}
         </div>
       </div>
 
@@ -5125,6 +5219,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
               const accountCampaigns = campaigns.filter((campaign) => campaign.accountId === account.id);
               const shownCampaigns = visibleCampaigns.filter((campaign) => campaign.accountId === account.id);
               const isAccountOpen = open[account.id];
+              const liveDataNotice = getLiveDataNotice(account);
               const liveCampaigns = accountCampaigns.filter((campaign) => !isStoppedCampaign(campaign)).length;
               const stoppedCampaigns = accountCampaigns.filter((campaign) => isStoppedCampaign(campaign)).length;
               const shownAdsCount = shownCampaigns.reduce((acc, campaign) => acc + (groupedCampaigns[campaign.id]?.length || 0), 0);
@@ -5148,7 +5243,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
 
               if (hasEfficiencyRows && accountEfficiencyCpc > client.rules.cpcMax) accountFlags.push({ tone: "warning", label: `${activeAccountCampaigns.length ? "Active " : ""}CPC above ${formatMetric("cpc", client.rules.cpcMax)}` });
               if (hasEfficiencyRows && accountEfficiencyCpm > client.rules.cpmMax) accountFlags.push({ tone: "warning", label: `${activeAccountCampaigns.length ? "Active " : ""}CPM above ${formatMetric("cpm", client.rules.cpmMax)}` });
-              if (account.dataError) accountFlags.push({ tone: "warning", label: "Live data warning" });
+              if (liveDataNotice) accountFlags.push({ tone: liveDataNotice.tone, label: liveDataNotice.label });
 
               return (
                 <div
@@ -7319,6 +7414,9 @@ function FiltersBar({
   overviewMode,
   onOverviewMode,
   showModeToggle,
+  groupByReporting,
+  onGroupByReporting,
+  showGroupingToggle = false,
   count,
 }) {
   return (
@@ -7382,6 +7480,11 @@ function FiltersBar({
             <Button onClick={() => onOverviewMode("grid")} active={overviewMode === "grid"}>Grid</Button>
             <Button onClick={() => onOverviewMode("list")} active={overviewMode === "list"}>List</Button>
           </div>
+        ) : null}
+        {showGroupingToggle ? (
+          <Button onClick={() => onGroupByReporting(!groupByReporting)} active={groupByReporting}>
+            Reporting groups
+          </Button>
         ) : null}
       </div>
 
@@ -9408,6 +9511,7 @@ function SetupWizard({ onComplete }) {
 export default function AdPulse() {
   const [view, setView] = useState("overview");
   const [overviewMode, setOverviewMode] = useState("grid");
+  const [groupOverviewByReporting, setGroupOverviewByReporting] = useState(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -10843,13 +10947,16 @@ export default function AdPulse() {
                 overviewMode={overviewMode}
                 onOverviewMode={setOverviewMode}
                 showModeToggle
+                groupByReporting={groupOverviewByReporting}
+                onGroupByReporting={setGroupOverviewByReporting}
+                showGroupingToggle
                 count={filteredClients.length}
               />
               {filteredClients.length === 0 ? (
                 <EmptyState title={clients.length ? "No clients match the current filters" : "No live clients yet"} body={clients.length ? "Try a different search or switch back to all clients." : "Open Client Studio, add a client, then link synced assets to start seeing live data."} />
               ) : overviewMode === "grid" ? (
                 <div style={{ display: "grid", gap: 18 }}>
-                  {filteredClientGroups.map((group) => (
+                  {groupOverviewByReporting ? filteredClientGroups.map((group) => (
                     <ReportingGroupSection key={group.id} group={group}>
                       <div style={{ display: "grid", gridTemplateColumns: overviewColumns, gap: 18 }}>
                         {group.clients.map((client) => (
@@ -10857,11 +10964,17 @@ export default function AdPulse() {
                         ))}
                       </div>
                     </ReportingGroupSection>
-                  ))}
+                  )) : (
+                    <div style={{ display: "grid", gridTemplateColumns: overviewColumns, gap: 18 }}>
+                      {filteredClients.map((client) => (
+                        <OverviewCard key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} onResolveIssue={resolveClientIssue} />
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div style={{ display: "grid", gap: 16 }}>
-                  {filteredClientGroups.map((group) => (
+                  {groupOverviewByReporting ? filteredClientGroups.map((group) => (
                     <ReportingGroupSection key={group.id} group={group}>
                       <div style={{ display: "grid", gap: 16 }}>
                         {group.clients.map((client) => (
@@ -10869,6 +10982,8 @@ export default function AdPulse() {
                         ))}
                       </div>
                     </ReportingGroupSection>
+                  )) : filteredClients.map((client) => (
+                    <OverviewRow key={client.id} client={client} users={accountUsers} onOpenAccounts={() => jumpToAccounts(client.id)} onEdit={() => jumpToStudio(client.id)} onResolveIssue={resolveClientIssue} />
                   ))}
                 </div>
               )}
@@ -10889,6 +11004,8 @@ export default function AdPulse() {
                 overviewMode={overviewMode}
                 onOverviewMode={setOverviewMode}
                 showModeToggle={false}
+                groupByReporting={false}
+                onGroupByReporting={() => {}}
                 count={filteredClients.length}
               />
               <AccountDateRangeControl value={accountsDateRange} onChange={setAccountsDateRange} />
