@@ -4,6 +4,7 @@ import {
   deleteClientRecord,
   deleteUser,
   disconnectIntegrationProfile,
+  chatWithAiStrategist,
   fetchAiStrategy,
   fetchClients,
   fetchGa4LiveOverview,
@@ -148,6 +149,7 @@ const STORAGE_KEYS = {
   clients: "adpulse/liveClients",
   providerProfiles: "adpulse/providerProfiles",
   aiStrategy: "adpulse/aiStrategy",
+  aiStrategyChats: "adpulse/aiStrategyChats",
   analyticsCharts: "adpulse/analyticsCharts",
   reportSections: "adpulse/reportSections",
   reportPreset: "adpulse/reportPreset",
@@ -1289,6 +1291,10 @@ function getSearchTermsAiStrategyKey({
   ].join(":");
 }
 
+function getAiStrategyChatKey(strategyKey) {
+  return strategyKey ? `${strategyKey}:chat` : "";
+}
+
 function tokenizeNegativeCandidate(value) {
   return String(value || "")
     .toLowerCase()
@@ -2330,6 +2336,56 @@ function writeStoredAiStrategyResult(storageKey, result) {
   };
 
   window.localStorage.setItem(STORAGE_KEYS.aiStrategy, JSON.stringify(next));
+}
+
+function normalizeAiStrategyChatThread(thread) {
+  if (!Array.isArray(thread)) return [];
+
+  return thread
+    .map((entry) => {
+      const role = entry?.role === "assistant" ? "assistant" : "user";
+      const text = String(entry?.text || "").trim();
+      if (!text) return null;
+      return {
+        role,
+        text,
+        createdAt: String(entry?.createdAt || new Date().toISOString()),
+      };
+    })
+    .filter(Boolean)
+    .slice(-24);
+}
+
+function readStoredAiStrategyChatThread(chatKey) {
+  if (!chatKey) return [];
+  const stored = readStoredValue(STORAGE_KEYS.aiStrategyChats, {});
+  return stored && typeof stored === "object"
+    ? normalizeAiStrategyChatThread(stored[chatKey] || [])
+    : [];
+}
+
+function writeStoredAiStrategyChatThread(chatKey, thread) {
+  if (typeof window === "undefined" || !chatKey) return;
+
+  const normalizedThread = normalizeAiStrategyChatThread(thread);
+  const stored = readStoredValue(STORAGE_KEYS.aiStrategyChats, {});
+  const entries = Object.entries(stored && typeof stored === "object" ? stored : {})
+    .filter(([key]) => key !== chatKey)
+    .slice(-79);
+  const next = Object.fromEntries(entries);
+
+  next[chatKey] = normalizedThread;
+  window.localStorage.setItem(STORAGE_KEYS.aiStrategyChats, JSON.stringify(next));
+}
+
+function buildAiStrategistAlignmentNotes(thread) {
+  const normalized = normalizeAiStrategyChatThread(thread);
+  const userNotes = normalized
+    .filter((entry) => entry.role === "user")
+    .slice(-6)
+    .map((entry) => entry.text);
+
+  return userNotes.join("\n\n");
 }
 
 function hydrateUsers(value) {
@@ -3786,6 +3842,98 @@ function AiStrategyOutput({ result }) {
   );
 }
 
+function AiStrategistChatPanel({
+  thread,
+  draft,
+  onDraftChange,
+  onSend,
+  onClear,
+  loading,
+  error,
+  disabled,
+}) {
+  const hasMessages = thread.length > 0;
+
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: T.ink, fontFamily: T.heading }}>Strategist chat</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: T.inkSoft, lineHeight: 1.5 }}>
+            Comment on the diagnosis, correct assumptions, and the next strategist refresh will use your notes automatically.
+          </div>
+        </div>
+        {hasMessages ? <Button onClick={onClear} disabled={loading}>Clear chat context</Button> : null}
+      </div>
+
+      <div style={{ padding: 14, borderRadius: 18, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 10, maxHeight: 360, overflowY: "auto" }}>
+        {hasMessages ? thread.map((entry, index) => (
+          <div
+            key={`${entry.role}-${entry.createdAt}-${index}`}
+            style={{
+              justifySelf: entry.role === "user" ? "end" : "start",
+              maxWidth: "84%",
+              padding: "11px 12px",
+              borderRadius: 16,
+              background: entry.role === "user" ? T.accentSoft : T.bgSoft,
+              border: `1px solid ${entry.role === "user" ? "rgba(15, 143, 102, 0.16)" : T.line}`,
+              display: "grid",
+              gap: 6,
+            }}
+          >
+            <div style={{ fontSize: 10, color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>
+              {entry.role === "user" ? "You" : "Strategist"}
+            </div>
+            <div style={{ fontSize: 12, color: T.ink, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{entry.text}</div>
+          </div>
+        )) : (
+          <div style={{ padding: 10, fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
+            No chat notes yet. Ask the strategist to refine a recommendation, explain a watchout, or adapt to your client-specific reality.
+          </div>
+        )}
+      </div>
+
+      {error ? (
+        <div style={{ padding: 12, borderRadius: 16, background: T.coralSoft, border: `1px solid rgba(215, 93, 66, 0.16)`, color: T.coral, fontSize: 12, fontWeight: 700 }}>
+          {error}
+        </div>
+      ) : null}
+
+      <div style={{ display: "grid", gap: 10 }}>
+        <textarea
+          value={draft}
+          onChange={(event) => onDraftChange(event.target.value)}
+          disabled={disabled || loading}
+          rows={4}
+          placeholder="Example: Στο συγκεκριμένο client μας νοιάζει περισσότερο η ποιότητα lead παρά ο όγκος. Ευθυγράμμισε τις επόμενες προτάσεις σε αυτό."
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            padding: "12px 13px",
+            borderRadius: 16,
+            border: `1px solid ${T.line}`,
+            background: disabled ? T.bgSoft : T.surfaceStrong,
+            color: T.ink,
+            fontSize: 13,
+            outline: "none",
+            resize: "vertical",
+            fontFamily: T.font,
+            lineHeight: 1.55,
+          }}
+        />
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <Button onClick={onSend} tone="primary" disabled={disabled || loading || !draft.trim()}>
+            {loading ? "Sending..." : "Send to strategist"}
+          </Button>
+          <div style={{ fontSize: 11, color: T.inkSoft }}>
+            Your notes stay attached to this client and date range.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ToastStack({ items, onDismiss }) {
   if (!items.length) return null;
 
@@ -4995,11 +5143,15 @@ function campaignMatchesStatusFilter(campaign, filter) {
 function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeLabel, aiReady, onOpenConnections, onResolveIssue }) {
   const [campaignFilter, setCampaignFilter] = useState("all");
   const [aiState, setAiState] = useState(() => createEmptyAiStrategistState());
+  const [aiChatThread, setAiChatThread] = useState([]);
+  const [aiChatDraft, setAiChatDraft] = useState("");
+  const [aiChatState, setAiChatState] = useState({ loading: false, error: "" });
   const filterMeta = CAMPAIGN_STATUS_FILTERS.find((option) => option.id === campaignFilter) || CAMPAIGN_STATUS_FILTERS[2];
   const noConnections = Object.values(client.connections).every((value) => !value);
   const awaitingLiveData = client.linkedAssetCount && !client.accounts.length;
   const aiPayload = useMemo(() => buildAccountAiPayload(client, dateRangeLabel), [client, dateRangeLabel]);
   const aiStrategyKey = useMemo(() => getAccountAiStrategyKey(client, dateRangeLabel), [client, dateRangeLabel]);
+  const aiChatKey = useMemo(() => getAiStrategyChatKey(aiStrategyKey), [aiStrategyKey]);
   const groupedCampaigns = useMemo(
     () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, ads.filter((ad) => ad.campaignId === campaign.id)])),
     [ads, campaigns]
@@ -5028,13 +5180,22 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
     } : createEmptyAiStrategistState());
   }, [aiStrategyKey]);
 
+  useEffect(() => {
+    setAiChatThread(readStoredAiStrategyChatThread(aiChatKey));
+    setAiChatDraft("");
+    setAiChatState({ loading: false, error: "" });
+  }, [aiChatKey]);
+
   async function runAiStrategist() {
     setAiState((current) => ({ ...current, loading: true, error: "" }));
 
     try {
       const payload = await fetchAiStrategy({
         scope: "account",
-        context: aiPayload,
+        context: {
+          ...aiPayload,
+          alignmentNotes: buildAiStrategistAlignmentNotes(aiChatThread),
+        },
         forceRefresh: true,
       });
       writeStoredAiStrategyResult(aiStrategyKey, payload);
@@ -5052,6 +5213,60 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
         error: error.message || "Could not run the AI strategist.",
       }));
     }
+  }
+
+  async function sendStrategistMessage() {
+    const userText = aiChatDraft.trim();
+    if (!userText || !aiState.data) return;
+
+    const nextThread = normalizeAiStrategyChatThread([
+      ...aiChatThread,
+      {
+        role: "user",
+        text: userText,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    setAiChatThread(nextThread);
+    writeStoredAiStrategyChatThread(aiChatKey, nextThread);
+    setAiChatDraft("");
+    setAiChatState({ loading: true, error: "" });
+
+    try {
+      const payload = await chatWithAiStrategist({
+        scope: "account",
+        context: {
+          ...aiPayload,
+          alignmentNotes: buildAiStrategistAlignmentNotes(nextThread),
+        },
+        strategy: aiState.data?.strategy || null,
+        thread: nextThread,
+      });
+      const finalThread = normalizeAiStrategyChatThread([
+        ...nextThread,
+        {
+          role: "assistant",
+          text: String(payload?.reply || "").trim(),
+          createdAt: payload?.generatedAt || new Date().toISOString(),
+        },
+      ]);
+      setAiChatThread(finalThread);
+      writeStoredAiStrategyChatThread(aiChatKey, finalThread);
+      setAiChatState({ loading: false, error: "" });
+    } catch (error) {
+      setAiChatState({
+        loading: false,
+        error: error.message || "Could not send your note to the strategist.",
+      });
+    }
+  }
+
+  function clearStrategistChat() {
+    setAiChatThread([]);
+    writeStoredAiStrategyChatThread(aiChatKey, []);
+    setAiChatDraft("");
+    setAiChatState({ loading: false, error: "" });
   }
 
   return (
@@ -5204,7 +5419,19 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                     </div>
                   </div>
                 ) : aiState.data ? (
-                  <AiStrategyOutput result={aiState.data} />
+                  <div style={{ display: "grid", gap: 14 }}>
+                    <AiStrategyOutput result={aiState.data} />
+                    <AiStrategistChatPanel
+                      thread={aiChatThread}
+                      draft={aiChatDraft}
+                      onDraftChange={setAiChatDraft}
+                      onSend={sendStrategistMessage}
+                      onClear={clearStrategistChat}
+                      loading={aiChatState.loading}
+                      error={aiChatState.error}
+                      disabled={!aiReady || !aiState.data}
+                    />
+                  </div>
                 ) : (
                   <div style={{ display: "grid", gap: 10 }}>
                     <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
@@ -5221,7 +5448,7 @@ function AccountStack({ client, users, open, setOpen, campaigns, ads, dateRangeL
                 {aiReady && aiState.data ? (
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <Button onClick={runAiStrategist} tone="primary" disabled={aiState.loading}>
-                      {aiState.loading ? "Refreshing..." : "Refresh analysis"}
+                      {aiState.loading ? "Refreshing..." : aiChatThread.length ? "Refresh analysis with chat context" : "Refresh analysis"}
                     </Button>
                   </div>
                 ) : null}
@@ -5965,13 +6192,29 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
   const [scheduleDraft, setScheduleDraft] = useState(() => normalizeReportSchedule());
   const [builderCue, setBuilderCue] = useState(null);
   const [reportAiState, setReportAiState] = useState(() => createEmptyAiStrategistState());
+  const [reportAiChatThread, setReportAiChatThread] = useState([]);
+  const [reportAiChatDraft, setReportAiChatDraft] = useState("");
+  const [reportAiChatState, setReportAiChatState] = useState({ loading: false, error: "" });
   const normalizedSections = useMemo(() => normalizeReportSectionIds(selectedSections), [selectedSections]);
   const selectedSectionSet = useMemo(() => new Set(normalizedSections), [normalizedSections]);
   const reportAiStrategyKey = useMemo(() => getReportAiStrategyKey(selectedClient, dateRangeLabel), [selectedClient, dateRangeLabel]);
+  const reportAiChatKey = useMemo(() => getAiStrategyChatKey(reportAiStrategyKey), [reportAiStrategyKey]);
   const reportReadinessItems = useMemo(
     () => buildReportReadinessItems(selectedClient, googleDetails, googleReportState, scheduleDraft),
     [selectedClient, googleDetails, googleReportState, scheduleDraft]
   );
+  const reportAiContext = useMemo(() => (
+    selectedClient
+      ? {
+          ...buildAccountAiPayload(selectedClient, dateRangeLabel),
+          report: {
+            preset: getReportPresetLabel(reportPreset),
+            sections: normalizedSections,
+            readiness: reportReadinessItems,
+          },
+        }
+      : null
+  ), [dateRangeLabel, normalizedSections, reportPreset, reportReadinessItems, selectedClient]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -6003,6 +6246,12 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
       cached: !!saved?.cached,
     } : createEmptyAiStrategistState());
   }, [reportAiStrategyKey]);
+
+  useEffect(() => {
+    setReportAiChatThread(readStoredAiStrategyChatThread(reportAiChatKey));
+    setReportAiChatDraft("");
+    setReportAiChatState({ loading: false, error: "" });
+  }, [reportAiChatKey]);
 
   useEffect(() => {
     if (!builderCue) return undefined;
@@ -6068,12 +6317,8 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
       const payload = await fetchAiStrategy({
         scope: "report",
         context: {
-          ...buildAccountAiPayload(selectedClient, dateRangeLabel),
-          report: {
-            preset: getReportPresetLabel(reportPreset),
-            sections: normalizedSections,
-            readiness: reportReadinessItems,
-          },
+          ...reportAiContext,
+          alignmentNotes: buildAiStrategistAlignmentNotes(reportAiChatThread),
         },
         forceRefresh: true,
       });
@@ -6094,6 +6339,60 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
         error: error.message || "Could not refresh the report strategist.",
       }));
     }
+  }
+
+  async function sendReportStrategistMessage() {
+    const userText = reportAiChatDraft.trim();
+    if (!userText || !reportAiState.data || !reportAiContext) return;
+
+    const nextThread = normalizeAiStrategyChatThread([
+      ...reportAiChatThread,
+      {
+        role: "user",
+        text: userText,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    setReportAiChatThread(nextThread);
+    writeStoredAiStrategyChatThread(reportAiChatKey, nextThread);
+    setReportAiChatDraft("");
+    setReportAiChatState({ loading: true, error: "" });
+
+    try {
+      const payload = await chatWithAiStrategist({
+        scope: "report",
+        context: {
+          ...reportAiContext,
+          alignmentNotes: buildAiStrategistAlignmentNotes(nextThread),
+        },
+        strategy: reportAiState.data?.strategy || null,
+        thread: nextThread,
+      });
+      const finalThread = normalizeAiStrategyChatThread([
+        ...nextThread,
+        {
+          role: "assistant",
+          text: String(payload?.reply || "").trim(),
+          createdAt: payload?.generatedAt || new Date().toISOString(),
+        },
+      ]);
+      setReportAiChatThread(finalThread);
+      writeStoredAiStrategyChatThread(reportAiChatKey, finalThread);
+      setReportAiChatState({ loading: false, error: "" });
+    } catch (error) {
+      setReportAiChatState({
+        loading: false,
+        error: error.message || "Could not send your note to the strategist.",
+      });
+    }
+  }
+
+  function clearReportStrategistChat() {
+    setReportAiChatThread([]);
+    writeStoredAiStrategyChatThread(reportAiChatKey, []);
+    setReportAiChatDraft("");
+    setReportAiChatState({ loading: false, error: "" });
   }
 
   function generatePdf() {
@@ -6301,6 +6600,12 @@ function ReportCenter({ clients, selectedClientId, onSelectClient, seriesMap, da
           aiReady={aiReady}
           aiState={reportAiState}
           onRefreshStrategist={refreshReportStrategist}
+          aiChatThread={reportAiChatThread}
+          aiChatDraft={reportAiChatDraft}
+          onAiChatDraftChange={setReportAiChatDraft}
+          onAiChatSend={sendReportStrategistMessage}
+          onAiChatClear={clearReportStrategistChat}
+          aiChatState={reportAiChatState}
           cue={builderCue}
         />
       ) : null}
@@ -6339,6 +6644,12 @@ function ReportBuilderPanel({
   aiReady,
   aiState,
   onRefreshStrategist,
+  aiChatThread,
+  aiChatDraft,
+  onAiChatDraftChange,
+  onAiChatSend,
+  onAiChatClear,
+  aiChatState,
   cue,
 }) {
   return (
@@ -6438,7 +6749,17 @@ function ReportBuilderPanel({
 
         <div style={{ display: "grid", gap: 16 }}>
           <ReportReadinessPanel items={readinessItems} />
-          <ReportStrategistControl aiReady={aiReady} aiState={aiState} onRefresh={onRefreshStrategist} />
+          <ReportStrategistControl
+            aiReady={aiReady}
+            aiState={aiState}
+            onRefresh={onRefreshStrategist}
+            chatThread={aiChatThread}
+            chatDraft={aiChatDraft}
+            onChatDraftChange={onAiChatDraftChange}
+            onChatSend={onAiChatSend}
+            onChatClear={onAiChatClear}
+            chatState={aiChatState}
+          />
           <ReportSchedulePanel scheduleDraft={scheduleDraft} onChange={onScheduleDraftChange} onSave={onSaveSchedule} />
         </div>
       </div>
@@ -6465,7 +6786,17 @@ function ReportReadinessPanel({ items }) {
   );
 }
 
-function ReportStrategistControl({ aiReady, aiState, onRefresh }) {
+function ReportStrategistControl({
+  aiReady,
+  aiState,
+  onRefresh,
+  chatThread,
+  chatDraft,
+  onChatDraftChange,
+  onChatSend,
+  onChatClear,
+  chatState,
+}) {
   return (
     <div style={{ padding: 16, borderRadius: 22, background: T.surfaceStrong, border: `1px solid ${T.line}`, display: "grid", gap: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
@@ -6481,8 +6812,23 @@ function ReportStrategistControl({ aiReady, aiState, onRefresh }) {
         <div style={{ fontSize: 11, color: T.inkSoft }}>Last generated {formatAiGeneratedAt(aiState.generatedAt)}</div>
       ) : null}
       {aiState?.error ? <ActionCue tone="danger">{aiState.error}</ActionCue> : null}
+      {aiState?.data ? (
+        <div style={{ display: "grid", gap: 14 }}>
+          <AiStrategyOutput result={aiState.data} />
+          <AiStrategistChatPanel
+            thread={chatThread || []}
+            draft={chatDraft || ""}
+            onDraftChange={onChatDraftChange}
+            onSend={onChatSend}
+            onClear={onChatClear}
+            loading={chatState?.loading}
+            error={chatState?.error}
+            disabled={!aiReady || !aiState.data}
+          />
+        </div>
+      ) : null}
       <Button onClick={onRefresh} tone="primary" disabled={!aiReady || aiState?.loading}>
-        {aiState?.loading ? "Refreshing strategist..." : "Refresh strategist page"}
+        {aiState?.loading ? "Refreshing strategist..." : (chatThread?.length ? "Refresh strategist page with chat context" : "Refresh strategist page")}
       </Button>
     </div>
   );
@@ -8362,6 +8708,9 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
   const [sort, setSort] = useState({ key: "cost", direction: "desc" });
   const [tagBusyMap, setTagBusyMap] = useState({});
   const [aiState, setAiState] = useState(() => createEmptyAiStrategistState());
+  const [aiChatThread, setAiChatThread] = useState([]);
+  const [aiChatDraft, setAiChatDraft] = useState("");
+  const [aiChatState, setAiChatState] = useState({ loading: false, error: "" });
 
   const googleAssetMap = useMemo(() => {
     const map = new Map();
@@ -8715,6 +9064,7 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
     dateRange: selection.dateRange,
     termStatusFilter,
   }), [isPerformanceMax, selectedAccount, selectedAdGroup, selectedCampaign, selectedClient, selection.dateRange, termStatusFilter]);
+  const aiChatKey = useMemo(() => getAiStrategyChatKey(aiStrategyKey), [aiStrategyKey]);
   const tableColumns = isPerformanceMax
     ? [
       { key: "searchTerm", label: "Search term" },
@@ -8757,6 +9107,12 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
       cached: !!saved?.cached,
     } : createEmptyAiStrategistState());
   }, [aiStrategyKey]);
+
+  useEffect(() => {
+    setAiChatThread(readStoredAiStrategyChatThread(aiChatKey));
+    setAiChatDraft("");
+    setAiChatState({ loading: false, error: "" });
+  }, [aiChatKey]);
 
   function setSortColumn(nextKey) {
     setSort((current) => (
@@ -8832,7 +9188,10 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
     try {
       const payload = await fetchAiStrategy({
         scope: "search_terms",
-        context: aiPayload,
+        context: {
+          ...aiPayload,
+          alignmentNotes: buildAiStrategistAlignmentNotes(aiChatThread),
+        },
         forceRefresh: true,
       });
       writeStoredAiStrategyResult(aiStrategyKey, payload);
@@ -8850,6 +9209,60 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
         error: error.message || "Could not run the AI strategist.",
       }));
     }
+  }
+
+  async function sendStrategistMessage() {
+    const userText = aiChatDraft.trim();
+    if (!userText || !aiState.data) return;
+
+    const nextThread = normalizeAiStrategyChatThread([
+      ...aiChatThread,
+      {
+        role: "user",
+        text: userText,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    setAiChatThread(nextThread);
+    writeStoredAiStrategyChatThread(aiChatKey, nextThread);
+    setAiChatDraft("");
+    setAiChatState({ loading: true, error: "" });
+
+    try {
+      const payload = await chatWithAiStrategist({
+        scope: "search_terms",
+        context: {
+          ...aiPayload,
+          alignmentNotes: buildAiStrategistAlignmentNotes(nextThread),
+        },
+        strategy: aiState.data?.strategy || null,
+        thread: nextThread,
+      });
+      const finalThread = normalizeAiStrategyChatThread([
+        ...nextThread,
+        {
+          role: "assistant",
+          text: String(payload?.reply || "").trim(),
+          createdAt: payload?.generatedAt || new Date().toISOString(),
+        },
+      ]);
+      setAiChatThread(finalThread);
+      writeStoredAiStrategyChatThread(aiChatKey, finalThread);
+      setAiChatState({ loading: false, error: "" });
+    } catch (error) {
+      setAiChatState({
+        loading: false,
+        error: error.message || "Could not send your note to the strategist.",
+      });
+    }
+  }
+
+  function clearStrategistChat() {
+    setAiChatThread([]);
+    writeStoredAiStrategyChatThread(aiChatKey, []);
+    setAiChatDraft("");
+    setAiChatState({ loading: false, error: "" });
   }
 
   if (loading) {
@@ -9097,7 +9510,19 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
             </div>
           </div>
         ) : aiState.data ? (
-          <AiStrategyOutput result={aiState.data} />
+          <div style={{ display: "grid", gap: 14 }}>
+            <AiStrategyOutput result={aiState.data} />
+            <AiStrategistChatPanel
+              thread={aiChatThread}
+              draft={aiChatDraft}
+              onDraftChange={setAiChatDraft}
+              onSend={sendStrategistMessage}
+              onClear={clearStrategistChat}
+              loading={aiChatState.loading}
+              error={aiChatState.error}
+              disabled={!aiReady || !aiState.data}
+            />
+          </div>
         ) : (
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>
@@ -9114,7 +9539,7 @@ function SearchTermsWorkbench({ clients, providerProfiles, loading, error, aiRea
         {aiReady && aiState.data ? (
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <Button onClick={runAiStrategist} tone="primary" disabled={aiState.loading || !selectedCampaign}>
-              {aiState.loading ? "Refreshing..." : "Refresh analysis"}
+              {aiState.loading ? "Refreshing..." : aiChatThread.length ? "Refresh analysis with chat context" : "Refresh analysis"}
             </Button>
           </div>
         ) : null}

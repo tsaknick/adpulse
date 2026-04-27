@@ -181,6 +181,14 @@ export function fetchAiStrategy(payload) {
   });
 }
 
+export function chatWithAiStrategist(payload) {
+  return request("/ai/strategy/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchSearchTermTags(params) {
   return request(withQuery("/search-terms/tags", params));
 }

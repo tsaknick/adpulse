@@ -295,6 +295,19 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/ai/strategy/chat") {
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+
+      const payload = await generateAiStrategyChatReply(parsed);
+      sendJson(response, 200, payload);
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/setup") {
       sendJson(response, 200, getSetupStatus());
       return;
@@ -6378,6 +6391,20 @@ function normalizeAiStrategyPayload(payload) {
   };
 }
 
+function normalizeAiStrategyChatThread(thread) {
+  if (!Array.isArray(thread)) return [];
+
+  return thread
+    .map((entry) => {
+      const role = entry?.role === "assistant" ? "assistant" : "user";
+      const text = String(entry?.text || "").trim();
+      if (!text) return null;
+      return { role, text };
+    })
+    .filter(Boolean)
+    .slice(-16);
+}
+
 async function generateAiStrategy(input) {
   const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
   if (!apiKey) {
@@ -6412,6 +6439,7 @@ async function generateAiStrategy(input) {
     "Recommend the single highest-leverage next action first, then short follow-up actions.",
     "Use only the supplied data. If evidence is missing, say so instead of inventing facts.",
     "Respect the stated client target, date range, and connected channels.",
+    "If operator feedback, alignment notes, or business constraints are supplied in the context, incorporate them explicitly into the recommendation.",
     "Keep recommendations operational and specific.",
   ].join(" ");
 
@@ -6589,4 +6617,83 @@ async function generateAiStrategy(input) {
   });
 
   return payload;
+}
+
+async function generateAiStrategyChatReply(input) {
+  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  if (!apiKey) {
+    throw new Error("AI strategist is not configured. Add ANTHROPIC_API_KEY from the Connections screen.");
+  }
+
+  if (!input || typeof input !== "object") {
+    throw new Error("Strategist chat expected a JSON object.");
+  }
+
+  const scope = String(input.scope || "account").trim().toLowerCase() || "account";
+  const context = input.context && typeof input.context === "object" ? input.context : {};
+  const strategy = input.strategy && typeof input.strategy === "object" ? input.strategy : null;
+  const thread = normalizeAiStrategyChatThread(input.thread);
+  if (!thread.length) {
+    throw new Error("Strategist chat expected at least one message.");
+  }
+
+  const model = getAiStrategistModel();
+  const systemPrompt = [
+    "You are AdPulse Strategist in an interactive working session with the operator of the tool.",
+    "Write every user-facing string in Greek.",
+    "Use the supplied AdPulse context and current structured strategy as the source of truth.",
+    "Respond like a strong senior strategist: concise, specific, and collaborative.",
+    "When the operator corrects assumptions or adds business nuance, acknowledge it and adapt.",
+    "Do not invent missing data. If something is unknown, say so clearly.",
+    "When helpful, explain how the operator's feedback should change the next strategy refresh.",
+    "Keep answers operational, practical, and no longer than needed.",
+  ].join(" ");
+
+  const messages = [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `Current AdPulse ${scope} context JSON:\n${JSON.stringify(context, null, 2)}\n\nCurrent structured strategist result JSON:\n${JSON.stringify(strategy || {}, null, 2)}\n\nUse these as source of truth for the following conversation.`,
+        },
+      ],
+    },
+    ...thread.map((entry) => ({
+      role: entry.role,
+      content: [{ type: "text", text: entry.text }],
+    })),
+  ];
+
+  const response = await fetchJson("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1200,
+      system: systemPrompt,
+      messages,
+    }),
+  }, "Claude AI strategist chat");
+
+  const reply = (response?.content || [])
+    .filter((block) => block?.type === "text" && block.text)
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+
+  if (!reply) {
+    throw new Error("Claude strategist returned no chat reply.");
+  }
+
+  return {
+    ok: true,
+    model,
+    generatedAt: new Date().toISOString(),
+    reply,
+  };
 }
