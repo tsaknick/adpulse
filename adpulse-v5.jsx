@@ -7487,6 +7487,27 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
   const seenSaveTokenRef = useRef("");
   const [logoError, setLogoError] = useState("");
   const [saveCelebrating, setSaveCelebrating] = useState(false);
+  const draftId = draft?.id || "";
+
+  useEffect(() => {
+    if (!draftId) return undefined;
+    if (!state?.lastSavedToken || state.lastSavedToken === seenSaveTokenRef.current) return undefined;
+    if (state.lastSavedClientId !== draftId) return undefined;
+
+    seenSaveTokenRef.current = state.lastSavedToken;
+    setSaveCelebrating(true);
+    saveButtonRef.current?.animate?.([
+      { transform: "translateY(0) scale(1)", boxShadow: "0 0 0 rgba(15, 143, 102, 0)" },
+      { transform: "translateY(-2px) scale(1.06)", boxShadow: "0 18px 34px rgba(15, 143, 102, 0.24)" },
+      { transform: "translateY(0) scale(1)", boxShadow: "0 0 0 rgba(15, 143, 102, 0)" },
+    ], {
+      duration: 760,
+      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+    });
+
+    const timer = window.setTimeout(() => setSaveCelebrating(false), 1100);
+    return () => window.clearTimeout(timer);
+  }, [draftId, state?.lastSavedClientId, state?.lastSavedToken]);
 
   if (!draft) {
     return (
@@ -7609,25 +7630,6 @@ function ClientStudio({ clients, accounts, users, providerProfiles, selectedClie
     reader.onerror = () => setLogoError("Could not read that logo file.");
     reader.readAsDataURL(file);
   };
-
-  useEffect(() => {
-    if (!state?.lastSavedToken || state.lastSavedToken === seenSaveTokenRef.current) return undefined;
-    if (state.lastSavedClientId !== draft.id) return undefined;
-
-    seenSaveTokenRef.current = state.lastSavedToken;
-    setSaveCelebrating(true);
-    saveButtonRef.current?.animate?.([
-      { transform: "translateY(0) scale(1)", boxShadow: "0 0 0 rgba(15, 143, 102, 0)" },
-      { transform: "translateY(-2px) scale(1.06)", boxShadow: "0 18px 34px rgba(15, 143, 102, 0.24)" },
-      { transform: "translateY(0) scale(1)", boxShadow: "0 0 0 rgba(15, 143, 102, 0)" },
-    ], {
-      duration: 760,
-      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
-    });
-
-    const timer = window.setTimeout(() => setSaveCelebrating(false), 1100);
-    return () => window.clearTimeout(timer);
-  }, [draft.id, state?.lastSavedClientId, state?.lastSavedToken]);
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: layoutColumns, gap: 18 }}>
