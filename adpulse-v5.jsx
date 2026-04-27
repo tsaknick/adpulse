@@ -2740,11 +2740,10 @@ function IntegrationHub({
   onSaveAiConfig,
   aiSetupState,
 }) {
-  const byPlatform = {
-    google_ads: providerProfiles.filter((profile) => profile.platform === "google_ads"),
-    meta_ads: providerProfiles.filter((profile) => profile.platform === "meta_ads"),
-    ga4: providerProfiles.filter((profile) => profile.platform === "ga4"),
-  };
+  const byPlatform = Object.keys(PLATFORM_META).reduce((acc, platform) => ({
+    ...acc,
+    [platform]: providerProfiles.filter((profile) => profile.platform === platform),
+  }), {});
   const totalAssets = providerProfiles.reduce((acc, profile) => acc + (profile.assets?.length || 0), 0);
 
   return (
@@ -2833,8 +2832,11 @@ function IntegrationHub({
 
       <div style={{ display: "grid", gridTemplateColumns: layoutColumns, gap: 18 }}>
         {Object.keys(PLATFORM_META).map((platform) => {
-          const platformProfiles = byPlatform[platform];
-          const config = configured?.[platform] || { ready: false, missing: [] };
+          const platformProfiles = byPlatform[platform] || [];
+          const config = {
+            ready: configured?.[platform]?.ready === true,
+            missing: Array.isArray(configured?.[platform]?.missing) ? configured[platform].missing : [],
+          };
 
           return (
             <div
