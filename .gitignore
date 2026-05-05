@@ -4,6 +4,7 @@
 node_modules/
 dist/
 .edge-profile/
+.angular/
 *.log
 *.err
 *.png

@@ -7,7 +7,7 @@ const __dirname = path.dirname(__filename);
 const root = path.dirname(__dirname);
 const extraArgs = process.argv.slice(2);
 const nodeBin = process.execPath;
-const viteBin = path.join(root, "node_modules", "vite", "bin", "vite.js");
+const ngBin = path.join(root, "node_modules", "@angular", "cli", "bin", "ng.js");
 
 const children = [];
 let shuttingDown = false;
@@ -44,7 +44,7 @@ function spawnChild(args) {
 }
 
 spawnChild([path.join(root, "server.mjs")]);
-spawnChild([viteBin, ...extraArgs]);
+spawnChild([ngBin, "serve", "--host", "127.0.0.1", "--port", "5173", "--proxy-config", "proxy.conf.json", ...extraArgs]);
 
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));

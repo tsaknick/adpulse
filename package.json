@@ -5,17 +5,27 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "dev:vite": "vite",
+    "ng": "ng",
+    "dev:angular": "ng serve --host 127.0.0.1 --port 5173 --proxy-config proxy.conf.json",
     "api": "node server.mjs",
-    "build": "vite build",
-    "preview": "vite preview",
+    "build": "ng build --configuration production",
+    "preview": "node server.mjs",
     "start": "node server.mjs"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@angular/common": "^20.3.0",
+    "@angular/compiler": "^20.3.0",
+    "@angular/core": "^20.3.0",
+    "@angular/forms": "^20.3.0",
+    "@angular/platform-browser": "^20.3.0",
+    "rxjs": "^7.8.2",
+    "tslib": "^2.8.1",
+    "zone.js": "^0.15.1"
   },
   "devDependencies": {
-    "vite": "^5.4.10"
+    "@angular-devkit/build-angular": "^20.3.0",
+    "@angular/cli": "^20.3.0",
+    "@angular/compiler-cli": "^20.3.0",
+    "typescript": "~5.9.2"
   }
 }

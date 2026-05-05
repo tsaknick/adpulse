@@ -1,0 +1,1625 @@
+﻿<div *ngIf="setupComplete === null || loading" class="boot-screen"></div>
+
+<section *ngIf="setupComplete === false && !loading" class="auth-shell">
+  <div class="auth-panel setup-panel">
+    <div class="brand-row">
+      <div class="brand-mark">AP</div>
+      <div>
+        <h1>AdPulse Setup</h1>
+        <p>{{ setupReadyCount }} provider settings detected</p>
+      </div>
+    </div>
+
+    <div class="setup-grid">
+      <label>
+        <span>Google client ID</span>
+        <input [(ngModel)]="setupForm.GOOGLE_CLIENT_ID" autocomplete="off" />
+      </label>
+      <label>
+        <span>Google client secret</span>
+        <input [(ngModel)]="setupForm.GOOGLE_CLIENT_SECRET" type="password" autocomplete="off" />
+      </label>
+      <label>
+        <span>Google Ads developer token</span>
+        <input [(ngModel)]="setupForm.GOOGLE_ADS_DEVELOPER_TOKEN" type="password" autocomplete="off" />
+      </label>
+      <label>
+        <span>Google Ads login customer ID</span>
+        <input [(ngModel)]="setupForm.GOOGLE_ADS_LOGIN_CUSTOMER_ID" autocomplete="off" />
+      </label>
+      <label>
+        <span>Meta app ID</span>
+        <input [(ngModel)]="setupForm.META_APP_ID" autocomplete="off" />
+      </label>
+      <label>
+        <span>Meta app secret</span>
+        <input [(ngModel)]="setupForm.META_APP_SECRET" type="password" autocomplete="off" />
+      </label>
+      <label>
+        <span>TikTok app ID</span>
+        <input [(ngModel)]="setupForm.TIKTOK_APP_ID" autocomplete="off" />
+      </label>
+      <label>
+        <span>TikTok app secret</span>
+        <input [(ngModel)]="setupForm.TIKTOK_APP_SECRET" type="password" autocomplete="off" />
+      </label>
+      <label>
+        <span>Anthropic API key</span>
+        <input [(ngModel)]="setupForm.ANTHROPIC_API_KEY" type="password" autocomplete="off" />
+      </label>
+      <label>
+        <span>Strategist model</span>
+        <input [(ngModel)]="setupForm.ANTHROPIC_STRATEGIST_MODEL" placeholder="claude-sonnet-4-6" autocomplete="off" />
+      </label>
+    </div>
+
+    <p *ngIf="setupError" class="notice danger">{{ setupError }}</p>
+    <p *ngIf="setupSuccess" class="notice success">{{ setupSuccess }}</p>
+
+    <div class="button-row">
+      <button class="btn primary" (click)="saveSetup()" [disabled]="setupSaving">{{ setupSaving ? "Saving..." : "Save settings" }}</button>
+      <button class="btn" (click)="skipSetup()">Open dashboard</button>
+    </div>
+  </div>
+</section>
+
+<!-- Login screen (1:1 with React `LoginScreen`, ports lines 3186-3352 of adpulse-v5.jsx) -->
+<app-login-screen
+  *ngIf="setupComplete !== false && !loading && !currentUser"
+  [users]="users"
+  [demoUsers]="demoUsers"
+  [form]="loginForm"
+  [error]="loginError"
+  (formChange)="onLoginFieldChange($event)"
+  (submit)="login()"
+  (quickLogin)="quickLoginById($event)"
+></app-login-screen>
+
+<!-- Authenticated shell (1:1 with React top-bar shell from adpulse-v5.jsx ~11540) -->
+<app-toast-stack
+  *ngIf="setupComplete !== false && !loading && currentUser"
+  [items]="toasts"
+  (dismiss)="dismissToastById($event)"
+></app-toast-stack>
+
+<app-shell
+  *ngIf="setupComplete !== false && !loading && currentUser"
+  [view]="view"
+  [navItems]="navItems"
+  [currentUser]="currentUser"
+  [isDirector]="isDirector"
+  [accessibleClientCount]="accessibleClients.length"
+  [showProfile]="profileOpen"
+  [profileDraft]="profileDraft"
+  [assignedClients]="currentUserAssignedClients"
+  (viewChange)="setViewKey($event)"
+  (toggleProfile)="openProfile()"
+  (profileDraftChange)="onProfileDraftChange($event)"
+  (saveProfile)="saveProfile()"
+  (logout)="logout()"
+>
+  <!-- View bodies are projected into <app-shell>.
+       They still use the legacy CSS-class styling and will be ported view-by-view in later waves. -->
+  <ng-container *ngIf="setupComplete !== false && !loading && currentUser">
+
+  <section *ngIf="view === 'overview'" class="view-stack">
+    <section class="overview-hero">
+      <div>
+        <span class="eyebrow">Digital marketer cockpit</span>
+        <h2>Client-first monitoring for Google Ads, Meta Ads and GA4.</h2>
+        <p>Scan the full portfolio by customer, see red and green client health, open nested account stacks, and pin KPI boards without losing the operational picture.</p>
+      </div>
+      <div class="hero-metrics">
+        <div><span>Clients</span><b>{{ portfolioStats.clients }}</b><small>Grouped by customer</small></div>
+        <div><span>Ad accounts</span><b>{{ portfolioStats.accounts }}</b><small>Google, Meta and TikTok</small></div>
+        <div><span>Active campaigns</span><b>{{ portfolioStats.activeCampaigns }}</b><small>{{ portfolioStats.stoppedCampaigns }} stopped</small></div>
+        <div><span>Live ads</span><b>{{ portfolioStats.liveAds }}</b><small>Nested under client groups</small></div>
+        <div><span>GA4 properties</span><b>{{ portfolioStats.ga4Properties }}</b><small>Connected analytics</small></div>
+        <div><span>Spend this month</span><b>{{ formatCurrency(portfolioStats.spend) }}</b><small>Plan {{ formatCurrency(portfolioStats.budget) }}</small></div>
+      </div>
+    </section>
+
+    <div class="toolbar">
+      <input class="search-input" [(ngModel)]="search" placeholder="Search client, target or reporting group" />
+      <select [(ngModel)]="statusFilter">
+        <option value="all">All status</option>
+        <option value="red">Needs focus</option>
+        <option value="green">All clear</option>
+      </select>
+      <select [(ngModel)]="categoryFilter">
+        <option value="all">All categories</option>
+        <option *ngFor="let category of categories" [value]="category.key">{{ category.label }}</option>
+      </select>
+      <select [(ngModel)]="sortBy">
+        <option value="priority">Priority</option>
+        <option value="spend">Spend</option>
+        <option value="budget">Budget</option>
+        <option value="roas">ROAS</option>
+        <option value="name">Name</option>
+      </select>
+      <div class="segmented">
+        <button [class.active]="overviewMode === 'grid'" (click)="overviewMode = 'grid'">Grid</button>
+        <button [class.active]="overviewMode === 'table'" (click)="overviewMode = 'table'">Table</button>
+      </div>
+      <button class="btn" [class.active]="groupByReporting" (click)="groupByReporting = !groupByReporting">Reporting groups</button>
+      <span class="count-pill">{{ filteredClients.length }} clients</span>
+    </div>
+
+    <div *ngIf="groupByReporting && filteredClients.length" class="reporting-strip">
+      <article *ngFor="let group of filteredClientGroups; trackBy: trackById" class="reporting-chip-card" [class.hot]="group.alerts">
+        <div>
+          <b>{{ group.name }}</b>
+          <span>{{ group.clients.length }} clients / {{ group.accounts }} accounts / {{ group.campaigns }} campaigns</span>
+        </div>
+        <strong>{{ formatCurrency(group.spend) }}</strong>
+        <small>{{ group.alerts ? group.alerts + " unresolved issues" : "All clear" }}</small>
+      </article>
+    </div>
+
+    <section class="panel budget-dashboard">
+      <div class="section-head">
+        <div>
+          <h2>Budget tracking & pacing</h2>
+          <p>Budget alerts fire at 80% usage and compare spend pace against {{ expectedMonthPace() }}% expected month progress.</p>
+        </div>
+        <span class="count-pill">{{ budgetWatchlist.length }} watched clients</span>
+      </div>
+      <div class="budget-watch-grid">
+        <article *ngFor="let client of budgetWatchlist; trackBy: trackById" class="budget-watch-card" [ngClass]="client.alertLevel">
+          <div>
+            <b>{{ client.name }}</b>
+            <span>{{ client.reportingGroup }} / projected {{ formatCurrency(client.projectedSpend) }}</span>
+          </div>
+          <strong>{{ client.pace }}%</strong>
+          <div class="pace-track"><i [style.width]="budgetPaceWidth(client)" [class.ok]="client.alertLevel === 'ok'"></i></div>
+          <small>{{ client.alertLevel === "warning" ? "80% budget alert" : client.alertLevel === "danger" ? "Budget exceeded" : client.alertLevel === "slow" ? "Pacing behind" : "On pace" }}</small>
+        </article>
+      </div>
+    </section>
+
+    <div *ngIf="!filteredClients.length" class="empty-state">
+      <h2>No clients match the current filters</h2>
+      <p>Adjust the filters or add clients in Client Studio.</p>
+    </div>
+
+    <div *ngIf="filteredClients.length && overviewMode === 'grid'" class="client-grid">
+      <article *ngFor="let client of filteredClients; trackBy: trackById" class="client-card">
+        <div class="card-head">
+          <span class="client-logo glow" [style.background]="'linear-gradient(135deg, ' + client.accent + ', ' + client.accent2 + ')'">{{ clientLogo(client) }}</span>
+          <div>
+            <h2>{{ client.name }}</h2>
+            <p>{{ client.focus }} | {{ client.accounts.length }} accounts | {{ client.campaigns.length }} campaigns</p>
+          </div>
+          <span class="category-chip">{{ categoryLabel(client.category) }}</span>
+        </div>
+
+        <div class="platform-row">
+          <span *ngFor="let platform of platforms" class="platform-chip rich" [class.off]="!client.connections[platform]">
+            <b [style.color]="platformMeta[platform].color">{{ platformMeta[platform].short }}</b>
+            {{ platformMeta[platform].label }}
+          </span>
+        </div>
+
+        <span class="health-pill" [class.ok]="client.health.ok">
+          <i></i>{{ client.health.ok ? "Green / all clear" : "Red / needs focus" }}
+        </span>
+
+        <div class="metric-grid client-kpis">
+          <div><span>Monthly budget</span><b>{{ formatCurrency(client.totalBudget) }}</b></div>
+          <div><span>Spend MTD</span><b>{{ formatCurrency(client.spend) }}</b></div>
+          <div><span>ROAS</span><b [class.hot]="client.roas < 2.4">{{ client.roas | number:'1.1-1' }}x</b></div>
+          <div><span>{{ client.category === "eshop" ? "Revenue" : "Conversions" }}</span><b>{{ client.category === "eshop" ? formatCurrency(client.conversionValue) : formatNumber(client.conversions) }}</b><small *ngIf="client.category !== 'eshop'">Client-level conversion volume</small></div>
+        </div>
+
+        <div class="pace-block">
+          <div><b>Budget pace</b><span>{{ dateRangeLabel() }}</span><strong>{{ budgetPace(client) }}%</strong></div>
+          <div class="pace-track"><i [style.width]="budgetPaceWidth(client)" [class.ok]="client.health.ok"></i></div>
+        </div>
+
+        <div *ngIf="client.health.flags.length" class="alert-box">
+          <b>{{ client.health.flags[0].label }}</b>
+          <span>{{ client.health.flags[0].detail }}</span>
+          <button class="btn compact-btn resolve-btn" (click)="resolveClientIssue(client, client.health.flags[0])">Mark resolved</button>
+        </div>
+
+        <div class="account-preview-list">
+          <div *ngFor="let account of topAccounts(client); trackBy: trackById" class="account-preview">
+            <span class="platform-chip rich mini"><b [style.color]="platformMeta[account.platform]?.color">{{ platformMeta[account.platform]?.short }}</b>{{ platformMeta[account.platform]?.label }}</span>
+            <div>
+              <b>{{ account.name }}</b>
+              <small>{{ formatCurrency(account.spend) }} of {{ formatCurrency(account.monthlyBudget) }}</small>
+            </div>
+            <small>CPC {{ formatCurrency(account.cpc) }} | CPM {{ formatCurrency(account.cpm) }}</small>
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button class="btn primary dark" (click)="jumpToAccounts(client)">Open account stack</button>
+          <button class="btn" (click)="jumpToStudio(client)">Edit</button>
+        </div>
+      </article>
+    </div>
+
+    <div *ngIf="filteredClients.length && overviewMode === 'table'" class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Client</th>
+            <th>Status</th>
+            <th>Spend</th>
+            <th>Budget</th>
+            <th>ROAS</th>
+            <th>Accounts</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr *ngFor="let client of filteredClients; trackBy: trackById">
+            <td><b>{{ client.name }}</b><small>{{ client.focus }}</small></td>
+            <td><span class="status-pill" [class.ok]="client.health.ok">{{ client.health.ok ? "All clear" : "Needs focus" }}</span></td>
+            <td>{{ formatCurrency(client.spend) }}</td>
+            <td>{{ formatCurrency(client.totalBudget) }}</td>
+            <td>{{ client.roas | number:'1.2-2' }}x</td>
+            <td>{{ client.accounts.length }}</td>
+            <td><button class="btn compact-btn" (click)="jumpToAccounts(client)">Open</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+  </section>
+
+  <section *ngIf="view === 'accounts'" class="view-stack accounts-view">
+    <div class="toolbar account-toolbar">
+      <input class="search-input" [(ngModel)]="search" placeholder="Search client, target or reporting group" />
+      <select [(ngModel)]="statusFilter">
+        <option value="all">All status</option>
+        <option value="red">Needs focus</option>
+        <option value="green">All clear</option>
+      </select>
+      <select [(ngModel)]="categoryFilter">
+        <option value="all">All categories</option>
+        <option *ngFor="let category of categories" [value]="category.key">{{ category.label }}</option>
+      </select>
+      <select [(ngModel)]="sortBy">
+        <option value="priority">Sort: Priority</option>
+        <option value="spend">Sort: Spend</option>
+        <option value="budget">Sort: Budget</option>
+        <option value="roas">Sort: ROAS</option>
+        <option value="name">Sort: Name</option>
+      </select>
+      <select [(ngModel)]="accountDateRange.id" (ngModelChange)="onDateRangeChange()">
+        <option *ngFor="let option of dateRangeOptions" [value]="option.value">{{ option.label }}</option>
+      </select>
+      <button class="btn" (click)="reloadLiveData()">Refresh data</button>
+      <span class="count-pill">{{ filteredClients.length }} client stacks</span>
+    </div>
+
+    <div class="account-range-card">
+      <div>
+        <span>Account data range</span>
+        <b>{{ dateRangeLabel() }}</b>
+      </div>
+      <div class="segmented small">
+        <button [class.active]="accountCampaignFilter === 'active'" (click)="accountCampaignFilter = 'active'">Active Only</button>
+        <button [class.active]="accountCampaignFilter === 'paused'" (click)="accountCampaignFilter = 'paused'">Stopped</button>
+        <button [class.active]="accountCampaignFilter === 'all'" (click)="accountCampaignFilter = 'all'">All</button>
+      </div>
+    </div>
+
+    <p *ngIf="!filteredClients.length" class="empty-state">No clients match the current filters.</p>
+
+    <article
+      *ngFor="let client of filteredClients; trackBy: trackById"
+      class="account-stack-card"
+      [class.needs-focus]="!client.health.ok"
+    >
+      <button class="account-stack-head" (click)="toggleStack(client.id); selectedClientId = client.id">
+        <div class="stack-title-cluster">
+          <span class="client-logo glow" [style.background]="'linear-gradient(135deg, ' + client.accent + ', ' + client.accent2 + ')'">{{ clientLogo(client) }}</span>
+          <div class="stack-title-copy">
+            <div class="stack-name-line">
+              <h2>{{ client.name }}</h2>
+              <span class="category-chip">{{ categoryLabel(client.category) }}</span>
+              <span class="status-pill" [class.ok]="client.health.ok">{{ client.health.ok ? "Green / healthy" : "Red / needs focus" }}</span>
+            </div>
+            <p>Target: {{ client.focus }} | {{ client.accounts.length }} accounts | {{ client.activeCampaigns }} live campaigns | {{ client.liveAds }} live ads</p>
+          </div>
+        </div>
+
+        <div class="stack-metrics">
+          <div><span>Budget</span><b>{{ formatCurrency(client.totalBudget) }}</b></div>
+          <div><span>Spend</span><b>{{ formatCurrency(client.spend) }}</b></div>
+          <div><span>Conv. value</span><b>{{ formatCurrency(client.conversionValue) }}</b></div>
+          <div><span>Accounts</span><b>{{ client.accounts.length }}</b></div>
+          <div class="expand-tile"><span>{{ isStackOpen(client.id) ? "Collapse" : "Expand" }}</span><b>{{ isStackOpen(client.id) ? "-" : "+" }}</b></div>
+        </div>
+      </button>
+
+      <div *ngIf="isStackOpen(client.id)" class="account-stack-body">
+        <div class="account-context-strip">
+          <div class="platform-row">
+            <span *ngFor="let channel of activeClientChannels(client); trackBy: trackByPlatform" class="platform-chip rich">
+              <b [style.color]="channel.color">{{ channel.short }}</b>
+              {{ channel.label }}
+            </span>
+            <span *ngIf="!activeClientChannels(client).length" class="tone-badge warning">No accounts linked</span>
+          </div>
+          <div class="stack-badge-row">
+            <span class="tone-badge" [ngClass]="client.health.ok ? 'positive' : 'danger'">{{ client.health.ok ? "All checks passed" : client.health.flags.length + " issues" }}</span>
+            <span class="tone-badge neutral">{{ client.accounts.length }} accounts</span>
+            <span class="tone-badge neutral">{{ client.activeCampaigns }} active campaigns</span>
+            <span *ngIf="accountCampaignFilter !== 'all'" class="tone-badge info">{{ accountCampaignFilter === "active" ? "Active only" : "Stopped only" }}</span>
+          </div>
+        </div>
+
+        <div class="account-filter-row">
+          <div class="segmented small">
+            <button [class.active]="accountCampaignFilter === 'active'" (click)="accountCampaignFilter = 'active'">Active Only</button>
+            <button [class.active]="accountCampaignFilter === 'paused'" (click)="accountCampaignFilter = 'paused'">Stopped</button>
+            <button [class.active]="accountCampaignFilter === 'all'" (click)="accountCampaignFilter = 'all'">All</button>
+          </div>
+          <span>Showing {{ client.campaigns.length }} campaigns across {{ client.accounts.length }} accounts</span>
+        </div>
+
+        <div *ngIf="!activeClientChannels(client).length" class="hierarchy-empty">
+          <b>No accounts linked for this client</b>
+          <span>Connect this client's ad accounts in Client Studio before drilling into live campaigns.</span>
+        </div>
+
+        <div *ngIf="activeClientChannels(client).length" class="stack-support-grid">
+          <section class="stack-alert-list">
+            <div *ngIf="!client.health.flags.length" class="clean-alert">No red flags. This client is clean at a glance.</div>
+            <div *ngFor="let flag of client.health.flags; trackBy: trackById" class="issue-pill">
+              <span><b>{{ flag.label }}</b>{{ flag.detail }}</span>
+              <button class="btn compact-btn resolve-btn" (click)="resolveClientIssue(client, flag)">Mark resolved</button>
+            </div>
+          </section>
+
+          <section class="ai-strategist-panel">
+            <div>
+              <h3>AI strategist</h3>
+              <p>Model-backed strategic guidance for the current client target: {{ client.focus }}.</p>
+            </div>
+            <span class="action-cue" [ngClass]="strategistReady ? 'positive' : 'warning'">{{ strategistReady ? "Ready to analyze" : "Needs Claude key" }}</span>
+            <p class="strategy-copy">{{ strategySummary(client) }}</p>
+            <button class="btn compact-btn primary" [disabled]="!strategistReady">{{ strategistReady ? "Refresh analysis" : "Open Connections" }}</button>
+          </section>
+
+          <section class="assigned-strip">
+            <span>Assigned</span>
+            <div>
+              <ng-container *ngFor="let user of accountUsers; trackBy: trackById">
+                <span *ngIf="client.assignedUserIds?.includes(user.id)" class="assigned-user-chip">
+                  <i class="avatar" [style.background]="user.accent">{{ userInitials(user) }}</i>
+                  {{ user.name }}
+                </span>
+              </ng-container>
+              <span *ngIf="!client.assignedUserIds?.length" class="tone-badge warning">Unassigned</span>
+            </div>
+          </section>
+        </div>
+
+        <div class="account-ledger-stack" [innerHTML]="accountLedgerHtml(client)"></div>
+      </div>
+    </article>
+  </section>
+
+  <section *ngIf="view === 'search_terms'" class="view-stack search-terms-view">
+    <div class="panel search-workbench">
+      <div class="section-head">
+        <div class="search-title-row">
+          <span *ngIf="selectedContextClient as client" class="client-logo glow" [style.background]="'linear-gradient(135deg, ' + client.accent + ', ' + client.accent2 + ')'">{{ clientLogo(client) }}</span>
+          <div>
+            <span class="eyebrow">Search Terms</span>
+            <h2>Keyword review and negative mining</h2>
+            <p>Hybrid Google Ads workbench for campaign-level and ad-group search term review.</p>
+          </div>
+        </div>
+        <div class="action-cue-row">
+          <span class="platform-chip rich"><b>G</b>Google Ads</span>
+          <span class="action-cue" [class.info]="searchTermsState.loading" [class.success]="searchTermsState.terms.length">{{ searchTermsState.loading ? "Loading terms" : (searchTermsState.terms.length ? "Terms loaded" : "Ready to review") }}</span>
+          <button class="btn" (click)="loadSearchHierarchy()" [disabled]="searchTermsState.loading">Load campaigns</button>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <label>
+          <span>Client</span>
+          <select [(ngModel)]="searchTermsState.clientId" (ngModelChange)="onSearchClientChange()">
+            <option *ngFor="let client of enrichedClients; trackBy: trackById" [value]="client.id">{{ client.name }}</option>
+          </select>
+        </label>
+        <label>
+          <span>Google Ads account</span>
+          <select [(ngModel)]="searchTermsState.assetId" (ngModelChange)="onSearchAssetChange()">
+            <option value="">Select account</option>
+            <option *ngFor="let asset of googleSearchAssets; trackBy: trackById" [value]="asset.id">{{ asset.name }}</option>
+          </select>
+        </label>
+        <label>
+          <span>Date range</span>
+          <select [(ngModel)]="searchTermsState.dateRange">
+            <option *ngFor="let option of searchTermDateRangeOptions" [value]="option.value">{{ option.label }}</option>
+          </select>
+        </label>
+        <label>
+          <span>Campaign</span>
+          <select [(ngModel)]="searchTermsState.campaignId" (ngModelChange)="onSearchCampaignChange()">
+            <option value="">Select campaign</option>
+            <option *ngFor="let campaign of searchTermsState.hierarchy?.campaigns || []" [value]="campaign.id">{{ campaign.name }}</option>
+          </select>
+        </label>
+        <label>
+          <span>Ad group</span>
+          <select [(ngModel)]="searchTermsState.adGroupId">
+            <option value="">Campaign level</option>
+            <option *ngFor="let adGroup of searchTermsState.hierarchy?.adGroups || []" [value]="adGroup.id">{{ adGroup.name }}</option>
+          </select>
+        </label>
+      </div>
+
+      <p *ngIf="searchTermsState.error" class="notice danger">{{ searchTermsState.error }}</p>
+
+      <div class="button-row">
+        <button class="btn primary" (click)="loadSearchTerms()" [disabled]="searchTermsState.loading">{{ searchTermsState.loading ? "Loading..." : "Load terms" }}</button>
+        <button class="btn" (click)="exportSearchTerms('negative')" [disabled]="!filteredSearchTerms.length">Export negatives</button>
+        <button class="btn" (click)="exportSearchTerms('keyword')" [disabled]="!filteredSearchTerms.length">Export keywords</button>
+      </div>
+
+      <div class="toolbar sub-toolbar search-filter-dock">
+        <input class="search-input" [(ngModel)]="searchTermsState.query" placeholder="Search loaded terms" />
+        <select [(ngModel)]="searchTermsState.tagFilter">
+          <option value="all">All tags</option>
+          <option value="good">Good</option>
+          <option value="neutral">Neutral</option>
+          <option value="bad">Bad</option>
+          <option value="untagged">Untagged</option>
+        </select>
+        <select [(ngModel)]="searchTermsState.termStatusFilter">
+          <option value="active">Active only</option>
+          <option value="inactive">Inactive</option>
+          <option value="all">All statuses</option>
+        </select>
+        <select [(ngModel)]="searchTermsState.actionFilter">
+          <option value="all">All actions</option>
+          <option value="add_negative">Add negative</option>
+          <option value="keep">Keep</option>
+          <option value="review">Review</option>
+          <option value="needs_data">Needs data</option>
+        </select>
+        <select [(ngModel)]="searchTermsState.termSortBy">
+          <option value="cost">Sort: cost</option>
+          <option value="score">Sort: score</option>
+          <option value="conversions">Sort: conversions</option>
+          <option value="clicks">Sort: clicks</option>
+          <option value="action">Sort: action</option>
+          <option value="searchTerm">Sort: search term</option>
+        </select>
+        <span class="count-pill">{{ filteredSearchTerms.length }} visible</span>
+      </div>
+
+      <div class="metric-grid wide search-term-summary">
+        <div><span>Loaded terms</span><b>{{ searchTermSummary.total }}</b></div>
+        <div><span>Good terms</span><b>{{ searchTermSummary.good }}</b></div>
+        <div><span>Needs review</span><b>{{ searchTermSummary.neutral }}</b></div>
+        <div><span>Negative candidates</span><b>{{ searchTermSummary.bad }}</b></div>
+        <div><span>Visible spend</span><b>{{ formatCurrency(searchTermSummary.spend) }}</b></div>
+        <div><span>Flagged waste</span><b>{{ formatCurrency(searchTermSummary.waste) }}</b></div>
+      </div>
+
+      <div class="review-tabs review-dock">
+        <button [class.active]="searchTermsState.reviewPanel === 'table'" (click)="searchTermsState.reviewPanel = 'table'">Campaign / ad group table</button>
+        <button [class.active]="searchTermsState.reviewPanel === 'negatives'" (click)="searchTermsState.reviewPanel = 'negatives'">Suggested negatives</button>
+        <button [class.active]="searchTermsState.reviewPanel === 'keywords'" (click)="searchTermsState.reviewPanel = 'keywords'">Keyword opportunities</button>
+      </div>
+    </div>
+
+    <div *ngIf="searchTermsState.reviewPanel === 'table'" class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Search term</th>
+            <th>Status</th>
+            <th>Cost</th>
+            <th>Clicks</th>
+            <th>Conv.</th>
+            <th>Score</th>
+            <th>Action</th>
+            <th>Tag</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr *ngFor="let term of filteredSearchTerms; trackBy: trackById" class="search-term-row" [ngClass]="effectiveSearchTermTag(term) || 'untagged'">
+            <td>
+              <b>{{ term.searchTerm }}</b>
+              <small>{{ term.campaignName }} {{ term.adGroupName ? " / " + term.adGroupName : "" }}</small>
+            </td>
+            <td><span class="tone-badge neutral">{{ formatSearchTermStatus(term.status) }}</span></td>
+            <td>{{ formatCurrency(term.cost) }}</td>
+            <td>{{ formatNumber(term.clicks) }}</td>
+            <td>{{ formatNumber(term.conversions) }}</td>
+            <td><span class="score-pill">{{ term.score }}</span></td>
+            <td><span class="tone-badge" [ngClass]="term.action === 'add_negative' ? 'danger' : term.action === 'keep' ? 'positive' : 'warning'">{{ searchTermActionLabel(term.action) }}</span></td>
+            <td>
+              <select [ngModel]="term.manualTag || ''" (ngModelChange)="tagSearchTerm(term, $event)" [disabled]="searchTermsState.tagSavingKey === term.searchTerm">
+                <option value="">Untagged</option>
+                <option value="good">Good</option>
+                <option value="neutral">Neutral</option>
+                <option value="bad">Bad</option>
+              </select>
+            </td>
+          </tr>
+          <tr *ngIf="!filteredSearchTerms.length">
+            <td colspan="8">{{ searchTermsState.terms.length ? "No loaded terms match the current filters." : "No search terms loaded." }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <article *ngIf="searchTermsState.reviewPanel === 'negatives'" class="panel review-panel">
+      <div class="section-head">
+        <div>
+          <h2>Suggested negatives</h2>
+          <p>Unique words from manual-bad, auto-bad and score-flagged search terms, excluding good terms.</p>
+        </div>
+        <button class="btn" (click)="exportSuggestedNegatives()" [disabled]="!suggestedNegatives.length">Export word list</button>
+      </div>
+      <div class="negative-grid">
+        <button *ngFor="let item of suggestedNegatives; trackBy: trackById" class="negative-word">
+          <b>{{ item.word }}</b>
+          <span>{{ item.count }} terms / {{ formatCurrency(item.cost) }}</span>
+        </button>
+        <p *ngIf="!suggestedNegatives.length" class="empty-line">No suggested negative words in the current filtered view.</p>
+      </div>
+    </article>
+
+    <article *ngIf="searchTermsState.reviewPanel === 'keywords'" class="panel review-panel">
+      <div class="section-head">
+        <div>
+          <h2>Keyword opportunities</h2>
+          <p>Terms worth keeping or promoting based on conversion signal and relevance score.</p>
+        </div>
+        <button class="btn" (click)="exportSearchTerms('keyword')" [disabled]="!keywordOpportunities.length">Export keywords</button>
+      </div>
+      <div class="opportunity-list">
+        <div *ngFor="let term of keywordOpportunities; trackBy: trackById" class="opportunity-row">
+          <div>
+            <b>{{ term.searchTerm }}</b>
+            <span>{{ term.campaignName }} / {{ term.adGroupName || "Campaign level" }}</span>
+          </div>
+          <strong>{{ term.score }}</strong>
+          <span>{{ formatCurrency(term.cost) }} / {{ formatNumber(term.conversions) }} conv.</span>
+        </div>
+        <p *ngIf="!keywordOpportunities.length" class="empty-line">No keyword opportunities in the current filtered view.</p>
+      </div>
+    </article>
+  </section>
+
+  <section *ngIf="view === 'analytics'" class="view-stack analytics-view">
+    <section *ngIf="selectedAnalyticsClient as client" class="analytics-command">
+      <div class="analytics-hero">
+        <div>
+          <span class="eyebrow">Analytics workspace</span>
+          <h2>{{ client.name }} measurement command center</h2>
+          <p>{{ client.ga4 ? "GA4, paid media and saved KPI boards are connected in one operating view." : "Enable GA4 in Client Studio to unlock the full analytics workspace." }}</p>
+        </div>
+        <div class="metric-grid wide">
+          <div><span>Sessions</span><b>{{ formatNumber(client.ga4?.sessions || 0) }}</b><small>{{ analyticsDelta(client, 'sessions') | number:'1.0-0' }}% trend</small></div>
+          <div><span>Users</span><b>{{ formatNumber(client.ga4?.users || 0) }}</b><small>GA4 user volume</small></div>
+          <div><span>Conversions</span><b>{{ formatNumber(client.ga4?.conversions || 0) }}</b><small>{{ analyticsDelta(client, 'conversions') | number:'1.0-0' }}% trend</small></div>
+          <div><span>Revenue</span><b>{{ formatCurrency(client.ga4?.revenue || 0) }}</b><small>Analytics value</small></div>
+        </div>
+      </div>
+
+      <div class="account-range-card analytics-range-card">
+        <span>Analytics data range</span>
+        <div class="date-preset-row">
+          <button *ngFor="let option of dateRangeOptions" class="btn compact-btn" [class.active]="accountDateRange.id === option.value" (click)="accountDateRange.id = option.value; onDateRangeChange()">{{ option.label }}</button>
+        </div>
+      </div>
+
+      <div class="analytics-grid">
+        <article class="panel">
+          <div class="section-head tight"><div><h2>Traffic mix</h2><p>Paid, organic and owned channel context</p></div></div>
+          <div *ngFor="let channel of trafficMix(client)" class="mix-row">
+            <div><b>{{ channel.label }}</b><span>{{ channel.detail }}</span></div>
+            <strong>{{ channel.value }}%</strong>
+            <i [style.width.%]="channel.value"></i>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="section-head tight"><div><h2>Journey bridge</h2><p>From paid click to GA4 result</p></div></div>
+          <div class="journey-grid">
+            <div *ngFor="let item of journeyItems(client)">
+              <span>{{ item.label }}</span>
+              <b>{{ item.value }}</b>
+              <small>{{ item.detail }}</small>
+            </div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="section-head tight"><div><h2>Diagnostics</h2><p>Readiness checks for analytics reporting</p></div></div>
+          <div *ngFor="let item of analyticsDiagnostics(client)" class="readiness-row" [class.ok]="item.tone === 'positive'">
+            <b>{{ item.label }}</b>
+            <span>{{ item.detail }}</span>
+          </div>
+        </article>
+      </div>
+
+      <div class="ai-insight-grid">
+        <article class="panel ai-summary-card">
+          <div class="section-head tight"><div><h2>AI executive summary</h2><p>Why it happened and what to do next</p></div></div>
+          <p>{{ aiExecutiveSummary(client) }}</p>
+          <div class="recommendation-list">
+            <div *ngFor="let item of strategicRecommendations(client)">
+              <span>{{ item.scope }}</span>
+              <b>{{ item.title }}</b>
+              <small>{{ item.detail }}</small>
+            </div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="section-head tight"><div><h2>Predictive analytics</h2><p>Month-end projection if strategy stays unchanged</p></div></div>
+          <div class="metric-grid wide">
+            <div><span>Projected spend</span><b>{{ formatCurrency(predictiveForecast(client).spend) }}</b></div>
+            <div><span>Projected conv.</span><b>{{ formatNumber(predictiveForecast(client).conversions) }}</b></div>
+            <div><span>Projected value</span><b>{{ formatCurrency(predictiveForecast(client).value) }}</b></div>
+            <div><span>Confidence</span><b>{{ predictiveForecast(client).confidence }}</b></div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="section-head tight"><div><h2>Cross-channel attribution</h2><p>Awareness-to-intent assist model</p></div></div>
+          <div *ngFor="let item of attributionModel(client)" class="mix-row attribution-row">
+            <div><b>{{ item.label }}</b><span>{{ item.detail }}</span></div>
+            <strong>{{ item.value }}%</strong>
+            <i [style.width.%]="item.value"></i>
+          </div>
+        </article>
+      </div>
+    </section>
+    <div class="panel">
+      <div class="section-head">
+        <div>
+          <h2>Analytics</h2>
+          <p>{{ dateRangeLabel() }} / {{ charts.length }} saved charts</p>
+        </div>
+        <button class="btn" (click)="reloadLiveData()">Refresh data</button>
+      </div>
+
+      <div class="form-grid">
+        <label>
+          <span>Client</span>
+          <select [(ngModel)]="chartForm.clientId">
+            <option *ngFor="let client of enrichedClients; trackBy: trackById" [value]="client.id">{{ client.name }}</option>
+          </select>
+        </label>
+        <label>
+          <span>Source</span>
+          <select [(ngModel)]="chartForm.scope">
+            <option value="client">Client summary</option>
+            <option value="account">Specific ad account</option>
+            <option value="ga4">GA4</option>
+          </select>
+        </label>
+        <label *ngIf="chartForm.scope === 'account'">
+          <span>Account</span>
+          <select [(ngModel)]="chartForm.accountId">
+            <option *ngFor="let account of chartAccountsForClient(); trackBy: trackById" [value]="account.id">{{ platformMeta[account.platform]?.label }} / {{ account.name }}</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="checkbox-grid">
+        <label *ngFor="let metric of ['spend','conversionValue','clicks','conversions','cpc','cpm','roas','sessions','users','revenue']">
+          <input type="checkbox" [checked]="chartForm.metrics.includes(metric)" (change)="toggleChartMetric(metric)" />
+          {{ kpiLibrary[metric].label }}
+        </label>
+      </div>
+
+      <div class="button-row">
+        <button class="btn primary" (click)="addChart()">Add chart</button>
+        <button *ngFor="let preset of analyticsChartPresets" class="btn" (click)="addChartPreset(preset.scope, preset.metrics)">{{ preset.label }}</button>
+        <button class="btn" (click)="clearCharts()" [disabled]="!charts.length">Clear</button>
+      </div>
+    </div>
+
+    <div class="chart-grid">
+      <article *ngFor="let chart of charts; trackBy: trackById" class="panel chart-panel">
+        <div class="section-head tight">
+          <div>
+            <h2>{{ chartClient(chart)?.name || "Chart" }}</h2>
+            <p>{{ chart.scope }}</p>
+          </div>
+          <button class="btn compact-btn" (click)="removeChart(chart)">Remove</button>
+        </div>
+        <div *ngFor="let metric of chart.metrics" class="chart-block">
+          <div class="chart-label">
+            <b>{{ kpiLibrary[metric]?.label || metric }}</b>
+            <span>{{ chartSummary(chart, metric) }}</span>
+          </div>
+          <svg viewBox="0 0 320 110" role="img">
+            <line x1="0" y1="92" x2="320" y2="92"></line>
+            <polyline [attr.points]="chartPoints(chart, metric)" [attr.stroke]="kpiLibrary[metric]?.color || '#0f8f66'"></polyline>
+          </svg>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section *ngIf="view === 'reports'" class="view-stack reports-view">
+    <div class="panel report-controls">
+      <div class="section-head">
+        <div>
+          <h2>Campaign PDF reports</h2>
+          <p>Build, schedule and print client-ready performance reports for {{ dateRangeLabel() }}.</p>
+        </div>
+        <button class="btn primary" (click)="printReport()">Generate PDF</button>
+      </div>
+
+      <div *ngIf="selectedReportClient as client" class="report-context-strip">
+        <div>
+          <span>Reporting group</span>
+          <b>{{ client.reportingGroup || client.name }}</b>
+        </div>
+        <div>
+          <span>Target</span>
+          <b>{{ client.focus }}</b>
+        </div>
+        <div>
+          <span>Group spend</span>
+          <b>{{ formatCurrency(client.spend) }}</b>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <label>
+          <span>Client</span>
+          <select [(ngModel)]="reportClientId">
+            <optgroup *ngFor="let group of reportClientGroups; trackBy: trackById" [label]="group.name">
+              <option *ngFor="let client of group.clients; trackBy: trackById" [value]="client.id">{{ client.name }}</option>
+            </optgroup>
+          </select>
+        </label>
+        <label>
+          <span>Date range</span>
+          <select [(ngModel)]="accountDateRange.id" (ngModelChange)="onDateRangeChange()">
+            <option *ngFor="let option of dateRangeOptions" [value]="option.value">{{ option.label }}</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="report-stepper">
+        <button
+          *ngFor="let panel of reportPanels(selectedReportClient); trackBy: trackById"
+          class="report-step"
+          [class.active]="reportPanel === panel.id"
+          (click)="setReportPanel(panel.id)"
+        >
+          <span>
+            <b>{{ panel.label }}</b>
+            <small>{{ panel.detail }}</small>
+          </span>
+          <strong>{{ panel.badge }}</strong>
+        </button>
+      </div>
+
+      <div *ngIf="reportPanel === 'setup'" class="preset-grid focused-grid">
+        <button *ngFor="let preset of reportPresets" class="preset-card" [class.active]="reportPreset === preset.id" (click)="applyReportPreset(preset.id)">
+          <b>{{ preset.label }}</b>
+          <span>{{ preset.description }}</span>
+          <small>{{ preset.sections.length }} pages</small>
+        </button>
+      </div>
+
+      <div *ngIf="reportPanel === 'widgets'" class="drag-builder-grid focused-grid">
+        <article class="builder-panel">
+          <div class="section-head tight"><div><h2>Drag-and-drop widget builder</h2><p>Drag widgets into the report canvas or click to add.</p></div></div>
+          <div class="widget-palette">
+            <button
+              *ngFor="let widget of reportWidgetPalette"
+              class="widget-tile"
+              draggable="true"
+              (dragstart)="onReportWidgetDragStart($event, widget.id)"
+              (click)="addReportWidget(widget.id)"
+            >
+              <b>{{ widget.label }}</b>
+              <span>{{ widget.kind }}</span>
+              <small>{{ widget.description }}</small>
+            </button>
+          </div>
+        </article>
+        <article class="builder-panel report-canvas" (dragover)="$event.preventDefault()" (drop)="onReportWidgetDrop($event)">
+          <div class="section-head tight"><div><h2>Report canvas</h2><p>{{ reportWidgets.length }} widgets selected for this template</p></div></div>
+          <div class="canvas-widget-list">
+            <div *ngFor="let widget of reportWidgets; let i = index; trackBy: trackById" class="canvas-widget">
+              <div>
+                <b>{{ widget.label }}</b>
+                <span>{{ widget.description }}</span>
+              </div>
+              <div class="button-row compact-actions">
+                <button class="btn compact-btn" (click)="moveReportWidget(i, -1)" [disabled]="i === 0">Up</button>
+                <button class="btn compact-btn" (click)="moveReportWidget(i, 1)" [disabled]="i === reportWidgets.length - 1">Down</button>
+                <button class="btn compact-btn danger" (click)="removeReportWidget(widget)">Remove</button>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <div *ngIf="selectedReportClient as client" class="report-builder-grid">
+        <article *ngIf="reportPanel === 'pages'" class="builder-panel">
+          <div class="section-head tight">
+            <div><h2>Report builder</h2><p>{{ reportSections.length }} selected pages</p></div>
+            <div class="button-row compact-actions">
+              <button class="btn compact-btn" (click)="selectAllReportSections()">All</button>
+              <button class="btn compact-btn" (click)="resetReportSections()">Preset</button>
+            </div>
+          </div>
+          <div class="section-option-grid">
+            <label *ngFor="let section of reportSectionOptions" class="section-option" [class.active]="reportSections.includes(section.id)">
+              <input type="checkbox" [checked]="reportSections.includes(section.id)" (change)="toggleReportSection(section.id)" />
+              <b>{{ section.label }}</b>
+              <span>{{ section.description }}</span>
+              <small>{{ reportSectionStatus(section.id, client) }}</small>
+            </label>
+          </div>
+        </article>
+
+        <article *ngIf="reportPanel === 'pages'" class="builder-panel">
+          <div class="section-head tight"><div><h2>Live data readiness</h2><p>Report inputs for {{ client.name }}</p></div></div>
+          <div *ngFor="let item of reportReadinessItems(client)" class="readiness-row" [class.ok]="item.ok">
+            <b>{{ item.label }}</b>
+            <span>{{ item.detail }}</span>
+          </div>
+          <p *ngIf="reportBuilderCue" class="notice" [class.success]="reportBuilderCue.tone === 'success'">{{ reportBuilderCue.message }}</p>
+        </article>
+
+        <article *ngIf="reportPanel === 'brand'" class="builder-panel single-focus-panel">
+          <div class="section-head tight"><div><h2>White labeling</h2><p>Use the agency brand on dashboards, PDF covers and live links.</p></div></div>
+          <div class="white-label-preview" [style.background]="agencyGradient()">
+            <strong>{{ agencyBrand.logoText }}</strong>
+            <span>{{ agencyBrand.name }}</span>
+          </div>
+          <div class="form-grid compact">
+            <label>
+              <span>Agency name</span>
+              <input [(ngModel)]="agencyBrand.name" />
+            </label>
+            <label>
+              <span>Logo text</span>
+              <input [(ngModel)]="agencyBrand.logoText" maxlength="4" />
+            </label>
+            <label>
+              <span>Primary color</span>
+              <input type="color" [(ngModel)]="agencyBrand.primaryColor" />
+            </label>
+            <label>
+              <span>Accent color</span>
+              <input type="color" [(ngModel)]="agencyBrand.accentColor" />
+            </label>
+          </div>
+          <label>
+            <span>Report footer</span>
+            <input [(ngModel)]="agencyBrand.reportFooter" />
+          </label>
+          <button class="btn primary" (click)="saveAgencyBrand()">Save white label</button>
+        </article>
+
+        <article *ngIf="reportPanel === 'schedule'" class="builder-panel single-focus-panel">
+          <div class="section-head tight"><div><h2>Recurring report plan</h2><p>{{ reportScheduleSummary }}</p></div></div>
+          <label class="toggle-row">
+            <input type="checkbox" [(ngModel)]="reportScheduleDraft.enabled" />
+            Send this report on a schedule
+          </label>
+          <div class="form-grid compact">
+            <label>
+              <span>Frequency</span>
+              <select [(ngModel)]="reportScheduleDraft.frequency">
+                <option value="monthly">Monthly</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            </label>
+            <label *ngIf="reportScheduleDraft.frequency === 'monthly'">
+              <span>Day of month</span>
+              <input type="number" min="1" max="28" [(ngModel)]="reportScheduleDraft.dayOfMonth" />
+            </label>
+            <label *ngIf="reportScheduleDraft.frequency === 'weekly'">
+              <span>Weekday</span>
+              <select [(ngModel)]="reportScheduleDraft.weekday">
+                <option value="monday">Monday</option>
+                <option value="tuesday">Tuesday</option>
+                <option value="wednesday">Wednesday</option>
+                <option value="thursday">Thursday</option>
+                <option value="friday">Friday</option>
+              </select>
+            </label>
+            <label>
+              <span>Delivery</span>
+              <select [(ngModel)]="reportScheduleDraft.delivery">
+                <option value="pdf">PDF attachment</option>
+                <option value="live_link">Live link</option>
+                <option value="pdf_and_link">PDF and live link</option>
+              </select>
+            </label>
+            <label>
+              <span>Time</span>
+              <input type="time" [(ngModel)]="reportScheduleDraft.time" />
+            </label>
+          </div>
+          <label class="toggle-row">
+            <input type="checkbox" [(ngModel)]="reportScheduleDraft.liveLinkEnabled" />
+            Keep a live client link active for this report
+          </label>
+          <label>
+            <span>Recipients</span>
+            <input [(ngModel)]="reportScheduleDraft.recipients" placeholder="client@example.com, team@example.com" />
+          </label>
+          <label>
+            <span>Notes</span>
+            <textarea [(ngModel)]="reportScheduleDraft.notes" rows="3"></textarea>
+          </label>
+          <button class="btn primary" (click)="saveReportSchedulePlan()">Save plan</button>
+        </article>
+      </div>
+
+    </div>
+
+    <div *ngIf="selectedReportClient as client" class="report-preview-toolbar">
+      <div>
+        <span class="eyebrow">Live print preview</span>
+        <b>{{ reportSections.length }} pages selected for {{ client.name }}</b>
+      </div>
+      <div class="action-cue-row">
+        <span class="action-cue success">PDF ready</span>
+        <span class="action-cue info">{{ dateRangeLabel() }}</span>
+        <span class="tone-badge neutral">{{ reportPreset }}</span>
+      </div>
+    </div>
+
+    <article *ngIf="selectedReportClient as client" class="report-document report-preview-dock reference-report">
+      <section *ngIf="reportSections.includes('cover')" class="ref-report-page ref-cover-page">
+        <div class="ref-cover-title">
+          <h1>{{ agencyBrand.name }} Monthly Report</h1>
+          <p>{{ reportPeriodRangeLabel() }}</p>
+        </div>
+        <div class="ref-platform-marks" aria-hidden="true">
+          <span class="ref-platform-mark google">G</span>
+          <span class="ref-platform-mark facebook">f</span>
+          <span class="ref-platform-mark instagram">◎</span>
+        </div>
+        <div class="ref-cover-client">{{ reportClientWordmark(client) }}</div>
+      </section>
+
+      <section *ngIf="reportSections.includes('analytics') || reportSections.includes('google_overview') || reportSections.includes('executive_summary')" class="ref-report-page ref-kpi-page">
+        <div class="ref-page-wordmark">{{ reportClientWordmark(client) }}</div>
+
+        <div *ngIf="reportSections.includes('analytics')" class="ref-kpi-section">
+          <h2>GA4 Monthly Overview</h2>
+          <p>vs previous period</p>
+          <div class="ref-kpi-grid">
+            <div *ngFor="let kpi of reportKpis(client, 'ga4'); trackBy: trackById" class="ref-kpi">
+              <strong>{{ kpi.value }}</strong>
+              <small>{{ kpi.previous }}</small>
+              <span [class.positive]="kpi.tone === 'positive'" [class.negative]="kpi.tone === 'negative'">{{ kpi.delta }}</span>
+              <b>{{ kpi.label }}</b>
+            </div>
+          </div>
+        </div>
+
+        <div *ngIf="reportSections.includes('google_overview')" class="ref-kpi-section">
+          <h2>Google Ads Performance Overview</h2>
+          <div class="ref-kpi-grid">
+            <div *ngFor="let kpi of reportKpis(client, 'google'); trackBy: trackById" class="ref-kpi">
+              <strong>{{ kpi.value }}</strong>
+              <small>{{ kpi.previous }}</small>
+              <span [class.positive]="kpi.tone === 'positive'" [class.negative]="kpi.tone === 'negative'">{{ kpi.delta }}</span>
+              <b>{{ kpi.label }}</b>
+            </div>
+          </div>
+        </div>
+
+        <div *ngIf="reportSections.includes('executive_summary')" class="ref-executive-notes">
+          <h3>Executive Notes</h3>
+          <div class="ref-note-grid">
+            <p>{{ aiExecutiveSummary(client) }}</p>
+            <ul>
+              <li *ngFor="let flag of client.health.flags | slice:0:3">{{ flag.label }}: {{ flag.detail }}</li>
+              <li *ngIf="!client.health.flags.length">No active alert flags for the selected period.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section *ngIf="reportSections.includes('google_campaigns')" class="ref-report-page ref-table-page">
+        <div class="ref-page-wordmark">{{ reportClientWordmark(client) }}</div>
+        <h2>Performance Campaigns</h2>
+        <table class="ref-performance-table blue">
+          <thead>
+            <tr>
+              <th>Campaign</th>
+              <th>Cost (EUR)</th>
+              <th>Conversions</th>
+              <th>Average CPC (EUR)</th>
+              <th>Total Conversion Value (EUR)</th>
+              <th>ROAS</th>
+              <th>Cost/Conversion (EUR)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let row of reportCampaignRows(client, 'google_ads', 'primary'); trackBy: trackById">
+              <td><b>{{ row.name }}</b></td>
+              <td>{{ row.cost }}</td>
+              <td>{{ row.conversions }}</td>
+              <td>{{ row.cpc }}</td>
+              <td>{{ row.value }}</td>
+              <td>{{ row.roas }}</td>
+              <td>{{ row.costPerConversion }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Search Campaigns</h2>
+        <table class="ref-performance-table blue">
+          <thead>
+            <tr>
+              <th>Campaign</th>
+              <th>Cost (EUR)</th>
+              <th>Conversions</th>
+              <th>Average CPC (EUR)</th>
+              <th>Total Conversion Value (EUR)</th>
+              <th>ROAS</th>
+              <th>Cost/Conversion (EUR)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let row of reportCampaignRows(client, 'google_ads', 'secondary'); trackBy: trackById">
+              <td><b>{{ row.name }}</b></td>
+              <td>{{ row.cost }}</td>
+              <td>{{ row.conversions }}</td>
+              <td>{{ row.cpc }}</td>
+              <td>{{ row.value }}</td>
+              <td>{{ row.roas }}</td>
+              <td>{{ row.costPerConversion }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section *ngIf="reportSections.includes('google_overview')" class="ref-report-page ref-chart-page">
+        <div class="ref-page-wordmark">{{ reportClientWordmark(client) }}</div>
+        <h2>Conversions Performance</h2>
+        <div class="ref-chart-legend">
+          <span><i class="teal"></i> Conversion Cost (EUR)</span>
+          <span><i class="gold"></i> Conversions</span>
+        </div>
+        <svg class="ref-line-chart" viewBox="0 0 720 220" role="img" aria-label="Conversions performance">
+          <line x1="64" y1="42" x2="672" y2="42"></line>
+          <line x1="64" y1="90" x2="672" y2="90"></line>
+          <line x1="64" y1="138" x2="672" y2="138"></line>
+          <line x1="64" y1="186" x2="672" y2="186"></line>
+          <text x="38" y="46">240</text>
+          <text x="38" y="94">160</text>
+          <text x="44" y="142">80</text>
+          <text x="50" y="190">0</text>
+          <polyline class="teal" [attr.points]="reportLinePoints(client, 'costPerConversion')"></polyline>
+          <polyline class="gold" [attr.points]="reportLinePoints(client, 'conversions')"></polyline>
+          <text x="78" y="210">2. Apr</text>
+          <text x="330" y="210">16. Apr</text>
+          <text x="612" y="210">30. Apr</text>
+        </svg>
+      </section>
+
+      <section *ngIf="reportSections.includes('google_geo')" class="ref-report-page ref-geo-page">
+        <div class="ref-page-wordmark">{{ reportClientWordmark(client) }}</div>
+        <h2>Geographic Performance</h2>
+        <div class="ref-map-abstract" aria-hidden="true">
+          <span *ngFor="let row of reportGeoRows(client); trackBy: trackById" [style.left.%]="row.x" [style.top.%]="row.y">{{ row.conversions }}</span>
+        </div>
+        <div class="ref-map-legend"><i></i> Conversions</div>
+        <table class="ref-performance-table blue geo">
+          <thead>
+            <tr>
+              <th>Region</th>
+              <th>Clicks</th>
+              <th>Conversions</th>
+              <th>Conversion Cost (EUR)</th>
+              <th>Total Conversion Value (EUR)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let row of reportGeoRows(client); trackBy: trackById">
+              <td><b>{{ row.region }}</b></td>
+              <td>{{ row.clicks }}</td>
+              <td>{{ row.conversions }}</td>
+              <td>{{ row.cost }}</td>
+              <td>{{ row.value }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section *ngIf="reportSections.includes('google_keywords')" class="ref-report-page ref-keyword-page">
+        <div class="ref-page-wordmark">{{ reportClientWordmark(client) }}</div>
+        <h2>Keyword Performance (Top 10)</h2>
+        <table class="ref-performance-table green">
+          <thead>
+            <tr>
+              <th>Keyword</th>
+              <th>Clicks</th>
+              <th>Average CPC (EUR)</th>
+              <th>CTR (%)</th>
+              <th>Cost (EUR)</th>
+              <th>Conversions</th>
+              <th>Cost/Conversion (EUR)</th>
+              <th>Value/Conv. (EUR)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let row of reportKeywordRows(client); trackBy: trackById">
+              <td><b>{{ row.keyword }}</b></td>
+              <td>{{ row.clicks }}</td>
+              <td>{{ row.cpc }}</td>
+              <td>{{ row.ctr }}</td>
+              <td>{{ row.cost }}</td>
+              <td>{{ row.conversions }}</td>
+              <td>{{ row.costPerConversion }}</td>
+              <td>{{ row.valuePerConversion }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section *ngIf="reportSections.includes('meta_overview') || reportSections.includes('meta_campaigns') || reportSections.includes('meta_ads')" class="ref-report-page ref-table-page">
+        <div class="ref-page-wordmark">{{ reportClientWordmark(client) }}</div>
+        <h2>Meta Ads Performance Overview</h2>
+        <div class="ref-kpi-grid compact">
+          <div *ngFor="let kpi of reportKpis(client, 'meta'); trackBy: trackById" class="ref-kpi">
+            <strong>{{ kpi.value }}</strong>
+            <small>{{ kpi.previous }}</small>
+            <span [class.positive]="kpi.tone === 'positive'" [class.negative]="kpi.tone === 'negative'">{{ kpi.delta }}</span>
+            <b>{{ kpi.label }}</b>
+          </div>
+        </div>
+        <h2>Meta Campaigns</h2>
+        <table class="ref-performance-table blue">
+          <thead>
+            <tr>
+              <th>Campaign</th>
+              <th>Cost (EUR)</th>
+              <th>Conversions</th>
+              <th>Average CPC (EUR)</th>
+              <th>Total Conversion Value (EUR)</th>
+              <th>ROAS</th>
+              <th>Cost/Conversion (EUR)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let row of reportCampaignRows(client, 'meta_ads', 'all'); trackBy: trackById">
+              <td><b>{{ row.name }}</b></td>
+              <td>{{ row.cost }}</td>
+              <td>{{ row.conversions }}</td>
+              <td>{{ row.cpc }}</td>
+              <td>{{ row.value }}</td>
+              <td>{{ row.roas }}</td>
+              <td>{{ row.costPerConversion }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section *ngIf="reportSections.includes('strategist')" class="ref-report-page ref-notes-page">
+        <div class="ref-page-wordmark">{{ reportClientWordmark(client) }}</div>
+        <h2>Strategic Notes</h2>
+        <div class="ref-strategy-copy">
+          <h3>{{ strategistReady ? "Claude strategist ready" : "Strategist not configured" }}</h3>
+          <p>{{ strategistReady ? "Η σελιδα αυτη κραταει τη διαγνωση, την επομενη κινηση και τις προτεραιοτητες για το account." : "Add Anthropic API settings in Connections to activate the strategist page for this report." }}</p>
+          <ol>
+            <li *ngFor="let recommendation of strategicRecommendations(client); trackBy: trackById">
+              <b>{{ recommendation.scope }} - {{ recommendation.title }}</b>
+              <span>{{ recommendation.detail }}</span>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section *ngIf="reportSections.includes('definitions')" class="ref-report-page ref-definitions-page">
+        <div class="ref-page-wordmark">{{ reportClientWordmark(client) }}</div>
+        <h2>Google Metrics Definitions</h2>
+        <table class="ref-definition-table">
+          <tbody>
+            <tr *ngFor="let row of reportDefinitionRows(); trackBy: trackById">
+              <th>{{ row.metric }}</th>
+              <td>{{ row.definition }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <footer>{{ agencyBrand.reportFooter }}</footer>
+      </section>
+    </article>
+  </section>
+
+  <section *ngIf="view === 'alerts'" class="alert-grid">
+    <article class="panel alert-lane red-lane">
+      <div class="lane-head">
+        <span class="status-pill">Red lane / needs focus</span>
+        <span>{{ redClients.length }} clients</span>
+        <p>Clients listed here failed at least one rule. Resolve flags inline or open the account stack for deeper work.</p>
+      </div>
+      <div *ngFor="let client of redClients; trackBy: trackById" class="alert-client-card">
+        <div class="alert-client-head">
+          <span class="client-logo glow" [style.background]="'linear-gradient(135deg, ' + client.accent + ', ' + client.accent2 + ')'">{{ clientLogo(client) }}</span>
+          <div>
+            <b>{{ client.name }}</b>
+            <span>{{ categoryLabel(client.category) }} / {{ formatCurrency(client.spend) }} spend</span>
+          </div>
+          <span class="status-pill">Red / needs focus</span>
+        </div>
+        <div class="alert-flag-list">
+          <div *ngFor="let flag of client.health.flags" class="alert-row issue-row">
+            <div>
+              <b>{{ flag.label }}</b>
+              <span>{{ flag.detail }}</span>
+            </div>
+            <button class="btn compact-btn resolve-btn" (click)="resolveClientIssue(client, flag)">Mark resolved</button>
+          </div>
+        </div>
+        <div class="button-row compact-actions">
+          <button class="btn compact-btn primary" (click)="jumpToAccounts(client)">Open accounts</button>
+          <button class="btn compact-btn" (click)="jumpToStudio(client)">Edit rules</button>
+        </div>
+      </div>
+      <p *ngIf="!redClients.length" class="empty-line">No unresolved account issues.</p>
+    </article>
+    <article class="panel alert-lane green-lane">
+      <div class="lane-head">
+        <span class="status-pill ok">Green lane / all clear</span>
+        <span>{{ greenClients.length }} clients</span>
+        <p>These clients passed alert checks for the selected period.</p>
+      </div>
+      <div *ngFor="let client of greenClients; trackBy: trackById" class="alert-client-card calm">
+        <div class="alert-client-head">
+          <span class="client-logo glow" [style.background]="'linear-gradient(135deg, ' + client.accent + ', ' + client.accent2 + ')'">{{ clientLogo(client) }}</span>
+          <div>
+            <b>{{ client.name }}</b>
+            <span>{{ categoryLabel(client.category) }} / {{ formatCurrency(client.spend) }} spend</span>
+          </div>
+          <span class="status-pill ok">Green / healthy</span>
+        </div>
+        <p class="clean-line">All alert checks passed.</p>
+        <button class="btn compact-btn" (click)="jumpToAccounts(client)">Open accounts</button>
+      </div>
+    </article>
+  </section>
+
+  <section *ngIf="view === 'studio'" class="studio-layout">
+    <aside class="panel side-list studio-sidebar">
+      <div class="section-head tight">
+        <div>
+          <span class="eyebrow">Client Studio</span>
+          <h2>Clients</h2>
+        </div>
+        <button class="btn compact-btn" (click)="createClient()">New</button>
+      </div>
+      <input class="side-search" [(ngModel)]="studioSearch" placeholder="Search clients" />
+      <button *ngFor="let client of studioClients; trackBy: trackById" class="list-item" [class.active]="selectedClientId === client.id" (click)="selectedClientId = client.id; onStudioClientChange()">
+        <b>{{ client.name }}</b>
+        <span>{{ categoryLabel(client.category) }}</span>
+      </button>
+      <p *ngIf="!studioClients.length" class="empty-line">No clients match this search.</p>
+    </aside>
+
+    <article *ngIf="studioDraft as draft" class="panel studio-editor">
+      <div class="section-head">
+        <div class="studio-client-title">
+          <span class="client-logo glow" [style.background]="'linear-gradient(135deg, ' + draft.accent + ', ' + draft.accent2 + ')'">{{ draft.logoText || clientLogo(draft) }}</span>
+          <div>
+            <h2>{{ draft.name }}</h2>
+            <p>{{ draft.focus }} / {{ draft.reportingGroup || draft.name }}</p>
+          </div>
+        </div>
+        <div class="button-row">
+          <span class="action-cue" [class.success]="clientNotice" [class.danger]="clientError">{{ clientNotice || clientError || "All changes saved" }}</span>
+          <button class="btn primary" (click)="saveStudioDraft()" [disabled]="clientSavingKey === draft.id">Save client</button>
+          <button class="btn danger" (click)="deleteClient(draft)" [disabled]="!isDirector">Delete</button>
+        </div>
+      </div>
+
+      <div class="studio-brand-strip">
+        <div>
+          <span>Connection stack</span>
+          <b>{{ activeClientChannels(draft).length || 0 }} active channels</b>
+        </div>
+        <div>
+          <span>Monthly total</span>
+          <b>{{ formatCurrency((draft.budgets.google_ads || 0) + (draft.budgets.meta_ads || 0) + (draft.budgets.tiktok_ads || 0)) }}</b>
+        </div>
+        <div>
+          <span>Owner</span>
+          <b>{{ draft.owner || "Unassigned" }}</b>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <label>
+          <span>Name</span>
+          <input [(ngModel)]="draft.name" [disabled]="!isDirector" />
+        </label>
+        <label>
+          <span>Category</span>
+          <select [(ngModel)]="draft.category" [disabled]="!isDirector">
+            <option *ngFor="let category of categories" [value]="category.key">{{ category.label }}</option>
+          </select>
+        </label>
+        <label>
+          <span>Target</span>
+          <select [(ngModel)]="draft.focus">
+            <option *ngFor="let target of targetOptions" [value]="target">{{ target }}</option>
+          </select>
+        </label>
+        <label>
+          <span>Reporting group</span>
+          <input [(ngModel)]="draft.reportingGroup" [disabled]="!isDirector" />
+        </label>
+        <label>
+          <span>Logo text</span>
+          <input [(ngModel)]="draft.logoText" maxlength="4" />
+        </label>
+        <label>
+          <span>Owner</span>
+          <input [(ngModel)]="draft.owner" />
+        </label>
+      </div>
+
+      <div class="metric-grid editor-grid">
+        <label>
+          <span>Google budget</span>
+          <input type="number" [(ngModel)]="draft.budgets.google_ads" />
+        </label>
+        <label>
+          <span>Meta budget</span>
+          <input type="number" [(ngModel)]="draft.budgets.meta_ads" />
+        </label>
+        <label>
+          <span>TikTok budget</span>
+          <input type="number" [(ngModel)]="draft.budgets.tiktok_ads" />
+        </label>
+        <label>
+          <span>Min ROAS</span>
+          <input type="number" step="0.1" [(ngModel)]="draft.rules.minRoas" />
+        </label>
+      </div>
+
+      <div class="editor-section auto-tagging-panel">
+        <div class="section-head tight">
+          <div>
+            <h3>Search term auto-tagging</h3>
+            <p>These thresholds are applied to live search terms for this client. Manual tags still override auto tags.</p>
+          </div>
+          <span class="status-pill" [class.ok]="draft.rules.searchTerms.autoTaggingEnabled">{{ draft.rules.searchTerms.autoTaggingEnabled ? "Auto-tagging on" : "Auto-tagging off" }}</span>
+        </div>
+        <label class="toggle-row">
+          <input type="checkbox" [(ngModel)]="draft.rules.searchTerms.autoTaggingEnabled" />
+          Automatically tag live search terms using these thresholds
+        </label>
+        <div class="metric-grid editor-grid">
+          <label>
+            <span>Good min conversions</span>
+            <input type="number" min="0" step="1" [(ngModel)]="draft.rules.searchTerms.goodMinConversions" />
+          </label>
+          <label>
+            <span>Good max CPA</span>
+            <input type="number" min="0" step="1" [(ngModel)]="draft.rules.searchTerms.goodMaxCostPerConversion" />
+          </label>
+          <label>
+            <span>Bad spend no conv.</span>
+            <input type="number" min="0" step="1" [(ngModel)]="draft.rules.searchTerms.badNoConversionSpend" />
+          </label>
+          <label>
+            <span>Bad clicks no conv.</span>
+            <input type="number" min="0" step="1" [(ngModel)]="draft.rules.searchTerms.badNoConversionClicks" />
+          </label>
+          <label>
+            <span>Bad max relevance</span>
+            <input type="number" min="0" max="100" step="1" [(ngModel)]="draft.rules.searchTerms.badMaxRelevanceScore" />
+          </label>
+          <label>
+            <span>Neutral min clicks</span>
+            <input type="number" min="0" step="1" [(ngModel)]="draft.rules.searchTerms.neutralMinClicks" />
+          </label>
+        </div>
+      </div>
+
+      <div class="editor-section" *ngIf="isDirector">
+        <h3>Assignments</h3>
+        <div class="checkbox-grid">
+          <label *ngFor="let user of accountUsers; trackBy: trackById">
+            <input type="checkbox" [checked]="draft.assignedUserIds.includes(user.id)" (change)="toggleAssignedUser(user.id)" />
+            {{ user.name }}
+          </label>
+        </div>
+      </div>
+
+      <div class="editor-section">
+        <h3>Linked Assets</h3>
+        <div *ngFor="let platform of platforms" class="asset-block">
+          <div class="asset-head">
+            <b>{{ platformMeta[platform].label }}</b>
+            <span>{{ selectedAssetNames(draft, platform) }}</span>
+          </div>
+          <div class="asset-search-row">
+            <input [(ngModel)]="assetSearch[platform]" placeholder="Search by name, ID or connection" />
+            <button class="btn compact-btn" (click)="assetSearch[platform] = ''" [disabled]="!assetSearch[platform]">Clear</button>
+            <span class="count-pill">{{ filteredAssetsFor(platform).length }} matches</span>
+          </div>
+          <div class="checkbox-grid asset-grid">
+            <label *ngFor="let asset of filteredAssetsFor(platform); trackBy: trackById">
+              <input type="checkbox" [checked]="draft.linkedAssets[platform].includes(asset.id)" (change)="toggleLinkedAsset(platform, asset.id)" />
+              {{ asset.name }}
+              <small>{{ asset.subtitle || asset.externalId }}</small>
+            </label>
+            <p *ngIf="!filteredAssetsFor(platform).length" class="empty-line">No assets match this search.</p>
+          </div>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <section *ngIf="view === 'users'" class="view-stack">
+    <article class="panel">
+      <div class="section-head">
+        <div><h2>Users</h2><p>{{ filteredUsers.length }} visible / {{ users.length }} active users</p></div>
+      </div>
+      <div class="toolbar sub-toolbar">
+        <input class="search-input" [(ngModel)]="userSearch" placeholder="Search users" />
+        <select [(ngModel)]="userRoleFilter">
+          <option value="all">All roles</option>
+          <option value="account">Account</option>
+          <option value="director">Director</option>
+        </select>
+        <span class="count-pill">{{ filteredUsers.length }} users</span>
+      </div>
+      <div class="form-grid">
+        <input [(ngModel)]="userDraft.name" placeholder="Name" />
+        <input [(ngModel)]="userDraft.title" placeholder="Title" />
+        <input [(ngModel)]="userDraft.email" placeholder="Email" />
+        <input [(ngModel)]="userDraft.password" placeholder="Password" type="password" />
+        <select [(ngModel)]="userDraft.role">
+          <option value="account">Account</option>
+          <option value="director">Director</option>
+        </select>
+        <button class="btn primary" (click)="createUser()" [disabled]="userSavingKey === '__create__'">Create user</button>
+      </div>
+      <p *ngIf="userError" class="notice danger">{{ userError }}</p>
+    </article>
+
+    <article *ngFor="let user of filteredUsers; trackBy: trackById" class="panel user-row">
+      <span class="avatar" [style.background]="user.accent">{{ userInitials(user) }}</span>
+      <input [(ngModel)]="user.name" />
+      <input [(ngModel)]="user.title" />
+      <input [(ngModel)]="user.email" />
+      <select [(ngModel)]="user.role">
+        <option value="account">Account</option>
+        <option value="director">Director</option>
+      </select>
+      <input [(ngModel)]="user.newPassword" placeholder="New password" type="password" />
+      <button class="btn" (click)="updateUser(user)" [disabled]="userSavingKey === user.id">Save</button>
+      <button class="btn danger" (click)="deleteUser(user)" [disabled]="user.id === currentUserId">Delete</button>
+    </article>
+    <p *ngIf="!filteredUsers.length" class="empty-line">No users match this search.</p>
+  </section>
+
+  <section *ngIf="view === 'connections'" class="view-stack">
+    <article class="panel strategist-settings">
+      <div class="section-head">
+        <div>
+          <h2>AI strategist settings</h2>
+          <p>{{ strategistReady ? "Claude strategist is ready for account and search-term diagnosis." : "Add Anthropic settings to restore strategist pages, account guidance and search-term recommendations." }}</p>
+        </div>
+        <span class="status-pill" [class.ok]="strategistReady">{{ strategistReady ? "Ready" : "Needs setup" }}</span>
+      </div>
+      <div class="form-grid">
+        <label>
+          <span>Anthropic API key</span>
+          <input [(ngModel)]="setupForm.ANTHROPIC_API_KEY" type="password" autocomplete="off" />
+        </label>
+        <label>
+          <span>Strategist model</span>
+          <input [(ngModel)]="setupForm.ANTHROPIC_STRATEGIST_MODEL" placeholder="claude-sonnet-4-6" autocomplete="off" />
+        </label>
+      </div>
+      <div class="button-row">
+        <button class="btn primary" (click)="saveSetup()" [disabled]="setupSaving">Save strategist settings</button>
+        <button class="btn" (click)="setView('search_terms')">Open Search Terms</button>
+      </div>
+    </article>
+
+    <div class="connection-grid">
+      <article *ngFor="let platform of platforms" class="panel connection-card">
+        <div class="section-head tight">
+          <div>
+            <h2>{{ platformMeta[platform].label }}</h2>
+            <p>{{ platformStatus(platform).ready ? "Configured" : "Missing settings" }}</p>
+          </div>
+          <span class="status-pill" [class.ok]="platformStatus(platform).ready">{{ platformStatus(platform).ready ? "Ready" : "Setup" }}</span>
+        </div>
+        <button class="btn primary wide" (click)="connectProvider(platform)" [disabled]="integrationBusy['connect:' + platform]">
+          Connect {{ platformMeta[platform].label }}
+        </button>
+        <p *ngIf="platformStatus(platform).missing?.length" class="notice warning">Missing: {{ platformStatus(platform).missing.join(", ") }}</p>
+      </article>
+    </div>
+
+    <article class="panel">
+      <div class="section-head">
+        <div><h2>Multi-channel integrations</h2><p>Core channels are live; extra connectors can be tracked as import or warehouse slots.</p></div>
+      </div>
+      <div class="extra-channel-grid">
+        <div *ngFor="let channel of extraIntegrationChannels" class="extra-channel-card">
+          <b>{{ channel.label }}</b>
+          <span>{{ channel.detail }}</span>
+          <small>Connector slot</small>
+        </div>
+      </div>
+    </article>
+
+    <article class="panel">
+      <div class="section-head">
+        <div><h2>Synced profiles</h2><p>{{ filteredProviderProfiles.length }} visible / {{ providerProfiles.length }} profiles</p></div>
+        <button class="btn" (click)="refreshIntegrations()">Refresh</button>
+      </div>
+      <div class="toolbar sub-toolbar">
+        <input class="search-input" [(ngModel)]="connectionSearch" placeholder="Search profiles, assets or IDs" />
+        <button class="btn compact-btn" (click)="connectionSearch = ''" [disabled]="!connectionSearch">Clear search</button>
+        <span class="count-pill">{{ filteredProviderProfiles.length }} matches</span>
+      </div>
+      <p *ngIf="integrationState.error" class="notice danger">{{ integrationState.error }}</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Profile</th><th>Platform</th><th>Assets</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            <tr *ngFor="let profile of filteredProviderProfiles; trackBy: trackById">
+              <td><b>{{ profile.name }}</b><small>{{ profile.email || profile.externalId }}</small></td>
+              <td>{{ platformMeta[profile.platform]?.label }}</td>
+              <td>{{ profile.assets?.length || 0 }}</td>
+              <td>{{ profile.status }}</td>
+              <td class="table-actions">
+                <button class="btn compact-btn" (click)="syncProvider(profile)" [disabled]="integrationBusy[profile.id]">Sync</button>
+                <button class="btn compact-btn danger" (click)="disconnectProvider(profile)" [disabled]="integrationBusy['disconnect:' + profile.id]">Disconnect</button>
+              </td>
+            </tr>
+            <tr *ngIf="!filteredProviderProfiles.length"><td colspan="5">{{ providerProfiles.length ? "No provider profiles match this search." : "No provider profiles synced." }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="provider-profile-grid">
+        <article *ngFor="let profile of filteredProviderProfiles; trackBy: trackById" class="provider-profile-card">
+          <div>
+            <b>{{ profile.name }}</b>
+            <span>{{ platformMeta[profile.platform]?.label }} / {{ profile.status }}</span>
+          </div>
+          <strong>{{ profile.assets?.length || 0 }}</strong>
+          <small>{{ profile.email || profile.externalId }}</small>
+          <div class="asset-pill-row">
+            <span *ngFor="let asset of (profile.assets || []) | slice:0:4" class="asset-pill">{{ asset.name }}</span>
+          </div>
+        </article>
+      </div>
+    </article>
+
+    <article class="panel setup-panel">
+      <div class="section-head"><div><h2>Settings</h2><p>Provider and strategist credentials</p></div></div>
+      <div class="setup-grid">
+        <label *ngFor="let key of ['GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_ADS_DEVELOPER_TOKEN','GOOGLE_ADS_LOGIN_CUSTOMER_ID','META_APP_ID','META_APP_SECRET','TIKTOK_APP_ID','TIKTOK_APP_SECRET','ANTHROPIC_API_KEY','ANTHROPIC_STRATEGIST_MODEL']">
+          <span>{{ key }}</span>
+          <input [(ngModel)]="setupForm[key]" [type]="key.includes('SECRET') || key.includes('TOKEN') || key.includes('KEY') ? 'password' : 'text'" autocomplete="off" />
+        </label>
+      </div>
+      <div class="button-row">
+        <button class="btn primary" (click)="saveSetup()" [disabled]="setupSaving">Save settings</button>
+      </div>
+    </article>
+  </section>
+  </ng-container>
+</app-shell>
+
