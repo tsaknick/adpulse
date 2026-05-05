@@ -23,9 +23,7 @@ import {
   getLiveDataNotice,
 } from "../foundation/post-foundation-helpers";
 import {
-  ActionCueComponent,
   AlertListComponent,
-  AppButtonComponent,
   AssignedUsersStripComponent,
   CategoryChipComponent,
   LiveDataCueComponent,
@@ -81,9 +79,7 @@ export class LedgerMetricComponent {
   standalone: true,
   imports: [
     CommonModule,
-    ActionCueComponent,
     AlertListComponent,
-    AppButtonComponent,
     AssignedUsersStripComponent,
     CategoryChipComponent,
     LedgerMetricComponent,
