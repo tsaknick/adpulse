@@ -9,9 +9,14 @@ import { Component, OnDestroy, OnInit } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 
 import {
+  ACCOUNTS_BASE,
+  ADS_BASE,
+  CAMPAIGNS_BASE,
   DEMO_USER_PASSWORD,
+  GA4_BASE,
   STORAGE_KEYS,
   T,
+  buildLiveGa4Summary,
   createEmptyClientDirectoryState,
   createEmptyGa4LiveState,
   createEmptyGoogleAdsLiveState,
@@ -22,10 +27,15 @@ import {
   createEmptyUserDirectoryState,
   evaluateHealth,
   fitCols,
+  getAccountDateRangePayload,
+  getConversionValue,
   getDefaultAccountDateRange,
   hydrateClients,
   hydrateUsers,
+  isStoppedCampaign,
   readStoredValue,
+  sanitizeGoogleAdsId,
+  splitTotal,
 } from "./foundation/adpulse-foundation";
 import { groupClientsByReportingGroup } from "./foundation/post-foundation-helpers";
 import { IntegrationApiService } from "./integration-api.service";
@@ -323,7 +333,7 @@ type ViewKey = "overview" | "accounts" | "search_terms" | "analytics" | "reports
 
               <app-account-date-range-control
                 [value]="accountsDateRange"
-                (valueChange)="accountsDateRange = $event"
+                (valueChange)="onAccountsDateRangeChange($event)"
               ></app-account-date-range-control>
 
               <app-empty-state
@@ -380,7 +390,7 @@ type ViewKey = "overview" | "accounts" | "search_terms" | "analytics" | "reports
                 [readinessItems]="reportReadinessItems"
                 [builderCue]="reportBuilderCue"
                 (clientChange)="reportClientId = $event"
-                (dateRangeChange)="accountsDateRange = $event"
+                (dateRangeChange)="onAccountsDateRangeChange($event)"
                 (presetChange)="reportPreset = $event"
                 (sectionsChange)="reportSections = $event"
                 (scheduleDraftChange)="reportScheduleDraft = $event"
@@ -497,6 +507,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
     await this.refreshIntegrations({ silent: true });
     this.ensureStudioDraft();
+    this.reloadLiveData(true);
   }
 
   private async refreshIntegrations({ silent = false }: { silent?: boolean } = {}) {
@@ -524,7 +535,7 @@ export class AppComponent implements OnInit, OnDestroy {
     const data: any = event?.data;
     if (!data || data.source !== "adpulse-oauth") return;
     if (data.ok) {
-      this.refreshIntegrations({ silent: true });
+      this.refreshIntegrations({ silent: true }).then(() => this.reloadLiveData(true));
       this.pushToast("Connection completed successfully.", "success", "Integrations");
     } else {
       this.integrationState = {
@@ -566,36 +577,147 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   private enrichClient(client: any): any {
-    const accounts = (client.accounts || []).map((account: any) => ({ ...account }));
-    const campaigns = (client.campaigns || []).map((campaign: any) => ({ ...campaign }));
-    const ads = (client.ads || []).map((ad: any) => ({ ...ad }));
+    // Mirrors React enrichment (adpulse-v5.jsx ~line 10780): merges live data
+    // from googleAdsLiveState / metaAdsLiveState / tiktokAdsLiveState /
+    // ga4LiveState into the client when assets are linked, otherwise falls
+    // back to the seed demo data.
+    const hasAnyProviders = this.providerProfiles.length > 0;
+
+    const liveGoogleAccounts = this.googleAdsLiveState.accounts.filter((a: any) => a.clientId === client.id);
+    const liveGoogleCampaigns = this.googleAdsLiveState.campaigns.filter((c: any) => c.clientId === client.id);
+    const liveGoogleAds = this.googleAdsLiveState.ads.filter((a: any) => a.clientId === client.id);
+    const liveMetaAccounts = this.metaAdsLiveState.accounts.filter((a: any) => a.clientId === client.id);
+    const liveMetaCampaigns = this.metaAdsLiveState.campaigns.filter((c: any) => c.clientId === client.id);
+    const liveMetaAds = this.metaAdsLiveState.ads.filter((a: any) => a.clientId === client.id);
+    const liveTikTokAccounts = this.tiktokAdsLiveState.accounts.filter((a: any) => a.clientId === client.id);
+    const liveTikTokCampaigns = this.tiktokAdsLiveState.campaigns.filter((c: any) => c.clientId === client.id);
+    const liveTikTokAds = this.tiktokAdsLiveState.ads.filter((a: any) => a.clientId === client.id);
+    const liveGa4Reports = this.ga4LiveState.properties.filter((p: any) => p.clientId === client.id);
+
+    const linkedAssetCounts = {
+      google_ads: Array.isArray(client.linkedAssets?.google_ads) ? client.linkedAssets.google_ads.length : 0,
+      meta_ads: Array.isArray(client.linkedAssets?.meta_ads) ? client.linkedAssets.meta_ads.length : 0,
+      tiktok_ads: Array.isArray(client.linkedAssets?.tiktok_ads) ? client.linkedAssets.tiktok_ads.length : 0,
+      ga4: Array.isArray(client.linkedAssets?.ga4) ? client.linkedAssets.ga4.length : 0,
+    };
+    const hasLinkedGoogle = linkedAssetCounts.google_ads > 0;
+    const hasLinkedMeta = linkedAssetCounts.meta_ads > 0;
+    const hasLinkedTikTok = linkedAssetCounts.tiktok_ads > 0;
+    const hasLinkedGa4 = linkedAssetCounts.ga4 > 0;
+    const hasStoredLinkedAssets = hasLinkedGoogle || hasLinkedMeta || hasLinkedTikTok || hasLinkedGa4;
+
+    const useLiveGoogle = hasLinkedGoogle;
+    const useLiveMeta = hasLinkedMeta;
+    const useLiveTikTok = hasLinkedTikTok;
+    const useLiveGa4 = hasLinkedGa4;
+
+    const syncingPlatforms = [
+      hasLinkedGoogle && this.googleAdsLiveState.loading ? "google_ads" : "",
+      hasLinkedMeta && this.metaAdsLiveState.loading ? "meta_ads" : "",
+      hasLinkedTikTok && this.tiktokAdsLiveState.loading ? "tiktok_ads" : "",
+      hasLinkedGa4 && this.ga4LiveState.loading ? "ga4" : "",
+    ].filter(Boolean);
+
+    const effectiveConnections = {
+      google_ads: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedGoogle : !!client.connections?.google_ads,
+      meta_ads: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedMeta : !!client.connections?.meta_ads,
+      tiktok_ads: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedTikTok : !!client.connections?.tiktok_ads,
+      ga4: hasAnyProviders || hasStoredLinkedAssets ? hasLinkedGa4 : !!client.connections?.ga4,
+    } as any;
+
+    const visibleAccounts = [
+      ...ACCOUNTS_BASE.filter((a: any) =>
+        a.clientId === client.id
+        && effectiveConnections[a.platform]
+        && (!useLiveGoogle || a.platform !== "google_ads")
+        && (!useLiveMeta || a.platform !== "meta_ads")
+        && (!useLiveTikTok || a.platform !== "tiktok_ads"),
+      ),
+      ...(useLiveGoogle ? liveGoogleAccounts : []),
+      ...(useLiveMeta ? liveMetaAccounts : []),
+      ...(useLiveTikTok ? liveTikTokAccounts : []),
+    ];
+    const visibleCampaigns = [
+      ...CAMPAIGNS_BASE.filter((c: any) =>
+        c.clientId === client.id
+        && effectiveConnections[c.platform]
+        && (!useLiveGoogle || c.platform !== "google_ads")
+        && (!useLiveMeta || c.platform !== "meta_ads")
+        && (!useLiveTikTok || c.platform !== "tiktok_ads"),
+      ),
+      ...(useLiveGoogle ? liveGoogleCampaigns : []),
+      ...(useLiveMeta ? liveMetaCampaigns : []),
+      ...(useLiveTikTok ? liveTikTokCampaigns : []),
+    ];
+    const visibleAds = [
+      ...ADS_BASE.filter((a: any) =>
+        a.clientId === client.id
+        && effectiveConnections[a.platform]
+        && (!useLiveGoogle || a.platform !== "google_ads")
+        && (!useLiveMeta || a.platform !== "meta_ads")
+        && (!useLiveTikTok || a.platform !== "tiktok_ads"),
+      ),
+      ...(useLiveGoogle ? liveGoogleAds : []),
+      ...(useLiveMeta ? liveMetaAds : []),
+      ...(useLiveTikTok ? liveTikTokAds : []),
+    ];
+
+    const ga4 = effectiveConnections.ga4
+      ? useLiveGa4 ? buildLiveGa4Summary(client, liveGa4Reports, this.ga4LiveState) : (GA4_BASE as any)[client.id]
+      : null;
+
     const sumByKey = (items: any[], key: string) =>
       items.reduce((total, item) => total + (Number(item?.[key]) || 0), 0);
-    const totalBudget = (Number(client.budgets?.google_ads) || 0)
-      + (Number(client.budgets?.meta_ads) || 0)
-      + (Number(client.budgets?.tiktok_ads) || 0);
-    const spend = sumByKey(accounts, "spend");
-    const conversions = sumByKey(accounts, "conversions");
-    const conversionValue = sumByKey(accounts, "conversionValue");
-    const clicks = sumByKey(accounts, "clicks");
-    const impressions = sumByKey(accounts, "impressions");
-    const activeCampaigns = campaigns.filter((c: any) => c.status !== "PAUSED" && c.status !== "REMOVED").length;
-    const liveAds = ads.length;
-    const cpc = clicks > 0 ? spend / clicks : 0;
-    const cpm = impressions > 0 ? (spend / impressions) * 1000 : 0;
-    const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+    const spend = sumByKey(visibleAccounts, "spend");
+    const clicks = sumByKey(visibleAccounts, "clicks");
+    const impressions = sumByKey(visibleAccounts, "impressions");
+    const conversions = sumByKey(visibleAccounts, "conversions");
+    const conversionValue = visibleAccounts.reduce((acc: number, a: any) => acc + getConversionValue(a), 0);
+
+    const googleBudget = effectiveConnections.google_ads ? Number(client.budgets?.google_ads) || 0 : 0;
+    const metaBudget = effectiveConnections.meta_ads ? Number(client.budgets?.meta_ads) || 0 : 0;
+    const tiktokBudget = effectiveConnections.tiktok_ads ? Number(client.budgets?.tiktok_ads) || 0 : 0;
+    const totalBudget = googleBudget + metaBudget + tiktokBudget;
+
     const roas = spend > 0 ? conversionValue / spend : 0;
+    const cpc = clicks > 0 ? spend / clicks : 0;
+    const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+    const activeCampaigns = visibleCampaigns.filter((c: any) => !isStoppedCampaign(c)).length;
+    const stoppedCampaigns = visibleCampaigns.filter((c: any) => isStoppedCampaign(c)).length;
+    const liveAds = visibleAds.filter((a: any) => a.status === "live" || a.status === "learning").length;
+
+    const shouldPauseHealthChecks = (effectiveConnections.google_ads || effectiveConnections.meta_ads || effectiveConnections.tiktok_ads) && visibleAccounts.length === 0;
     const enriched: any = {
       ...client,
-      accounts, campaigns, ads,
-      totalBudget, spend, conversions, conversionValue, clicks, impressions, cpc, cpm, ctr, roas,
-      activeCampaigns, liveAds,
-      linkedAssetCount: this.countLinkedAssets(client),
-      linkedAssetCounts: this.countLinkedAssetsByPlatform(client),
-      syncingPlatforms: [],
-      ga4: client.ga4 || null,
+      connections: effectiveConnections,
+      accounts: visibleAccounts,
+      campaigns: visibleCampaigns,
+      ads: visibleAds,
+      ga4,
+      linkedAssetCount: Object.values(linkedAssetCounts).reduce((acc: number, n: any) => acc + n, 0),
+      linkedAssetCounts,
+      syncingPlatforms,
+      spend,
+      clicks,
+      impressions,
+      conversions,
+      conversionValue,
+      ctr: impressions ? +(ctr).toFixed(2) : 0,
+      cpc: clicks ? +(cpc).toFixed(2) : 0,
+      roas: +roas.toFixed(2),
+      totalBudget,
+      activeCampaigns,
+      stoppedCampaigns,
+      liveAds,
     };
-    enriched.health = evaluateHealth(enriched, accounts, campaigns, enriched.ga4);
+    enriched.health = shouldPauseHealthChecks
+      ? { ok: true, flags: [], score: 0 }
+      : evaluateHealth(
+          { ...enriched, budgets: { ...(client.budgets || {}), google_ads: googleBudget, meta_ads: metaBudget, tiktok_ads: tiktokBudget } },
+          visibleAccounts,
+          visibleCampaigns,
+          ga4,
+        );
     return enriched;
   }
 
@@ -827,6 +949,7 @@ export class AppComponent implements OnInit, OnDestroy {
     try {
       await this.api.syncIntegrationProfile(profileId);
       await this.refreshIntegrations({ silent: true });
+      this.reloadLiveData(true);
       this.pushToast("Profile synced.", "success", "Integrations");
     } catch (error: any) {
       this.pushToast(error?.message || "Sync failed.", "danger", "Integrations");
@@ -839,6 +962,7 @@ export class AppComponent implements OnInit, OnDestroy {
     try {
       await this.api.disconnectIntegrationProfile(profileId);
       await this.refreshIntegrations({ silent: true });
+      this.reloadLiveData(true);
       this.pushToast("Profile disconnected.", "success", "Integrations");
     } catch (error: any) {
       this.pushToast(error?.message || "Disconnect failed.", "danger", "Integrations");
@@ -1028,6 +1152,153 @@ export class AppComponent implements OnInit, OnDestroy {
     this.reportBuilderCue = { tone: "success", message: "Schedule plan saved." };
     setTimeout(() => (this.reportBuilderCue = null), 3200);
     this.pushToast("Report schedule saved.", "success", "Reports");
+  }
+
+    // ── Live data fetching ─────────────────────────────────────────────
+  // Builds per-platform request lists from accessibleClients × linkedAssets,
+  // then calls the corresponding /api/{platform}/live-overview endpoint.
+  // Mirrors the React useEffects (adpulse-v5.jsx ~line 10500 onward).
+
+  private get providerAssetLookup(): Record<string, Map<string, any>> {
+    const lookup: Record<string, Map<string, any>> = {
+      google_ads: new Map(), meta_ads: new Map(), tiktok_ads: new Map(), ga4: new Map(),
+    };
+    for (const profile of this.providerProfiles || []) {
+      const platform = profile.platform;
+      if (!lookup[platform]) continue;
+      for (const asset of profile.assets || []) {
+        lookup[platform].set(asset.id, { ...asset, connectionId: profile.id, connectionStatus: profile.status });
+      }
+    }
+    return lookup;
+  }
+
+  private buildPlatformRequests(platform: string): any[] {
+    const lookup = this.providerAssetLookup[platform];
+    if (!lookup) return [];
+    return this.accessibleClients.flatMap((client: any) => {
+      const linked = (client.linkedAssets?.[platform] || [])
+        .map((id: string) => lookup.get(id))
+        .filter((asset: any) => asset && (platform !== "google_ads" || asset.type !== "Manager account") && sanitizeGoogleAdsId(asset.externalId));
+      if (!linked.length) return [];
+      const budgetHints = splitTotal(Number(client.budgets?.[platform]) || 0, linked.length, `${client.id}-${platform}-budget`);
+      return linked.map((asset: any, i: number) => {
+        const base: any = {
+          key: `${client.id}:${asset.id}`,
+          clientId: client.id,
+          connectionId: asset.connectionId,
+          assetId: asset.id,
+          budgetHint: budgetHints[i] || 0,
+        };
+        if (platform === "google_ads") base.customerId = sanitizeGoogleAdsId(asset.externalId);
+        else if (platform === "meta_ads") base.adAccountId = sanitizeGoogleAdsId(asset.externalId);
+        else if (platform === "tiktok_ads") base.advertiserId = sanitizeGoogleAdsId(asset.externalId);
+        else if (platform === "ga4") base.propertyId = sanitizeGoogleAdsId(asset.externalId);
+        return base;
+      });
+    });
+  }
+
+  /** Triggers a fresh fetch of all four platforms' live overviews. */
+  async reloadLiveData(silent = true) {
+    if (!this.currentUser) return;
+    const dateRangePayload = getAccountDateRangePayload(this.accountsDateRange);
+
+    const googleRequests = this.buildPlatformRequests("google_ads");
+    const metaRequests = this.buildPlatformRequests("meta_ads");
+    const tiktokRequests = this.buildPlatformRequests("tiktok_ads");
+    const ga4Requests = this.buildPlatformRequests("ga4");
+
+    if (googleRequests.length) {
+      this.googleAdsLiveState = { ...this.googleAdsLiveState, loading: true, error: "" };
+      this.api.fetchGoogleAdsLiveOverview({ ...dateRangePayload, requests: googleRequests })
+        .then((data: any) => {
+          this.googleAdsLiveState = {
+            loading: false,
+            error: "",
+            generatedAt: data?.generatedAt || "",
+            accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+            campaigns: Array.isArray(data?.campaigns) ? data.campaigns : [],
+            ads: Array.isArray(data?.ads) ? data.ads : [],
+            errors: Array.isArray(data?.errors) ? data.errors : [],
+          };
+        })
+        .catch((error: any) => {
+          this.googleAdsLiveState = { ...createEmptyGoogleAdsLiveState(), error: error?.message || "Could not load Google Ads live data." };
+          if (!silent) this.pushToast(this.googleAdsLiveState.error, "danger", "Google Ads");
+        });
+    } else {
+      this.googleAdsLiveState = createEmptyGoogleAdsLiveState();
+    }
+
+    if (metaRequests.length) {
+      this.metaAdsLiveState = { ...this.metaAdsLiveState, loading: true, error: "" };
+      this.api.fetchMetaAdsLiveOverview({ ...dateRangePayload, requests: metaRequests })
+        .then((data: any) => {
+          this.metaAdsLiveState = {
+            loading: false,
+            error: "",
+            generatedAt: data?.generatedAt || "",
+            accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+            campaigns: Array.isArray(data?.campaigns) ? data.campaigns : [],
+            ads: Array.isArray(data?.ads) ? data.ads : [],
+            errors: Array.isArray(data?.errors) ? data.errors : [],
+          };
+        })
+        .catch((error: any) => {
+          this.metaAdsLiveState = { ...createEmptyMetaAdsLiveState(), error: error?.message || "Could not load Meta Ads live data." };
+          if (!silent) this.pushToast(this.metaAdsLiveState.error, "danger", "Meta Ads");
+        });
+    } else {
+      this.metaAdsLiveState = createEmptyMetaAdsLiveState();
+    }
+
+    if (tiktokRequests.length) {
+      this.tiktokAdsLiveState = { ...this.tiktokAdsLiveState, loading: true, error: "" };
+      this.api.fetchTikTokAdsLiveOverview({ ...dateRangePayload, requests: tiktokRequests })
+        .then((data: any) => {
+          this.tiktokAdsLiveState = {
+            loading: false,
+            error: "",
+            generatedAt: data?.generatedAt || "",
+            accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+            campaigns: Array.isArray(data?.campaigns) ? data.campaigns : [],
+            ads: Array.isArray(data?.ads) ? data.ads : [],
+            errors: Array.isArray(data?.errors) ? data.errors : [],
+          };
+        })
+        .catch((error: any) => {
+          this.tiktokAdsLiveState = { ...createEmptyTikTokAdsLiveState(), error: error?.message || "Could not load TikTok Ads live data." };
+          if (!silent) this.pushToast(this.tiktokAdsLiveState.error, "danger", "TikTok Ads");
+        });
+    } else {
+      this.tiktokAdsLiveState = createEmptyTikTokAdsLiveState();
+    }
+
+    if (ga4Requests.length) {
+      this.ga4LiveState = { ...this.ga4LiveState, loading: true, error: "" };
+      this.api.fetchGa4LiveOverview({ ...dateRangePayload, requests: ga4Requests })
+        .then((data: any) => {
+          this.ga4LiveState = {
+            loading: false,
+            error: "",
+            generatedAt: data?.generatedAt || "",
+            properties: Array.isArray(data?.properties) ? data.properties : [],
+            errors: Array.isArray(data?.errors) ? data.errors : [],
+          };
+        })
+        .catch((error: any) => {
+          this.ga4LiveState = { ...createEmptyGa4LiveState(), error: error?.message || "Could not load GA4 live data." };
+          if (!silent) this.pushToast(this.ga4LiveState.error, "danger", "GA4");
+        });
+    } else {
+      this.ga4LiveState = createEmptyGa4LiveState();
+    }
+  }
+
+  onAccountsDateRangeChange(value: any) {
+    this.accountsDateRange = value;
+    this.reloadLiveData(true);
   }
 
     pushToast(message: string, tone: "success" | "info" | "warning" | "danger" = "success", title = "") {
