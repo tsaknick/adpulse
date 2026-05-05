@@ -122,6 +122,18 @@ type ViewKey = "overview" | "accounts" | "search_terms" | "analytics" | "reports
         >
           <ng-container [ngSwitch]="view">
             <ng-container *ngSwitchCase="'overview'">
+              <div [ngStyle]="liveDataBarStyle">
+                <div [ngStyle]="liveDataBarLeftStyle">
+                  <span [ngStyle]="liveDataBarLabelStyle">Live data</span>
+                  <span [ngStyle]="liveDataBarStatusStyle">{{ liveDataStatusLabel }}</span>
+                </div>
+                <button type="button" (click)="reloadLiveData(false)" [ngStyle]="liveDataReloadStyle">Reload data</button>
+              </div>
+
+              <div *ngFor="let err of liveDataErrors" [ngStyle]="liveDataErrorStyle">
+                <strong>{{ err.label }}:</strong> {{ err.message }}
+              </div>
+
               <app-filters-bar
                 [search]="search"
                 [statusFilter]="statusFilter"
@@ -314,6 +326,18 @@ type ViewKey = "overview" | "accounts" | "search_terms" | "analytics" | "reports
             </ng-container>
 
                         <ng-container *ngSwitchCase="'accounts'">
+              <div [ngStyle]="liveDataBarStyle">
+                <div [ngStyle]="liveDataBarLeftStyle">
+                  <span [ngStyle]="liveDataBarLabelStyle">Live data</span>
+                  <span [ngStyle]="liveDataBarStatusStyle">{{ liveDataStatusLabel }}</span>
+                </div>
+                <button type="button" (click)="reloadLiveData(false)" [ngStyle]="liveDataReloadStyle">Reload data</button>
+              </div>
+
+              <div *ngFor="let err of liveDataErrors" [ngStyle]="liveDataErrorStyle">
+                <strong>{{ err.label }}:</strong> {{ err.message }}
+              </div>
+
               <app-filters-bar
                 [search]="search"
                 [statusFilter]="statusFilter"
@@ -507,7 +531,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
     await this.refreshIntegrations({ silent: true });
     this.ensureStudioDraft();
-    this.reloadLiveData(true);
+    this.reloadLiveData(false);
   }
 
   private async refreshIntegrations({ silent = false }: { silent?: boolean } = {}) {
@@ -1213,6 +1237,11 @@ export class AppComponent implements OnInit, OnDestroy {
       this.googleAdsLiveState = { ...this.googleAdsLiveState, loading: true, error: "" };
       this.api.fetchGoogleAdsLiveOverview({ ...dateRangePayload, requests: googleRequests })
         .then((data: any) => {
+          if (data?.error) {
+            this.googleAdsLiveState = { ...createEmptyGoogleAdsLiveState(), error: data.error };
+            if (!silent) this.pushToast(data.error, "danger", "Google Ads");
+            return;
+          }
           this.googleAdsLiveState = {
             loading: false,
             error: "",
@@ -1235,6 +1264,11 @@ export class AppComponent implements OnInit, OnDestroy {
       this.metaAdsLiveState = { ...this.metaAdsLiveState, loading: true, error: "" };
       this.api.fetchMetaAdsLiveOverview({ ...dateRangePayload, requests: metaRequests })
         .then((data: any) => {
+          if (data?.error) {
+            this.metaAdsLiveState = { ...createEmptyMetaAdsLiveState(), error: data.error };
+            if (!silent) this.pushToast(data.error, "danger", "Meta Ads");
+            return;
+          }
           this.metaAdsLiveState = {
             loading: false,
             error: "",
@@ -1257,6 +1291,11 @@ export class AppComponent implements OnInit, OnDestroy {
       this.tiktokAdsLiveState = { ...this.tiktokAdsLiveState, loading: true, error: "" };
       this.api.fetchTikTokAdsLiveOverview({ ...dateRangePayload, requests: tiktokRequests })
         .then((data: any) => {
+          if (data?.error) {
+            this.tiktokAdsLiveState = { ...createEmptyTikTokAdsLiveState(), error: data.error };
+            if (!silent) this.pushToast(data.error, "danger", "TikTok Ads");
+            return;
+          }
           this.tiktokAdsLiveState = {
             loading: false,
             error: "",
@@ -1279,6 +1318,11 @@ export class AppComponent implements OnInit, OnDestroy {
       this.ga4LiveState = { ...this.ga4LiveState, loading: true, error: "" };
       this.api.fetchGa4LiveOverview({ ...dateRangePayload, requests: ga4Requests })
         .then((data: any) => {
+          if (data?.error) {
+            this.ga4LiveState = { ...createEmptyGa4LiveState(), error: data.error };
+            if (!silent) this.pushToast(data.error, "danger", "GA4");
+            return;
+          }
           this.ga4LiveState = {
             loading: false,
             error: "",
@@ -1300,6 +1344,74 @@ export class AppComponent implements OnInit, OnDestroy {
     this.accountsDateRange = value;
     this.reloadLiveData(true);
   }
+
+    // ── Live-data UI banner ────────────────────────────────────────────
+  get liveDataStatusLabel(): string {
+    const parts: string[] = [];
+    const states: Record<string, any> = {
+      "Google Ads": this.googleAdsLiveState,
+      "Meta Ads": this.metaAdsLiveState,
+      "TikTok Ads": this.tiktokAdsLiveState,
+      "GA4": this.ga4LiveState,
+    };
+    for (const [label, state] of Object.entries(states)) {
+      if (state.loading) parts.push(`${label} syncing`);
+      else if (state.error) parts.push(`${label} error`);
+      else if ((state.accounts?.length || 0) > 0 || (state.properties?.length || 0) > 0) parts.push(`${label} live`);
+    }
+    return parts.length ? parts.join(" - ") : "Demo data (no live rows yet)";
+  }
+
+  get liveDataErrors(): { label: string; message: string }[] {
+    const out: { label: string; message: string }[] = [];
+    if (this.googleAdsLiveState?.error) out.push({ label: "Google Ads", message: this.googleAdsLiveState.error });
+    if (this.metaAdsLiveState?.error) out.push({ label: "Meta Ads", message: this.metaAdsLiveState.error });
+    if (this.tiktokAdsLiveState?.error) out.push({ label: "TikTok Ads", message: this.tiktokAdsLiveState.error });
+    if (this.ga4LiveState?.error) out.push({ label: "GA4", message: this.ga4LiveState.error });
+    return out;
+  }
+
+  liveDataBarStyle = {
+    padding: "12px 14px",
+    borderRadius: "16px",
+    background: T.surface,
+    border: `1px solid ${T.line}`,
+    boxShadow: T.shadow,
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: "12px",
+    flexWrap: "wrap",
+  };
+  liveDataBarLeftStyle = { display: "flex", flexDirection: "column", gap: "2px" };
+  liveDataBarLabelStyle = {
+    fontSize: "10px",
+    color: T.inkMute,
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    fontWeight: 800,
+  };
+  liveDataBarStatusStyle = { fontSize: "12px", color: T.inkSoft };
+  liveDataReloadStyle = {
+    padding: "8px 14px",
+    borderRadius: "12px",
+    border: "none",
+    background: T.ink,
+    color: "#fff",
+    fontSize: "12px",
+    fontWeight: 800,
+    cursor: "pointer",
+    fontFamily: T.font,
+  };
+  liveDataErrorStyle = {
+    padding: "10px 14px",
+    borderRadius: "14px",
+    background: T.coralSoft,
+    border: "1px solid rgba(215, 93, 66, 0.18)",
+    color: T.coral,
+    fontSize: "12px",
+    fontWeight: 700,
+  };
 
     pushToast(message: string, tone: "success" | "info" | "warning" | "danger" = "success", title = "") {
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
