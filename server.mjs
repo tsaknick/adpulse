@@ -2418,7 +2418,7 @@ async function fetchGoogleAdsReportDetails(payload) {
 
     // Inject GA4 city data when Google Ads geo is unavailable or country-level only
     const geoIsUseless = !geographies.length ||
-      geographies.every((row) => row.source === "location_view");
+      geographies.every((row) => row.source === "location_view" || row.source === "country_only");
 
     if (geoIsUseless && request.clientId && !clientIdsWithGa4Geo.has(request.clientId)) {
       const ga4Rows = ga4GeoByClientId.get(request.clientId);
@@ -3941,10 +3941,11 @@ async function fetchGoogleAdsGeographyReport({ customerId, tokenBundle, loginCus
     }
   }
 
-  // If no granular rows were found, use the best country-level result we saw
+  // If no granular rows were found, use the best country-level result we saw,
+  // and mark them as country-only so upstream callers can prefer GA4 city data.
   if (!rows.length && countryLevelFallback.length) {
     console.log(`[geo] using country-level fallback rows for customer ${customerId}`);
-    rows = countryLevelFallback;
+    rows = countryLevelFallback.map((row) => ({ ...row, source: "country_only" }));
   }
 
   // Last resort: location_view shows the locations the advertiser targeted.

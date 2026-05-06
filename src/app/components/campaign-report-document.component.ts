@@ -537,9 +537,12 @@ export class ReportCampaignTablePageComponent {
     <app-report-page [accent]="accent">
       <app-report-header title="Geographic Performance" platform="google_ads"></app-report-header>
       <div *ngIf="usingGa4Fallback" [ngStyle]="ga4NoticeStyle">
-        Showing city-level data from Google Analytics 4. Google Ads geographic breakdown requires a developer token upgrade (Basic Access) — apply at ads.google.com/aw/apicenter.
+        Showing city-level data from Google Analytics 4 because Google Ads only returned country-level rows for this account. Geographic breakdown by city requires a Google Ads developer token at Basic Access — apply at ads.google.com/aw/apicenter.
       </div>
-      <div *ngIf="!usingGa4Fallback && usingLocationViewFallback" [ngStyle]="ga4NoticeStyle">
+      <div *ngIf="!usingGa4Fallback && usingCountryOnly" [ngStyle]="ga4NoticeStyle">
+        Google Ads only returned country-level data for this account. Apply for Basic Access on your developer token (ads.google.com/aw/apicenter) and link a GA4 property to this client to surface city-level breakdown.
+      </div>
+      <div *ngIf="!usingGa4Fallback && !usingCountryOnly && usingLocationViewFallback" [ngStyle]="ga4NoticeStyle">
         Google Ads did not return visitor geography for this account, so this table is using targeted location performance from the account's location criteria.
       </div>
       <app-report-table [columns]="columns" [rows]="rows" [emptyLabel]="emptyLabel"></app-report-table>
@@ -555,6 +558,7 @@ export class ReportGoogleGeographyPageComponent {
   get rows() { return this.rawRows.slice(0, 12); }
   get usingLocationViewFallback() { return this.rawRows.some((r: any) => r.source === "location_view"); }
   get usingGa4Fallback() { return this.rawRows.some((r: any) => r.source === "ga4"); }
+  get usingCountryOnly() { return this.rawRows.length > 0 && this.rawRows.every((r: any) => r.source === "country_only"); }
   get geographyError() {
     return (this.details?.errors || []).find((e: any) => /geo|location/i.test(String(e)));
   }
