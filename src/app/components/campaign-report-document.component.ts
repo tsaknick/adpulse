@@ -11,7 +11,10 @@ import { Component, Input } from "@angular/core";
 import {
   PLATFORM_META,
   T,
+  formatAiGeneratedAt,
   formatMetric,
+  getAiPriorityLabel,
+  getAiPriorityTone,
 } from "../foundation/adpulse-foundation";
 import {
   aggregateGoogleReportDetails,
@@ -1097,6 +1100,126 @@ export class ReportCoverPageComponent {
   kpiRowStyle = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "10px", marginTop: "32px" };
 }
 
+
+// ─── Strategist diagnosis page (Claude) ────────────────────────────────
+@Component({
+  selector: "app-report-strategist-page",
+  standalone: true,
+  imports: [CommonModule, ReportPageComponent, ReportHeaderComponent, ToneBadgeComponent],
+  template: `
+    <app-report-page accent="#9966e8">
+      <app-report-header title="Claude Strategist Diagnosis"></app-report-header>
+      <ng-container *ngIf="strategy; else noResult">
+        <div [ngStyle]="layoutStyle">
+          <div [ngStyle]="topRowStyle">
+            <div [ngStyle]="diagBoxStyle">
+              <div [ngStyle]="diagLabelStyle">What is not working now</div>
+              <div [ngStyle]="diagBodyStyle">{{ strategy.performanceDiagnosis }}</div>
+            </div>
+            <div [ngStyle]="nextActionStyle">
+              <div [ngStyle]="nextActionLabelStyle">Next move</div>
+              <div [ngStyle]="nextActionTitleStyle">{{ nextBestAction?.title || "No saved suggestion" }}</div>
+              <div [ngStyle]="nextActionBodyStyle">{{ nextBestAction?.action || "Refresh the strategist before exporting." }}</div>
+              <div *ngIf="nextBestAction?.expectedImpact" [ngStyle]="nextActionImpactStyle">Impact: {{ nextBestAction.expectedImpact }}</div>
+            </div>
+          </div>
+
+          <div [ngStyle]="bottomRowStyle">
+            <div [ngStyle]="cardStyle">
+              <div [ngStyle]="cardTitleStyle">Next actions</div>
+              <div *ngFor="let item of orderedRecommendations; let i = index" [ngStyle]="recRowStyle(i)">
+                <div [ngStyle]="recHeadStyle">
+                  <div [ngStyle]="recTitleStyle">{{ item.title }}</div>
+                  <app-tone-badge [tone]="priorityTone(item.priority)">{{ priorityLabel(item.priority) }}</app-tone-badge>
+                </div>
+                <div [ngStyle]="recActionStyle">{{ item.action }}</div>
+                <div [ngStyle]="recWhyStyle">{{ item.why }}</div>
+              </div>
+            </div>
+
+            <div [ngStyle]="cardStyle">
+              <div [ngStyle]="cardTitleStyle">Watchouts</div>
+              <div *ngFor="let item of watchouts; let i = index" [ngStyle]="watchoutRowStyle">
+                <span [ngStyle]="watchoutDotStyle"></span>
+                <span>
+                  <span [ngStyle]="watchoutTitleStyle">Watchout {{ i + 1 }}</span>
+                  <span [ngStyle]="watchoutBodyStyle">{{ item }}</span>
+                </span>
+              </div>
+              <div *ngIf="(strategy.budgetActions || []).length" [ngStyle]="budgetBoxStyle">
+                <div [ngStyle]="budgetTitleStyle">Budget actions</div>
+                <div *ngFor="let item of strategy.budgetActions.slice(0, 3)" [ngStyle]="budgetRowStyle">
+                  <strong [ngStyle]="budgetChannelStyle">{{ item.channel }}:</strong> {{ item.direction }} {{ item.amountText }} | {{ item.why }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div [ngStyle]="footerStyle">Client: {{ client?.name }} | Range: {{ dateRangeLabel }} | Generated {{ generatedAt }}</div>
+        </div>
+      </ng-container>
+      <ng-template #noResult>
+        <div [ngStyle]="emptyStyle">
+          No Claude strategist result is saved for {{ client?.name }} yet. Run the strategist from the Reports page before generating the PDF.
+        </div>
+      </ng-template>
+    </app-report-page>
+  `,
+})
+export class ReportStrategistPageComponent {
+  @Input() client: any = {};
+  @Input() dateRangeLabel = "";
+  @Input() result: any = null;
+
+  get strategy(): any { return this.result?.strategy || null; }
+  get nextBestAction(): any { return this.strategy?.nextBestAction || null; }
+  get orderedRecommendations(): any[] {
+    return [this.nextBestAction, ...(this.strategy?.recommendations || [])].filter(Boolean).slice(0, 5);
+  }
+  get watchouts(): string[] { return (this.strategy?.watchouts || []).slice(0, 6); }
+  get generatedAt(): string { return formatAiGeneratedAt(this.result?.generatedAt); }
+  priorityTone(p: any) { return getAiPriorityTone(p); }
+  priorityLabel(p: any) { return getAiPriorityLabel(p); }
+
+  layoutStyle = { display: "grid", gap: "18px" };
+  topRowStyle = { display: "grid", gridTemplateColumns: "1fr 0.8fr", gap: "18px" };
+  diagBoxStyle = { padding: "22px", borderRadius: "24px", background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: "12px" };
+  diagLabelStyle = { fontSize: "12px", color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 900 };
+  diagBodyStyle = { fontSize: "15px", color: T.ink, lineHeight: 1.65 };
+  nextActionStyle = { padding: "22px", borderRadius: "24px", background: "linear-gradient(135deg, #221833, #4f2c7d)", color: "#fff", display: "grid", gap: "10px" };
+  nextActionLabelStyle = { fontSize: "12px", textTransform: "uppercase", letterSpacing: "0.12em", opacity: 0.78, fontWeight: 900 };
+  nextActionTitleStyle = { fontSize: "22px", fontFamily: T.heading, fontWeight: 900, letterSpacing: "-0.04em" };
+  nextActionBodyStyle = { fontSize: "12px", lineHeight: 1.55, opacity: 0.84 };
+  nextActionImpactStyle = { fontSize: "11px", opacity: 0.74 };
+
+  bottomRowStyle = { display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: "18px" };
+  cardStyle = { padding: "20px", borderRadius: "24px", background: "#fff", border: `1px solid ${T.line}`, display: "grid", gap: "12px" };
+  cardTitleStyle = { fontSize: "15px", fontWeight: 900, fontFamily: T.heading };
+  recRowStyle(i: number) {
+    return {
+      padding: "12px",
+      borderRadius: "16px",
+      background: i === 0 ? T.accentSoft : T.bgSoft,
+      display: "grid",
+      gap: "5px",
+    };
+  }
+  recHeadStyle = { display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center" };
+  recTitleStyle = { fontSize: "12px", fontWeight: 900, color: T.ink };
+  recActionStyle = { fontSize: "11px", color: T.inkSoft, lineHeight: 1.45 };
+  recWhyStyle = { fontSize: "10px", color: T.inkMute, lineHeight: 1.4 };
+  watchoutRowStyle = { display: "grid", gridTemplateColumns: "10px 1fr", gap: "10px", alignItems: "start" };
+  watchoutDotStyle = { width: "10px", height: "10px", borderRadius: "50%", background: T.coral, marginTop: "4px" };
+  watchoutTitleStyle = { display: "block", fontSize: "12px", fontWeight: 900, color: T.ink };
+  watchoutBodyStyle = { display: "block", marginTop: "4px", fontSize: "11px", color: T.inkSoft, lineHeight: 1.45 };
+  budgetBoxStyle = { padding: "12px", borderRadius: "16px", background: T.bgSoft, display: "grid", gap: "8px" };
+  budgetTitleStyle = { fontSize: "12px", fontWeight: 900, color: T.ink };
+  budgetRowStyle = { fontSize: "11px", color: T.inkSoft, lineHeight: 1.45 };
+  budgetChannelStyle = { color: T.ink };
+  footerStyle = { fontSize: "11px", color: T.inkSoft };
+  emptyStyle = { padding: "26px", borderRadius: "24px", background: "#fff", border: `1px solid ${T.line}`, color: T.inkSoft, lineHeight: 1.6 };
+}
+
 // ─── Top-level orchestrator ───────────────────────────────────────────
 @Component({
   selector: "app-campaign-report-document",
@@ -1114,6 +1237,7 @@ export class ReportCoverPageComponent {
     ReportAdsTablePageComponent,
     ReportAnalyticsPageComponent,
     ReportDefinitionsPageComponent,
+    ReportStrategistPageComponent,
   ],
   template: `
     <div class="report-print-root" [ngStyle]="rootStyle">
@@ -1126,6 +1250,10 @@ export class ReportCoverPageComponent {
         [totalSummary]="totalSummary" [googleSummary]="googleSummary" [metaSummary]="metaSummary"
         [campaigns]="campaigns" [googleDetails]="googleDetails"
       ></app-report-executive-summary-page>
+
+      <app-report-strategist-page *ngIf="has('strategist') && strategistResult"
+        [client]="client" [dateRangeLabel]="dateRangeLabel" [result]="strategistResult"
+      ></app-report-strategist-page>
 
       <app-report-channel-overview *ngIf="has('google_overview')"
         title="Google Ads Performance" platform="google_ads"
@@ -1181,6 +1309,7 @@ export class CampaignReportDocumentComponent {
   @Input() dateRangeLabel = "";
   @Input() googleReportState: any = { loading: false, details: [] };
   @Input() selectedSections: string[] = [];
+  @Input() strategistResult: any = null;
 
   has(id: string): boolean {
     return Array.isArray(this.selectedSections) && this.selectedSections.includes(id);

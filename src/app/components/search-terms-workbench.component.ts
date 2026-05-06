@@ -14,7 +14,10 @@ import {
   SEARCH_TERM_TAG_META,
   T,
   average,
+  buildAiStrategistAlignmentNotes,
   buildSearchTermBenchmarks,
+  buildSearchTermsAiPayload,
+  createEmptyAiStrategistState,
   deriveSearchTermAutoTag,
   deriveSearchTermEvaluation,
   extractKeywordOpportunities,
@@ -24,15 +27,23 @@ import {
   formatMetric,
   formatNumber,
   formatPercent,
+  getAiStrategyChatKey,
+  getSearchTermsAiStrategyKey,
   isInactiveSearchTerm,
   matchesSearchTermStatusFilter,
+  normalizeAiStrategyChatThread,
   normalizeClientTarget,
   normalizeSearchTermKey,
   normalizeSearchTermRules,
+  readStoredAiStrategyChatThread,
+  readStoredAiStrategyResult,
   sortSearchTermRows,
+  writeStoredAiStrategyChatThread,
+  writeStoredAiStrategyResult,
 } from "../foundation/adpulse-foundation";
 import { getSearchTermScoreTone } from "../foundation/post-foundation-helpers";
 import { IntegrationApiService } from "../integration-api.service";
+import { AiStrategistPanelComponent } from "./ai-strategist.component";
 import {
   ActionCueComponent,
   AppButtonComponent,
@@ -47,6 +58,7 @@ import {
   standalone: true,
   imports: [
     CommonModule,
+    AiStrategistPanelComponent,
     ActionCueComponent,
     AppButtonComponent,
     EmptyStateComponent,
@@ -136,6 +148,23 @@ import {
         <div *ngIf="adGroupState.error" [ngStyle]="errorStyle">{{ adGroupState.error }}</div>
         <div *ngIf="termsState.error" [ngStyle]="errorStyle">{{ termsState.error }}</div>
       </div>
+
+      <app-ai-strategist-panel
+        title="Search-term strategist"
+        lead="Claude analyzes the loaded terms, tags and benchmarks for this campaign / ad group."
+        runHint="Run the strategist to interpret the loaded terms and propose keyword + negative actions for this scope."
+        [aiReady]="aiReady"
+        [canOpenConnections]="onOpenConnectionsAvailable"
+        [state]="aiState"
+        [chatThread]="aiChatThread"
+        [chatDraft]="aiChatDraft"
+        [chatState]="aiChatState"
+        (run)="runAiStrategist()"
+        (sendChat)="sendStrategistMessage()"
+        (clearChat)="clearStrategistChat()"
+        (chatDraftChange)="aiChatDraft = $event"
+        (openConnections)="openConnections.emit()"
+      ></app-ai-strategist-panel>
 
       <div *ngIf="evaluatedTerms.length" [ngStyle]="kpiRowStyle">
         <app-metric-tile label="Loaded terms" [value]="summary.totalTerms" [subValue]="summary.activeTerms + ' active'"></app-metric-tile>
@@ -263,6 +292,107 @@ export class SearchTermsWorkbenchComponent implements OnChanges {
   @Input() onOpenConnectionsAvailable = false;
 
   @Output() openConnections = new EventEmitter<void>();
+
+  aiState: any = createEmptyAiStrategistState();
+  aiChatThread: any[] = [];
+  aiChatDraft = "";
+  aiChatState: any = { loading: false, error: "" };
+  private aiStrategyKey = "";
+  private aiChatKey = "";
+
+  private refreshAiKeys() {
+    this.aiStrategyKey = getSearchTermsAiStrategyKey({
+      selectedClient: this.selectedClient,
+      selectedAccount: this.selectedAccount,
+      selectedCampaign: this.selectedCampaign,
+      selectedAdGroup: this.selectedAdGroup,
+      isPerformanceMax: this.isPerformanceMax,
+      dateRange: this.selection.dateRange,
+      termStatusFilter: this.termStatusFilter,
+    });
+    this.aiChatKey = getAiStrategyChatKey(this.aiStrategyKey);
+    const saved = readStoredAiStrategyResult(this.aiStrategyKey);
+    this.aiState = saved
+      ? { loading: false, error: "", data: saved, generatedAt: saved?.generatedAt || "", cached: !!saved?.cached }
+      : createEmptyAiStrategistState();
+    this.aiChatThread = readStoredAiStrategyChatThread(this.aiChatKey);
+    this.aiChatDraft = "";
+    this.aiChatState = { loading: false, error: "" };
+  }
+
+  buildPayload() {
+    return buildSearchTermsAiPayload({
+      selectedClient: this.selectedClient,
+      selectedAccount: this.selectedAccount,
+      selectedCampaign: this.selectedCampaign,
+      selectedAdGroup: this.selectedAdGroup,
+      isPerformanceMax: this.isPerformanceMax,
+      dateRangeLabel: this.selection.dateRange,
+      termStatusFilter: this.termStatusFilter,
+      summary: this.summary,
+      benchmarks: this.benchmarks,
+      autoTagRules: this.autoTagRules,
+      evaluatedTerms: this.evaluatedTerms,
+      suggestedNegatives: this.suggestedNegatives,
+    });
+  }
+
+  async runAiStrategist() {
+    this.refreshAiKeys();
+    if (!this.aiStrategyKey) {
+      this.aiState = { ...this.aiState, error: "Pick a client, account, campaign and ad group first." };
+      return;
+    }
+    this.aiState = { ...this.aiState, loading: true, error: "" };
+    try {
+      const payload = await this.api.fetchAiStrategy({
+        scope: "search_terms",
+        context: { ...this.buildPayload(), alignmentNotes: buildAiStrategistAlignmentNotes(this.aiChatThread) },
+        forceRefresh: true,
+      });
+      writeStoredAiStrategyResult(this.aiStrategyKey, payload);
+      this.aiState = { loading: false, error: "", data: payload, generatedAt: payload?.generatedAt || "", cached: !!payload?.cached };
+    } catch (error: any) {
+      this.aiState = { ...this.aiState, loading: false, error: error?.message || "Could not run the AI strategist." };
+    }
+  }
+
+  async sendStrategistMessage() {
+    const text = (this.aiChatDraft || "").trim();
+    if (!text || !this.aiState.data) return;
+    const nextThread = normalizeAiStrategyChatThread([
+      ...this.aiChatThread,
+      { role: "user", text, createdAt: new Date().toISOString() },
+    ]);
+    this.aiChatThread = nextThread;
+    writeStoredAiStrategyChatThread(this.aiChatKey, nextThread);
+    this.aiChatDraft = "";
+    this.aiChatState = { loading: true, error: "" };
+    try {
+      const payload = await this.api.chatWithAiStrategist({
+        scope: "search_terms",
+        context: { ...this.buildPayload(), alignmentNotes: buildAiStrategistAlignmentNotes(nextThread) },
+        strategy: this.aiState.data?.strategy || null,
+        thread: nextThread,
+      });
+      const finalThread = normalizeAiStrategyChatThread([
+        ...nextThread,
+        { role: "assistant", text: String(payload?.reply || "").trim(), createdAt: payload?.generatedAt || new Date().toISOString() },
+      ]);
+      this.aiChatThread = finalThread;
+      writeStoredAiStrategyChatThread(this.aiChatKey, finalThread);
+      this.aiChatState = { loading: false, error: "" };
+    } catch (error: any) {
+      this.aiChatState = { loading: false, error: error?.message || "Could not send your note to the strategist." };
+    }
+  }
+
+  clearStrategistChat() {
+    this.aiChatThread = [];
+    writeStoredAiStrategyChatThread(this.aiChatKey, []);
+    this.aiChatState = { loading: false, error: "" };
+  }
+
 
   selection: any = { clientId: "", accountAssetId: "", campaignId: "", adGroupId: "", dateRange: "LAST_30_DAYS" };
   campaignState: any = { items: [], loading: false, error: "" };

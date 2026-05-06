@@ -380,6 +380,9 @@ type ViewKey = "overview" | "accounts" | "search_terms" | "analytics" | "reports
                         [campaigns]="client.campaigns || []"
                         [ads]="client.ads || []"
                         [dateRangeLabel]="analyticsDateRangeLabel"
+                        [aiReady]="aiReady"
+                        [canOpenConnections]="isDirector"
+                        (openConnections)="setView('connections')"
                         (resolveIssue)="resolveClientIssue($event)"
                       ></app-account-stack>
                     </div>
@@ -394,6 +397,9 @@ type ViewKey = "overview" | "accounts" | "search_terms" | "analytics" | "reports
                       [campaigns]="client.campaigns || []"
                       [ads]="client.ads || []"
                       [dateRangeLabel]="analyticsDateRangeLabel"
+                      [aiReady]="aiReady"
+                      [canOpenConnections]="isDirector"
+                      (openConnections)="setView('connections')"
                       (resolveIssue)="resolveClientIssue($event)"
                     ></app-account-stack>
                   </div>
@@ -798,6 +804,10 @@ export class AppComponent implements OnInit, OnDestroy {
       base.push({ key: "connections", label: "Connections" });
     }
     return base;
+  }
+
+  get aiReady(): boolean {
+    return !!this.setupStatus?.configured?.ANTHROPIC_API_KEY;
   }
 
   get viewLabel(): string {

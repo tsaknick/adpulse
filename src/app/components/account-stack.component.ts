@@ -6,15 +6,25 @@
 /* eslint-disable */
 
 import { CommonModule } from "@angular/common";
-import { Component, EventEmitter, Input, Output } from "@angular/core";
+import { Component, EventEmitter, Input, OnChanges, Output } from "@angular/core";
 import {
   CALENDAR,
   T,
+  buildAccountAiPayload,
+  buildAiStrategistAlignmentNotes,
+  createEmptyAiStrategistState,
   formatCurrency,
   formatMetric,
   formatNumber,
+  getAccountAiStrategyKey,
+  getAiStrategyChatKey,
   getConversionValue,
   isStoppedCampaign,
+  normalizeAiStrategyChatThread,
+  readStoredAiStrategyChatThread,
+  readStoredAiStrategyResult,
+  writeStoredAiStrategyChatThread,
+  writeStoredAiStrategyResult,
 } from "../foundation/adpulse-foundation";
 import {
   CAMPAIGN_STATUS_FILTERS,
@@ -79,6 +89,7 @@ export class LedgerMetricComponent {
   standalone: true,
   imports: [
     CommonModule,
+    AiStrategistPanelComponent,
     AlertListComponent,
     AssignedUsersStripComponent,
     CategoryChipComponent,
@@ -151,6 +162,20 @@ export class LedgerMetricComponent {
           (resolveIssue)="resolveIssue.emit($event)"
         ></app-alert-list>
         <app-assigned-users-strip [client]="client" [users]="users" label="Assigned team"></app-assigned-users-strip>
+
+        <app-ai-strategist-panel
+          [aiReady]="aiReady"
+          [canOpenConnections]="canOpenConnections"
+          [state]="aiState"
+          [chatThread]="aiChatThread"
+          [chatDraft]="aiChatDraft"
+          [chatState]="aiChatState"
+          (run)="runAiStrategist()"
+          (sendChat)="sendStrategistMessage()"
+          (clearChat)="clearStrategistChat()"
+          (chatDraftChange)="aiChatDraft = $event"
+          (openConnections)="openConnections.emit()"
+        ></app-ai-strategist-panel>
       </ng-container>
 
       <div [ngStyle]="accountListStyle">
@@ -251,7 +276,7 @@ export class LedgerMetricComponent {
     </div>
   `,
 })
-export class AccountStackComponent {
+export class AccountStackComponent implements OnChanges {
   @Input() client: any = {};
   @Input() users: any[] = [];
   @Input() campaigns: any[] = [];
@@ -259,6 +284,93 @@ export class AccountStackComponent {
   @Input() dateRangeLabel = "";
 
   @Output() resolveIssue = new EventEmitter<{ clientId: string; flagId: string }>();
+
+  @Input() aiReady = false;
+  @Input() canOpenConnections = false;
+  @Output() openConnections = new EventEmitter<void>();
+
+  // AI strategist state per drilldown
+  aiState: any = createEmptyAiStrategistState();
+  aiChatThread: any[] = [];
+  aiChatDraft = "";
+  aiChatState: any = { loading: false, error: "" };
+  private aiStrategyKey = "";
+  private aiChatKey = "";
+  private lastClientId = "";
+
+  constructor(private api: IntegrationApiService) {}
+
+  ngOnChanges() {
+    if (this.client?.id && this.client.id !== this.lastClientId) {
+      this.lastClientId = this.client.id;
+      this.refreshAiKeys();
+    }
+  }
+
+  private refreshAiKeys() {
+    this.aiStrategyKey = getAccountAiStrategyKey(this.client, this.dateRangeLabel);
+    this.aiChatKey = getAiStrategyChatKey(this.aiStrategyKey);
+    const saved = readStoredAiStrategyResult(this.aiStrategyKey);
+    this.aiState = saved
+      ? { loading: false, error: "", data: saved, generatedAt: saved?.generatedAt || "", cached: !!saved?.cached }
+      : createEmptyAiStrategistState();
+    this.aiChatThread = readStoredAiStrategyChatThread(this.aiChatKey);
+    this.aiChatDraft = "";
+    this.aiChatState = { loading: false, error: "" };
+  }
+
+  async runAiStrategist() {
+    this.refreshAiKeys();
+    this.aiState = { ...this.aiState, loading: true, error: "" };
+    try {
+      const payload = await this.api.fetchAiStrategy({
+        scope: "account",
+        context: { ...buildAccountAiPayload(this.client, this.dateRangeLabel), alignmentNotes: buildAiStrategistAlignmentNotes(this.aiChatThread) },
+        forceRefresh: true,
+      });
+      writeStoredAiStrategyResult(this.aiStrategyKey, payload);
+      this.aiState = { loading: false, error: "", data: payload, generatedAt: payload?.generatedAt || "", cached: !!payload?.cached };
+    } catch (error: any) {
+      this.aiState = { ...this.aiState, loading: false, error: error?.message || "Could not run the AI strategist." };
+    }
+  }
+
+  async sendStrategistMessage() {
+    const text = (this.aiChatDraft || "").trim();
+    if (!text || !this.aiState.data) return;
+    const nextThread = normalizeAiStrategyChatThread([
+      ...this.aiChatThread,
+      { role: "user", text, createdAt: new Date().toISOString() },
+    ]);
+    this.aiChatThread = nextThread;
+    writeStoredAiStrategyChatThread(this.aiChatKey, nextThread);
+    this.aiChatDraft = "";
+    this.aiChatState = { loading: true, error: "" };
+    try {
+      const payload = await this.api.chatWithAiStrategist({
+        scope: "account",
+        context: { ...buildAccountAiPayload(this.client, this.dateRangeLabel), alignmentNotes: buildAiStrategistAlignmentNotes(nextThread) },
+        strategy: this.aiState.data?.strategy || null,
+        thread: nextThread,
+      });
+      const finalThread = normalizeAiStrategyChatThread([
+        ...nextThread,
+        { role: "assistant", text: String(payload?.reply || "").trim(), createdAt: payload?.generatedAt || new Date().toISOString() },
+      ]);
+      this.aiChatThread = finalThread;
+      writeStoredAiStrategyChatThread(this.aiChatKey, finalThread);
+      this.aiChatState = { loading: false, error: "" };
+    } catch (error: any) {
+      this.aiChatState = { loading: false, error: error?.message || "Could not send your note to the strategist." };
+    }
+  }
+
+  clearStrategistChat() {
+    this.aiChatThread = [];
+    writeStoredAiStrategyChatThread(this.aiChatKey, []);
+    this.aiChatState = { loading: false, error: "" };
+  }
+
 
   campaignFilter: string = "all";
   open: Record<string, boolean> = {};

@@ -8,18 +8,29 @@
 /* eslint-disable */
 
 import { CommonModule } from "@angular/common";
-import { Component, EventEmitter, Input, Output } from "@angular/core";
+import { Component, EventEmitter, Input, OnChanges, Output } from "@angular/core";
 import {
   DEFAULT_REPORT_SECTION_IDS,
   REPORT_PRESETS,
   REPORT_SECTION_OPTIONS,
   T,
+  buildAccountAiPayload,
+  buildAiStrategistAlignmentNotes,
+  createEmptyAiStrategistState,
   fitCols,
   formatCurrency,
   formatMetric,
   formatNumber,
+  getAiStrategyChatKey,
+  normalizeAiStrategyChatThread,
+  readStoredAiStrategyChatThread,
+  readStoredAiStrategyResult,
+  writeStoredAiStrategyChatThread,
+  writeStoredAiStrategyResult,
 } from "../foundation/adpulse-foundation";
 import { groupClientsByReportingGroup } from "../foundation/post-foundation-helpers";
+import { IntegrationApiService } from "../integration-api.service";
+import { AiStrategistPanelComponent } from "./ai-strategist.component";
 import {
   ActionCueComponent,
   AppButtonComponent,
@@ -46,6 +57,7 @@ import { CampaignReportDocumentComponent } from "./campaign-report-document.comp
     PlatformChipComponent,
     ToneBadgeComponent,
     CampaignReportDocumentComponent,
+    AiStrategistPanelComponent,
   ],
   template: `
     <div [ngStyle]="rootStyle">
@@ -175,6 +187,22 @@ import { CampaignReportDocumentComponent } from "./campaign-report-document.comp
           </div>
         </div>
 
+        <app-ai-strategist-panel
+          title="Report strategist"
+          lead="Claude analyzes the live data + readiness for the report and writes the Claude diagnosis page."
+          runHint="Run the strategist to add a Claude diagnosis page to this report."
+          [aiReady]="aiReady"
+          [state]="aiState"
+          [chatThread]="aiChatThread"
+          [chatDraft]="aiChatDraft"
+          [chatState]="aiChatState"
+          (run)="runReportStrategist()"
+          (sendChat)="sendStrategistMessage()"
+          (clearChat)="clearStrategistChat()"
+          (chatDraftChange)="aiChatDraft = $event"
+          (openConnections)="openConnections.emit()"
+        ></app-ai-strategist-panel>
+
         <!-- Print preview -->
         <app-campaign-report-document
           [client]="selectedClient"
@@ -182,12 +210,13 @@ import { CampaignReportDocumentComponent } from "./campaign-report-document.comp
           [dateRangeLabel]="dateRangeLabel"
           [googleReportState]="googleReportState"
           [selectedSections]="selectedSections"
+          [strategistResult]="aiState?.data"
         ></app-campaign-report-document>
       </ng-template>
     </div>
   `,
 })
-export class ReportsViewComponent {
+export class ReportsViewComponent implements OnChanges {
   @Input() clients: any[] = [];
   @Input() selectedClientId = "";
   @Input() seriesMap: any = {};
@@ -206,6 +235,104 @@ export class ReportsViewComponent {
   @Output() sectionsChange = new EventEmitter<string[]>();
   @Output() scheduleDraftChange = new EventEmitter<any>();
   @Output() saveSchedule = new EventEmitter<{ clientId: string; schedule: any }>();
+
+  @Input() aiReady = false;
+  @Output() openConnections = new EventEmitter<void>();
+
+  aiState: any = createEmptyAiStrategistState();
+  aiChatThread: any[] = [];
+  aiChatDraft = "";
+  aiChatState: any = { loading: false, error: "" };
+  private aiStrategyKey = "";
+  private aiChatKey = "";
+  private lastReportClientId = "";
+
+  constructor(private api: IntegrationApiService) {}
+
+  ngOnChanges() {
+    if (this.selectedClient?.id && this.selectedClient.id !== this.lastReportClientId) {
+      this.lastReportClientId = this.selectedClient.id;
+      this.refreshAiKeys();
+    }
+  }
+
+  private refreshAiKeys() {
+    const id = this.selectedClient?.id;
+    this.aiStrategyKey = id ? `report:${id}:${this.dateRangeLabel}` : "";
+    this.aiChatKey = getAiStrategyChatKey(this.aiStrategyKey);
+    const saved = readStoredAiStrategyResult(this.aiStrategyKey);
+    this.aiState = saved
+      ? { loading: false, error: "", data: saved, generatedAt: saved?.generatedAt || "", cached: !!saved?.cached }
+      : createEmptyAiStrategistState();
+    this.aiChatThread = readStoredAiStrategyChatThread(this.aiChatKey);
+    this.aiChatDraft = "";
+    this.aiChatState = { loading: false, error: "" };
+  }
+
+  async runReportStrategist() {
+    if (!this.selectedClient) return;
+    this.refreshAiKeys();
+    this.aiState = { ...this.aiState, loading: true, error: "" };
+    try {
+      const payload = await this.api.fetchAiStrategy({
+        scope: "report",
+        context: {
+          ...buildAccountAiPayload(this.selectedClient, this.dateRangeLabel),
+          report: { preset: this.reportPreset, sections: this.selectedSections, readiness: this.readinessItems },
+          alignmentNotes: buildAiStrategistAlignmentNotes(this.aiChatThread),
+        },
+        forceRefresh: true,
+      });
+      writeStoredAiStrategyResult(this.aiStrategyKey, payload);
+      this.aiState = { loading: false, error: "", data: payload, generatedAt: payload?.generatedAt || "", cached: !!payload?.cached };
+      // Auto-add the strategist section to the report when the analysis succeeds.
+      if (!this.selectedSections.includes("strategist")) {
+        this.sectionsChange.emit([...this.selectedSections, "strategist"]);
+      }
+    } catch (error: any) {
+      this.aiState = { ...this.aiState, loading: false, error: error?.message || "Could not refresh the report strategist." };
+    }
+  }
+
+  async sendStrategistMessage() {
+    const text = (this.aiChatDraft || "").trim();
+    if (!text || !this.aiState.data) return;
+    const nextThread = normalizeAiStrategyChatThread([
+      ...this.aiChatThread,
+      { role: "user", text, createdAt: new Date().toISOString() },
+    ]);
+    this.aiChatThread = nextThread;
+    writeStoredAiStrategyChatThread(this.aiChatKey, nextThread);
+    this.aiChatDraft = "";
+    this.aiChatState = { loading: true, error: "" };
+    try {
+      const payload = await this.api.chatWithAiStrategist({
+        scope: "report",
+        context: {
+          ...buildAccountAiPayload(this.selectedClient, this.dateRangeLabel),
+          report: { preset: this.reportPreset, sections: this.selectedSections, readiness: this.readinessItems },
+          alignmentNotes: buildAiStrategistAlignmentNotes(nextThread),
+        },
+        strategy: this.aiState.data?.strategy || null,
+        thread: nextThread,
+      });
+      const finalThread = normalizeAiStrategyChatThread([
+        ...nextThread,
+        { role: "assistant", text: String(payload?.reply || "").trim(), createdAt: payload?.generatedAt || new Date().toISOString() },
+      ]);
+      this.aiChatThread = finalThread;
+      writeStoredAiStrategyChatThread(this.aiChatKey, finalThread);
+      this.aiChatState = { loading: false, error: "" };
+    } catch (error: any) {
+      this.aiChatState = { loading: false, error: error?.message || "Could not send your note to the strategist." };
+    }
+  }
+
+  clearStrategistChat() {
+    this.aiChatThread = [];
+    writeStoredAiStrategyChatThread(this.aiChatKey, []);
+    this.aiChatState = { loading: false, error: "" };
+  }
 
   presets = REPORT_PRESETS;
   sectionOptions = REPORT_SECTION_OPTIONS;
