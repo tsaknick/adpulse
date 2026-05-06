@@ -32,6 +32,8 @@ import {
   getClientSummaryText,
   getLiveDataNotice,
 } from "../foundation/post-foundation-helpers";
+import { IntegrationApiService } from "../integration-api.service";
+import { AiStrategistPanelComponent } from "./ai-strategist.component";
 import {
   AlertListComponent,
   AssignedUsersStripComponent,
