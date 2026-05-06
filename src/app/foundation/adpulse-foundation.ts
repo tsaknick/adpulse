@@ -699,6 +699,83 @@ export function getClientTargetMode(target) {
   return "awareness";
 }
 
+const AI_CAMPAIGN_RUBRICS = {
+  revenue: {
+    funnelStage: "lower_funnel_revenue",
+    objectiveRole: "Revenue capture",
+    primaryKpis: ["conversionValue", "roas", "sales", "costPerConversion", "conversionVolume"],
+    secondaryKpis: ["searchIntent", "ctr", "cpc", "budgetPacing"],
+    evaluationRule: "Judge mainly on profitable revenue capture. Low conversion value or weak ROAS is material when the campaign is expected to close demand.",
+  },
+  conversion: {
+    funnelStage: "lower_funnel_conversion",
+    objectiveRole: "Lead or conversion capture",
+    primaryKpis: ["conversions", "costPerConversion", "conversionRate", "qualifiedVolume"],
+    secondaryKpis: ["ctr", "cpc", "searchIntent", "landingPageMatch"],
+    evaluationRule: "Judge mainly on conversion volume, CPA and intent quality. Direct sales pressure is valid only when the objective is sales or revenue.",
+  },
+  traffic: {
+    funnelStage: "mid_funnel_traffic",
+    objectiveRole: "Qualified traffic and consideration",
+    primaryKpis: ["clicks", "ctr", "cpc", "landingPageViews", "engagedSessions"],
+    secondaryKpis: ["assistedConversions", "conversionRate", "audienceQuality"],
+    evaluationRule: "Do not mark this campaign as poor only because direct sales are low. Judge whether it attracts qualified, relevant traffic efficiently.",
+  },
+  awareness: {
+    funnelStage: "upper_funnel_awareness",
+    objectiveRole: "Reach, awareness and demand creation",
+    primaryKpis: ["impressions", "reach", "cpm", "frequency", "videoViews", "engagementRate"],
+    secondaryKpis: ["ctr", "engagedSessions", "brandSearchLift", "assistedConversions"],
+    evaluationRule: "Do not judge this campaign by direct sales unless the context says it is expected to convert. Judge delivery, reach efficiency and engagement quality.",
+  },
+  mixed: {
+    funnelStage: "mixed_funnel",
+    objectiveRole: "Mixed funnel or algorithmic campaign",
+    primaryKpis: ["objectiveFit", "budgetAllocation", "incrementalConversions", "trafficQuality", "creativeLearning"],
+    secondaryKpis: ["ctr", "cpc", "conversionValue", "roas", "assistedConversions"],
+    evaluationRule: "Judge against the stated objective and placement in the account architecture. Separate prospecting, retargeting and demand-capture roles when the data implies them.",
+  },
+};
+
+export function inferCampaignMarketingRole(campaign, clientTarget) {
+  const targetMode = getClientTargetMode(clientTarget);
+  const text = [
+    campaign?.objective,
+    campaign?.campaignObjective,
+    campaign?.optimizationGoal,
+    campaign?.channelType,
+    campaign?.campaignType,
+    campaign?.name,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  const hasAny = (terms) => terms.some((term) => text.includes(term));
+
+  let rubricKey = "";
+  if (hasAny(["sales", "sale", "purchase", "purchases", "roas", "revenue", "shopping", "catalog", "commerce"])) {
+    rubricKey = "revenue";
+  } else if (hasAny(["conversion", "conversions", "lead", "leads", "app install", "app installs", "store visit", "store visits", "signup", "sign up"])) {
+    rubricKey = "conversion";
+  } else if (hasAny(["traffic", "click", "clicks", "landing page view", "link click", "visits", "engagement", "messages", "message"])) {
+    rubricKey = "traffic";
+  } else if (hasAny(["awareness", "reach", "brand", "impression", "impressions", "video view", "video views", "views", "thruplay", "display", "video", "youtube"])) {
+    rubricKey = "awareness";
+  } else if (hasAny(["performance max", "pmax", "demand gen", "discovery"])) {
+    rubricKey = "mixed";
+  } else if (hasAny(["search"])) {
+    rubricKey = targetMode === "awareness" ? "traffic" : "conversion";
+  } else {
+    rubricKey = targetMode === "revenue" || targetMode === "conversion" ? targetMode : targetMode === "traffic" ? "traffic" : "awareness";
+  }
+
+  const rubric = AI_CAMPAIGN_RUBRICS[rubricKey] || AI_CAMPAIGN_RUBRICS.mixed;
+  return {
+    inferredObjective: rubric.objectiveRole,
+    funnelStage: rubric.funnelStage,
+    primaryKpis: rubric.primaryKpis,
+    secondaryKpis: rubric.secondaryKpis,
+    evaluationRule: rubric.evaluationRule,
+  };
+}
+
 export function getSuggestedKeywordMatchType(target, searchTerm) {
   const targetMode = getClientTargetMode(target);
   const tokenCount = tokenizeNegativeCandidate(searchTerm).length;
@@ -1019,7 +1096,7 @@ export function formatAiGeneratedAt(value) {
   }
 }
 
-export function summarizeAiCampaign(campaign) {
+export function summarizeAiCampaign(campaign, clientTarget) {
   const spend = Number(campaign?.spend) || 0;
   const clicks = Number(campaign?.clicks) || 0;
   const impressions = Number(campaign?.impressions) || 0;
@@ -1029,12 +1106,10 @@ export function summarizeAiCampaign(campaign) {
   const cpc = clicks > 0 ? +(spend / clicks).toFixed(2) : Number(campaign?.cpc) || 0;
   const roas = spend > 0 ? +(conversionValue / spend).toFixed(2) : Number(campaign?.roas) || 0;
   const costPerConversion = conversions > 0 ? +(spend / conversions).toFixed(2) : 0;
-
-  return {
-    platform: campaign?.platform || "",
-    name: campaign?.name || "Campaign",
-    status: campaign?.status || "",
-    objective: campaign?.objective || campaign?.channelType || "",
+  const marketingRole = inferCampaignMarketingRole(campaign, clientTarget);
+  const cpm = impressions > 0 ? +(spend / impressions * 1000).toFixed(2) : 0;
+  const reviewSignal = getAiCampaignReviewSignal({
+    ...marketingRole,
     spend,
     clicks,
     impressions,
@@ -1042,9 +1117,87 @@ export function summarizeAiCampaign(campaign) {
     conversionValue,
     ctr,
     cpc,
+    cpm,
     roas,
     costPerConversion,
+  });
+
+  return {
+    platform: campaign?.platform || "",
+    name: campaign?.name || "Campaign",
+    status: campaign?.status || "",
+    objective: campaign?.objective || campaign?.channelType || "",
+    campaignType: campaign?.channelType || campaign?.campaignType || "",
+    ...marketingRole,
+    spend,
+    clicks,
+    impressions,
+    conversions,
+    conversionValue,
+    ctr,
+    cpc,
+    cpm,
+    roas,
+    costPerConversion,
+    reviewScore: reviewSignal.score,
+    reviewReason: reviewSignal.reason,
   };
+}
+
+export function getAiCampaignReviewSignal(campaign) {
+  const spend = Number(campaign?.spend) || 0;
+  const impressions = Number(campaign?.impressions) || 0;
+  const clicks = Number(campaign?.clicks) || 0;
+  const conversions = Number(campaign?.conversions) || 0;
+  const ctr = Number(campaign?.ctr) || 0;
+  const cpm = Number(campaign?.cpm) || 0;
+  const roas = Number(campaign?.roas) || 0;
+  const costPerConversion = Number(campaign?.costPerConversion) || 0;
+  const funnelStage = String(campaign?.funnelStage || "");
+
+  if (spend <= 0) return { score: 0, reason: "" };
+
+  if (funnelStage.includes("lower_funnel")) {
+    if (conversions <= 0) {
+      return { score: 120 + Math.min(spend / 10, 80), reason: "Spend exists against a lower-funnel role but there is no conversion evidence in the supplied data." };
+    }
+    if (roas > 0 && roas < 1) {
+      return { score: 95 + Math.min(spend / 20, 60), reason: "Lower-funnel campaign has conversion activity but weak revenue efficiency." };
+    }
+    if (conversions > 0 && conversions < 3 && spend > 0) {
+      return { score: 45 + Math.min(spend / 40, 35), reason: "Lower-funnel campaign has limited conversion volume; review only against the target volume and lead or sale quality." };
+    }
+    return { score: 0, reason: "" };
+  }
+
+  if (funnelStage.includes("mid_funnel")) {
+    if (impressions >= 1000 && clicks <= 0) {
+      return { score: 105 + Math.min(spend / 20, 50), reason: "Traffic or consideration campaign is delivering reach without a meaningful click signal." };
+    }
+    if (ctr > 0 && ctr < 0.5) {
+      return { score: 80 + Math.min(spend / 25, 45), reason: "Traffic or consideration campaign has weak CTR for its role." };
+    }
+    return { score: 0, reason: "" };
+  }
+
+  if (funnelStage.includes("upper_funnel")) {
+    if (impressions <= 0) {
+      return { score: 95 + Math.min(spend / 20, 50), reason: "Awareness campaign has spend but no delivery signal in the supplied data." };
+    }
+    if (cpm > 0 && impressions < 1000 && spend > 0) {
+      return { score: 60 + Math.min(cpm, 40), reason: "Awareness campaign needs review for reach efficiency and delivery quality." };
+    }
+    if (ctr > 0 && ctr < 0.2) {
+      return { score: 45 + Math.min(spend / 50, 30), reason: "Awareness creative may have a weak engagement signal, but it should not be judged by direct sales alone." };
+    }
+    return { score: 0, reason: "" };
+  }
+
+  if (conversions <= 0 && clicks <= 0 && impressions > 0) {
+    return { score: 75 + Math.min(spend / 25, 45), reason: "Mixed-funnel campaign has delivery but no downstream engagement signal; clarify its role before judging sales impact." };
+  }
+
+  return { score: 0, reason: "" };
 }
 
 export function buildAccountAiPayload(client, dateRangeLabel) {
@@ -1073,17 +1226,13 @@ export function buildAccountAiPayload(client, dateRangeLabel) {
     };
   }).filter((item) => item.budget > 0 || item.spend > 0 || item.accountCount > 0);
 
-  const campaigns = (client.campaigns || []).map(summarizeAiCampaign);
+  const campaigns = (client.campaigns || []).map((campaign) => summarizeAiCampaign(campaign, client.focus));
   const topCampaigns = [...campaigns]
     .sort((left, right) => right.spend - left.spend || right.conversions - left.conversions)
     .slice(0, 8);
   const concernCampaigns = [...campaigns]
-    .filter((campaign) => campaign.spend > 0)
-    .sort((left, right) => {
-      const leftScore = (left.conversions > 0 ? left.conversions * 20 : 0) + left.roas * 10 - left.costPerConversion;
-      const rightScore = (right.conversions > 0 ? right.conversions * 20 : 0) + right.roas * 10 - right.costPerConversion;
-      return leftScore - rightScore || right.spend - left.spend;
-    })
+    .filter((campaign) => campaign.spend > 0 && campaign.reviewScore > 0)
+    .sort((left, right) => right.reviewScore - left.reviewScore || right.spend - left.spend)
     .slice(0, 5);
 
   return {
@@ -1091,6 +1240,7 @@ export function buildAccountAiPayload(client, dateRangeLabel) {
       id: client.id,
       name: client.name,
       target: normalizeClientTarget(client.focus),
+      targetMode: getClientTargetMode(client.focus),
       category: client.category,
       reportingGroup: client.reportingGroup || "Independent",
       dateRange: dateRangeLabel,
@@ -1111,6 +1261,7 @@ export function buildAccountAiPayload(client, dateRangeLabel) {
       detail: flag.detail,
       tone: flag.tone,
     })),
+    campaignEvaluationGuidance: "Each campaign includes inferredObjective, funnelStage, primaryKpis, secondaryKpis and evaluationRule. Judge campaign health against its own role before comparing it to account-level sales or ROAS.",
     topCampaigns,
     concernCampaigns,
     ga4: client.ga4
@@ -1195,6 +1346,7 @@ export function buildSearchTermsAiPayload({
       accountExternalId: selectedAccount?.externalId || "",
       campaignName: selectedCampaign?.name || "",
       campaignType: selectedCampaign?.channelType || "",
+      campaignMarketingRole: inferCampaignMarketingRole(selectedCampaign, selectedClient?.focus),
       reviewLevel: isPerformanceMax ? "campaign" : "ad_group",
       adGroupName: isPerformanceMax ? "" : selectedAdGroup?.name || "",
       dateRange: dateRangeLabel,
@@ -2542,4 +2694,3 @@ export function evaluateHealth(client, accounts, campaigns, ga4) {
     score: activeFlags.length * 100 + Math.abs(totalSpend - targetSpend),
   };
 }
-

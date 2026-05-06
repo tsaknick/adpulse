@@ -6438,6 +6438,9 @@ async function generateAiStrategy(input) {
     "Assume the reader already understands paid media, analytics, attribution, and optimization fundamentals.",
     "Do not define common metrics, explain platform basics, add educational introductions, or repeat generic best practices.",
     "Evaluate marketing leverage, not just KPI symptoms: positioning, offer strength, audience-message fit, funnel stage, intent quality, creative fatigue, landing-page promise match, channel mix, budget concentration, search-term intent, and measurement gaps.",
+    "Before judging any campaign, infer or use its stated objective, funnel stage, campaign type, and evaluationRule. Score awareness, traffic, consideration, lead-gen, sales, ROAS, search, display, video, Demand Gen, Performance Max, and retargeting campaigns by the KPIs that match their role.",
+    "Never call an awareness, reach, video-view, engagement, or traffic campaign bad solely because it did not generate direct sales or ROAS. Only use sales KPIs as the primary verdict when the campaign objective or context says it is lower-funnel sales, leads, revenue, or demand capture.",
+    "If campaign objective or funnel role is ambiguous, flag the ambiguity and recommend the clarification or test needed instead of assuming every campaign should sell directly.",
     "Separate hard evidence from marketing hypotheses; label a point as a hypothesis when the supplied data only implies it.",
     "Do not start with or include a general explanation of the campaign strategy.",
     "Focus only on what is wrong with the current state, why it matters commercially, and the next steps.",
@@ -6583,7 +6586,7 @@ async function generateAiStrategy(input) {
           content: [
             {
               type: "text",
-              text: `Analyze this AdPulse ${scope} context for an expert performance marketer. Reply in Greek. Do not explain basics or generic paid-media concepts. Identify what is wrong right now, what marketing or performance lever is limiting growth, and the highest-leverage next step plus short follow-ups. Ground every point in the supplied live data and clearly label any marketing hypothesis that is not directly proven by the data.`,
+              text: `Analyze this AdPulse ${scope} context for an expert performance marketer. Reply in Greek. Do not explain basics or generic paid-media concepts. Identify what is wrong right now, what marketing or performance lever is limiting growth, and the highest-leverage next step plus short follow-ups. Judge each campaign against its stated or inferred objective, funnel stage, primary KPIs and evaluationRule; do not penalize upper- or mid-funnel campaigns for missing direct sales unless the data says they are expected to sell. Ground every point in the supplied live data and clearly label any marketing hypothesis that is not directly proven by the data.`,
             },
             {
               type: "text",
@@ -6651,6 +6654,8 @@ async function generateAiStrategyChatReply(input) {
     "Assume the operator understands paid media and analytics fundamentals.",
     "Do not define common metrics, explain platform basics, add beginner education, or give generic best-practice filler.",
     "When relevant, reason through positioning, offer, audience-message fit, funnel stage, creative angle, landing-page promise match, search intent, budget concentration, and measurement quality.",
+    "Before judging a campaign, use its stated or inferred objective, funnelStage, primaryKpis and evaluationRule. Do not apply lower-funnel sales or ROAS criteria to awareness, reach, video-view, engagement or traffic campaigns unless the operator says that is their role.",
+    "If the campaign role is unclear, say that the role is unclear and suggest how to classify or test it instead of assuming direct sales is the only goal.",
     "Separate hard evidence from marketing hypotheses; say when a recommendation is a hypothesis to test.",
     "When the operator corrects assumptions or adds business nuance, acknowledge it and adapt.",
     "Do not invent missing data. If something is unknown, say so clearly.",
