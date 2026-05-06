@@ -379,7 +379,7 @@ export class AiStrategistChatPanelComponent {
       </ng-container>
 
       <ng-template #readyBlock>
-        <div *ngIf="state?.error && !state?.data" [ngStyle]="errorStyle">{{ state.error }}</div>
+        <div *ngIf="state?.error" [ngStyle]="errorStyle">{{ state.error }}</div>
 
         <ng-container *ngIf="state?.data; else runCta">
           <app-ai-strategy-output [result]="state.data"></app-ai-strategy-output>

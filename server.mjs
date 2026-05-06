@@ -6253,7 +6253,7 @@ function saveSetupCredentials(input) {
   }
 
   if (changed === 0) {
-    return { ok: true, changed: 0, message: "No changes detected." };
+    return { ok: true, changed: 0, message: "No changes detected.", status: getSetupStatus() };
   }
 
   const lines = [

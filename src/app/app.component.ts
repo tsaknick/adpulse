@@ -420,6 +420,8 @@ type ViewKey = "overview" | "accounts" | "search_terms" | "analytics" | "reports
                 [readinessItems]="reportReadinessItems"
                 [builderCue]="reportBuilderCue"
                 [googleReportState]="googleAdsReportState"
+                [aiReady]="aiReady"
+                [canOpenConnections]="isDirector"
                 (clientChange)="reportClientId = $event"
                 (dateRangeChange)="onAccountsDateRangeChange($event)"
                 (presetChange)="reportPreset = $event"
