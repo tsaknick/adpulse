@@ -413,6 +413,7 @@ type ViewKey = "overview" | "accounts" | "search_terms" | "analytics" | "reports
                 [scheduleDraft]="reportScheduleDraft"
                 [readinessItems]="reportReadinessItems"
                 [builderCue]="reportBuilderCue"
+                [googleReportState]="googleAdsReportState"
                 (clientChange)="reportClientId = $event"
                 (dateRangeChange)="onAccountsDateRangeChange($event)"
                 (presetChange)="reportPreset = $event"
@@ -1235,6 +1236,20 @@ export class AppComponent implements OnInit, OnDestroy {
 
     if (googleRequests.length) {
       this.googleAdsLiveState = { ...this.googleAdsLiveState, loading: true, error: "" };
+      this.googleAdsReportState = { ...this.googleAdsReportState, loading: true, error: "" };
+      this.api.fetchGoogleAdsReportDetails({ ...dateRangePayload, requests: googleRequests })
+        .then((data: any) => {
+          this.googleAdsReportState = {
+            loading: false,
+            error: data?.error || "",
+            generatedAt: data?.generatedAt || "",
+            details: Array.isArray(data?.details) ? data.details : [],
+            errors: Array.isArray(data?.errors) ? data.errors : [],
+          };
+        })
+        .catch((error: any) => {
+          this.googleAdsReportState = { ...createEmptyGoogleAdsReportState(), error: error?.message || "Could not load Google Ads report details." };
+        });
       this.api.fetchGoogleAdsLiveOverview({ ...dateRangePayload, requests: googleRequests })
         .then((data: any) => {
           if (data?.error) {

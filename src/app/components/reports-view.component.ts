@@ -30,6 +30,7 @@ import {
   ToneBadgeComponent,
 } from "./primitives";
 import { AccountDateRangeControlComponent } from "./account-date-range-control.component";
+import { CampaignReportDocumentComponent } from "./campaign-report-document.component";
 
 @Component({
   selector: "app-reports-view",
@@ -44,6 +45,7 @@ import { AccountDateRangeControlComponent } from "./account-date-range-control.c
     MetricTileComponent,
     PlatformChipComponent,
     ToneBadgeComponent,
+    CampaignReportDocumentComponent,
   ],
   template: `
     <div [ngStyle]="rootStyle">
@@ -174,104 +176,13 @@ import { AccountDateRangeControlComponent } from "./account-date-range-control.c
         </div>
 
         <!-- Print preview -->
-        <div class="report-print-root" [ngStyle]="previewStyle">
-          <div [ngStyle]="docStyle">
-            <!-- Cover -->
-            <section *ngIf="selectedSet.has('cover')" [ngStyle]="docSectionStyle">
-              <div [ngStyle]="coverHeadStyle">
-                <app-logo-mark [client]="selectedClient" [size]="56"></app-logo-mark>
-                <div>
-                  <div [ngStyle]="docKickerStyle">Performance report</div>
-                  <div [ngStyle]="docTitleStyle">{{ selectedClient.name }}</div>
-                  <div [ngStyle]="docDateStyle">{{ dateRangeLabel }}</div>
-                </div>
-              </div>
-              <div [ngStyle]="coverKpiRowStyle">
-                <app-metric-tile label="Spend" [value]="formatCurrency(selectedClient.spend || 0)"></app-metric-tile>
-                <app-metric-tile label="Conv. value" [value]="formatCurrency(selectedClient.conversionValue || 0)"></app-metric-tile>
-                <app-metric-tile label="Conversions" [value]="formatNumber(selectedClient.conversions || 0)"></app-metric-tile>
-                <app-metric-tile label="ROAS" [value]="formatMetric('roas', selectedClient.roas || 0)"></app-metric-tile>
-              </div>
-            </section>
-
-            <!-- Executive summary -->
-            <section *ngIf="selectedSet.has('executive_summary')" [ngStyle]="docSectionStyle">
-              <div [ngStyle]="docSectionTitleStyle">Executive summary</div>
-              <div [ngStyle]="docSectionBodyStyle">
-                {{ selectedClient.health?.ok
-                   ? selectedClient.name + ' is on track for ' + dateRangeLabel + '. ' + (selectedClient.activeCampaigns || 0) + ' campaigns are live; ROAS is ' + formatMetric('roas', selectedClient.roas || 0) + ' on ' + formatCurrency(selectedClient.spend || 0) + ' spend.'
-                   : selectedClient.name + ' has ' + (selectedClient.health?.flags?.length || 0) + ' open issues that need attention this period. Review the alerts page below.' }}
-              </div>
-              <div *ngIf="selectedClient.health?.flags?.length" [ngStyle]="docFlagListStyle">
-                <div *ngFor="let flag of selectedClient.health.flags" [ngStyle]="docFlagStyle(flag)">
-                  <strong>{{ flag.label }}</strong> — {{ flag.detail }}
-                </div>
-              </div>
-            </section>
-
-            <!-- Channel KPIs (Google) -->
-            <section *ngIf="selectedSet.has('google_overview')" [ngStyle]="docSectionStyle">
-              <div [ngStyle]="docSectionRowStyle">
-                <app-platform-chip platform="google_ads"></app-platform-chip>
-                <div [ngStyle]="docSectionTitleStyle">Google Ads overview</div>
-              </div>
-              <div [ngStyle]="coverKpiRowStyle">
-                <app-metric-tile label="Spend" [value]="formatCurrency(channelSpend('google_ads'))"></app-metric-tile>
-                <app-metric-tile label="Clicks" [value]="formatNumber(channelClicks('google_ads'))"></app-metric-tile>
-                <app-metric-tile label="Conv." [value]="formatNumber(channelConversions('google_ads'))"></app-metric-tile>
-                <app-metric-tile label="ROAS" [value]="formatMetric('roas', channelRoas('google_ads'))"></app-metric-tile>
-              </div>
-            </section>
-
-            <!-- Channel KPIs (Meta) -->
-            <section *ngIf="selectedSet.has('meta_overview')" [ngStyle]="docSectionStyle">
-              <div [ngStyle]="docSectionRowStyle">
-                <app-platform-chip platform="meta_ads"></app-platform-chip>
-                <div [ngStyle]="docSectionTitleStyle">Meta Ads overview</div>
-              </div>
-              <div [ngStyle]="coverKpiRowStyle">
-                <app-metric-tile label="Spend" [value]="formatCurrency(channelSpend('meta_ads'))"></app-metric-tile>
-                <app-metric-tile label="Clicks" [value]="formatNumber(channelClicks('meta_ads'))"></app-metric-tile>
-                <app-metric-tile label="Conv." [value]="formatNumber(channelConversions('meta_ads'))"></app-metric-tile>
-                <app-metric-tile label="ROAS" [value]="formatMetric('roas', channelRoas('meta_ads'))"></app-metric-tile>
-              </div>
-            </section>
-
-            <!-- Analytics -->
-            <section *ngIf="selectedSet.has('analytics') && selectedClient.ga4" [ngStyle]="docSectionStyle">
-              <div [ngStyle]="docSectionRowStyle">
-                <app-platform-chip platform="ga4"></app-platform-chip>
-                <div [ngStyle]="docSectionTitleStyle">GA4 analytics</div>
-              </div>
-              <div [ngStyle]="coverKpiRowStyle">
-                <app-metric-tile label="Sessions" [value]="formatNumber(selectedClient.ga4.sessions || 0)"></app-metric-tile>
-                <app-metric-tile label="Users" [value]="formatNumber(selectedClient.ga4.users || 0)"></app-metric-tile>
-                <app-metric-tile label="Engaged rate" [value]="(selectedClient.ga4.engagedRate || 0).toFixed(1) + '%'"></app-metric-tile>
-                <app-metric-tile label="Revenue" [value]="formatCurrency(selectedClient.ga4.revenueCurrentPeriod || 0)"></app-metric-tile>
-              </div>
-            </section>
-
-            <!-- Definitions -->
-            <section *ngIf="selectedSet.has('definitions')" [ngStyle]="docSectionStyle">
-              <div [ngStyle]="docSectionTitleStyle">Metric definitions</div>
-              <ul [ngStyle]="defListStyle">
-                <li><strong>Spend.</strong> Total media cost for the selected window.</li>
-                <li><strong>ROAS.</strong> Conversion value divided by spend. Above 3 is treated as healthy.</li>
-                <li><strong>CPC / CPM.</strong> Average click + thousand-impression price by platform.</li>
-                <li><strong>Sessions / Users.</strong> Distinct GA4 sessions and users for the period.</li>
-                <li><strong>Engaged rate.</strong> Share of GA4 sessions that meet the engagement criteria.</li>
-              </ul>
-            </section>
-
-            <!-- Stub for sections we haven't ported the full template for yet -->
-            <section *ngIf="hasUnsupportedSection" [ngStyle]="stubSectionStyle">
-              <div [ngStyle]="docSectionTitleStyle">Additional sections</div>
-              <div [ngStyle]="docSectionBodyStyle">
-                The following selected sections render in the print preview as a single page placeholder while their detailed templates are ported: {{ unsupportedSectionLabels }}.
-              </div>
-            </section>
-          </div>
-        </div>
+        <app-campaign-report-document
+          [client]="selectedClient"
+          [seriesMap]="seriesMap"
+          [dateRangeLabel]="dateRangeLabel"
+          [googleReportState]="googleReportState"
+          [selectedSections]="selectedSections"
+        ></app-campaign-report-document>
       </ng-template>
     </div>
   `,
@@ -287,6 +198,7 @@ export class ReportsViewComponent {
   @Input() scheduleDraft: any = { frequency: "monthly", weekday: "monday", dayOfMonth: "1", recipients: "", notes: "" };
   @Input() readinessItems: { label: string; body: string; ok: boolean }[] = [];
   @Input() builderCue: any = null;
+  @Input() googleReportState: any = { loading: false, details: [] };
 
   @Output() clientChange = new EventEmitter<string>();
   @Output() dateRangeChange = new EventEmitter<any>();

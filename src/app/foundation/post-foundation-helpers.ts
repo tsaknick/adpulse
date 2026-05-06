@@ -261,3 +261,202 @@ export function getAdsGa4ValueComparison(client, ga4) {
     delta: ((current - previous) / previous) * 100,
   };
 }
+
+// ── Report helpers (ported from adpulse-v5.jsx ~line 5796) ──────────────
+import { DEFAULT_REPORT_SECTION_IDS, REPORT_SECTION_OPTIONS } from "./adpulse-foundation";
+
+export function summarizeReportMetrics(items) {
+  const spend = items.reduce((acc, item) => acc + (Number(item.spend) || 0), 0);
+  const impressions = items.reduce((acc, item) => acc + (Number(item.impressions) || 0), 0);
+  const clicks = items.reduce((acc, item) => acc + (Number(item.clicks) || 0), 0);
+  const conversions = items.reduce((acc, item) => acc + (Number(item.conversions) || 0), 0);
+  const conversionValue = items.reduce((acc, item) => {
+    const v = Number(item.conversionValue);
+    if (Number.isFinite(v) && v > 0) return acc + v;
+    const s = Number(item.spend) || 0;
+    const r = Number(item.roas) || 0;
+    return acc + (s > 0 && r > 0 ? s * r : 0);
+  }, 0);
+  return {
+    spend, impressions, clicks, conversions, conversionValue,
+    ctr: impressions ? clicks / impressions * 100 : 0,
+    cpc: clicks ? spend / clicks : 0,
+    costPerConversion: conversions ? spend / conversions : 0,
+    roas: spend ? conversionValue / spend : 0,
+  };
+}
+
+export function formatReportCurrency(value, digits = 2) {
+  return `EUR ${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+}
+export function formatReportNumber(value, digits = 0) {
+  return Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+export function formatReportPercent(value) {
+  return `${Number(value || 0).toFixed(2)}%`;
+}
+
+export function buildChartTicks(max, steps = 4, fixedMax = null) {
+  const safeMax = fixedMax == null ? Math.max(Number(max) || 0, 1) : Math.max(Number(fixedMax) || 0, 1);
+  const digits = safeMax <= 5 ? 2 : safeMax <= 25 ? 1 : 0;
+  return Array.from({ length: steps + 1 }, (_, i) => +(safeMax * i / steps).toFixed(digits));
+}
+
+export function formatChartAxisValue(value, axisType = "number") {
+  const numeric = Number(value || 0);
+  if (axisType === "currency") return formatReportCurrency(numeric, Math.abs(numeric) >= 100 ? 0 : 2);
+  if (axisType === "percent") return `${numeric.toFixed(Math.abs(numeric) >= 10 ? 0 : 1)}%`;
+  return formatReportNumber(numeric, Math.abs(numeric) < 10 ? 1 : 0);
+}
+
+export function getSeriesAxisLabels(series) {
+  const items = Array.isArray(series) ? series : [];
+  if (!items.length) return [];
+  const indices = Array.from(new Set([0, Math.floor((items.length - 1) / 2), items.length - 1]));
+  return indices.map((index) => ({
+    index,
+    label: String(items[index]?.label || items[index]?.date || `Point ${index + 1}`),
+  }));
+}
+
+export function getPlatformReportSeries(client, platform, seriesMap = {}) {
+  const merged = new Map();
+  (client?.accounts || [])
+    .filter((account) => account.platform === platform)
+    .forEach((account) => {
+      const accountSeries = Array.isArray(account.series) && account.series.length
+        ? account.series
+        : (seriesMap[`account:${account.id}`] || []);
+      accountSeries.forEach((point, index) => {
+        const key = String(point?.date || point?.label || `point-${index}`);
+        const current = merged.get(key) || {
+          date: point?.date || "",
+          label: point?.label || point?.date || "",
+          spend: 0, clicks: 0, impressions: 0, conversions: 0, conversionValue: 0, revenue: 0,
+        };
+        current.spend += Number(point?.spend) || 0;
+        current.clicks += Number(point?.clicks) || 0;
+        current.impressions += Number(point?.impressions) || 0;
+        current.conversions += Number(point?.conversions) || 0;
+        current.conversionValue += Number(point?.conversionValue ?? point?.revenue) || 0;
+        current.revenue += Number(point?.revenue ?? point?.conversionValue) || 0;
+        merged.set(key, current);
+      });
+    });
+  const rows = Array.from(merged.values());
+  return rows.every((p) => p.date) ? rows.sort((l, r) => String(l.date).localeCompare(String(r.date))) : rows;
+}
+
+export function getGoogleGeographyEmptyLabel(errorMessage) {
+  const message = String(errorMessage || "").trim();
+  if (!message) return "No geographic rows were returned by Google Ads for the selected account and date range.";
+  if (/403|permission/i.test(message)) {
+    return "Google Ads did not allow a geographic breakdown for this account with the current login. Reconnect the Google Ads login and make sure the correct parent MCC has access to this ad account.";
+  }
+  return message;
+}
+
+function aggregateReportRows(rows, keyField, numericFields, sorterField = "cost") {
+  const map = new Map();
+  (rows || []).forEach((row) => {
+    const key = String(row[keyField] || "Unknown").trim() || "Unknown";
+    const current = map.get(key) || { ...row, [keyField]: key };
+    numericFields.forEach((field) => {
+      if (!map.has(key)) current[field] = 0;
+      current[field] = (Number(current[field]) || 0) + (Number(row[field]) || 0);
+    });
+    map.set(key, current);
+  });
+  return Array.from(map.values())
+    .map((row) => ({
+      ...row,
+      ctr: Number(row.impressions) ? Number(row.clicks || 0) / Number(row.impressions) * 100 : Number(row.ctr) || 0,
+      costPerConversion: Number(row.conversions) ? Number(row.cost || row.spend || 0) / Number(row.conversions) : 0,
+      averageCpc: Number(row.clicks) ? Number(row.cost || row.spend || 0) / Number(row.clicks) : Number(row.averageCpc) || 0,
+      valuePerConversion: Number(row.conversions) ? Number(row.conversionValue || 0) / Number(row.conversions) : Number(row.valuePerConversion) || 0,
+    }))
+    .sort((l, r) => (Number(r[sorterField]) || 0) - (Number(l[sorterField]) || 0));
+}
+
+export function aggregateGoogleReportDetails(details, clientId) {
+  const clientDetails = (details || []).filter((d) => d.clientId === clientId);
+  const devices = aggregateReportRows(
+    clientDetails.flatMap((d) => d.devices || []),
+    "device", ["impressions", "clicks", "cost", "conversions", "conversionValue"], "impressions",
+  );
+  const geographies = aggregateReportRows(
+    clientDetails.flatMap((d) => d.geographies || []),
+    "location", ["clicks", "cost", "conversions", "conversionValue", "sessions", "users", "keyEvents", "revenue"], "conversions",
+  );
+  const keywords = aggregateReportRows(
+    clientDetails.flatMap((d) => d.keywords || []),
+    "keyword", ["impressions", "clicks", "cost", "conversions", "conversionValue"], "clicks",
+  );
+  const impressionShare = aggregateImpressionShareRows(clientDetails.flatMap((d) => d.impressionShare || []));
+  return {
+    devices, geographies, keywords, impressionShare,
+    errors: clientDetails.map((d) => d.dataError).filter(Boolean),
+  };
+}
+
+export function aggregateImpressionShareRows(rows) {
+  const map = new Map();
+  (rows || []).forEach((row) => {
+    const key = row.date || row.label || "";
+    if (!key) return;
+    const current = map.get(key) || { date: key, label: row.label || key, searchImpressionShare: 0, searchBudgetLostImpressionShare: 0, count: 0 };
+    current.searchImpressionShare += Number(row.searchImpressionShare) || 0;
+    current.searchBudgetLostImpressionShare += Number(row.searchBudgetLostImpressionShare) || 0;
+    current.count += 1;
+    map.set(key, current);
+  });
+  return Array.from(map.values())
+    .map((row) => ({
+      date: row.date,
+      label: row.label,
+      searchImpressionShare: row.count ? row.searchImpressionShare / row.count : 0,
+      searchBudgetLostImpressionShare: row.count ? row.searchBudgetLostImpressionShare / row.count : 0,
+    }))
+    .sort((l, r) => String(l.date).localeCompare(String(r.date)));
+}
+
+export function getReportCampaignScore(campaign) {
+  const spend = Number(campaign?.spend) || 0;
+  const conversions = Number(campaign?.conversions) || 0;
+  const cv = Number(campaign?.conversionValue);
+  const roas = spend ? (Number.isFinite(cv) && cv > 0 ? cv : (Number(campaign.roas) || 0) * spend) / spend : 0;
+  return roas * 100 + conversions * 8 + (cv > 0 ? 10 : 0);
+}
+export function getReportTopCampaigns(campaigns, limit = 4) {
+  return [...(campaigns || [])]
+    .sort((l, r) => getReportCampaignScore(r) - getReportCampaignScore(l) || (Number(r.spend) || 0) - (Number(l.spend) || 0))
+    .slice(0, limit);
+}
+export function getReportConcernCampaigns(campaigns, limit = 4) {
+  return [...(campaigns || [])]
+    .filter((c) => (Number(c.spend) || 0) > 0)
+    .sort((l, r) => getReportCampaignScore(l) - getReportCampaignScore(r))
+    .slice(0, limit);
+}
+
+export function chunkReportItems(items, size) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length || size <= 0) return [];
+  const chunks = [];
+  for (let i = 0; i < rows.length; i += size) chunks.push(rows.slice(i, i + size));
+  return chunks;
+}
+
+export function formatMetaPreviewCta(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "Shop now";
+  return normalized.toLowerCase().split("_").filter(Boolean)
+    .map((p) => p.slice(0, 1).toUpperCase() + p.slice(1)).join(" ");
+}
+
+export function normalizeReportSectionIds(value, fallback = DEFAULT_REPORT_SECTION_IDS) {
+  const allowed = new Set(REPORT_SECTION_OPTIONS.map((s) => s.id));
+  const source = Array.isArray(value) && value.length ? value : fallback;
+  const normalized = source.filter((id) => allowed.has(id));
+  return normalized.length ? normalized : [...fallback];
+}
