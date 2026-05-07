@@ -28,6 +28,7 @@ import {
   getGoogleGeographyEmptyLabel,
   getPlatformReportSeries,
   getReportConcernCampaigns,
+  getReportDateStamp,
   getReportTopCampaigns,
   getSeriesAxisLabels,
   summarizeReportMetrics,
@@ -1072,14 +1073,40 @@ export class ReportExecutiveSummaryPageComponent {
   template: `
     <app-report-page [accent]="accent">
       <div [ngStyle]="rootStyle">
-        <div [ngStyle]="kickerStyle">Performance report</div>
-        <div [ngStyle]="titleStyle">{{ client?.name }}</div>
-        <div [ngStyle]="subStyle">{{ dateRangeLabel }}</div>
-        <div [ngStyle]="kpiRowStyle">
-          <app-report-kpi-tile label="Spend" [value]="formatReportCurrency(totalSummary.spend)"></app-report-kpi-tile>
-          <app-report-kpi-tile label="Conv. Value" [value]="formatReportCurrency(totalSummary.conversionValue)"></app-report-kpi-tile>
-          <app-report-kpi-tile label="ROAS" [value]="formatMetric('roas', totalSummary.roas)"></app-report-kpi-tile>
-          <app-report-kpi-tile label="Conversions" [value]="formatReportNumber(totalSummary.conversions, 2)"></app-report-kpi-tile>
+        <div [ngStyle]="topStackStyle">
+          <div [ngStyle]="brandRowStyle">
+            <div [ngStyle]="logoStyle">{{ logoText }}</div>
+            <div>
+              <div [ngStyle]="titleStyle">{{ client?.name }}</div>
+              <div [ngStyle]="subtitleStyle">Campaign Performance Report</div>
+            </div>
+          </div>
+
+          <div [ngStyle]="windowGridStyle">
+            <div [ngStyle]="windowPanelStyle">
+              <div [ngStyle]="windowKickerStyle">Reporting window</div>
+              <div [ngStyle]="windowDateStyle">{{ dateRangeLabel }}</div>
+              <div [ngStyle]="windowBodyStyle">
+                Generated from linked dashboard campaign data. The report mirrors the monthly client report format with channel KPIs, campaign rankings, ad performance and metric definitions.
+              </div>
+            </div>
+            <div [ngStyle]="primaryKpiGridStyle">
+              <app-report-kpi-tile label="Spend" [value]="formatReportCurrency(totalSummary.spend)"></app-report-kpi-tile>
+              <app-report-kpi-tile label="Clicks" [value]="formatReportNumber(totalSummary.clicks)"></app-report-kpi-tile>
+              <app-report-kpi-tile label="Conversions" [value]="formatReportNumber(totalSummary.conversions, 2)"></app-report-kpi-tile>
+              <app-report-kpi-tile label="ROAS" [value]="formatMetric('roas', totalSummary.roas)"></app-report-kpi-tile>
+            </div>
+          </div>
+
+          <div [ngStyle]="secondaryKpiGridStyle">
+            <app-report-kpi-tile label="Reporting Group" [value]="reportingGroupLabel"></app-report-kpi-tile>
+            <app-report-kpi-tile label="Client Target" [value]="clientTargetLabel"></app-report-kpi-tile>
+            <app-report-kpi-tile label="Channels" [value]="channelLabel"></app-report-kpi-tile>
+          </div>
+        </div>
+        <div [ngStyle]="footerStyle">
+          <div>{{ channelLabel }}</div>
+          <div>Generated {{ generatedAt }}</div>
         </div>
       </div>
     </app-report-page>
@@ -1088,16 +1115,83 @@ export class ReportExecutiveSummaryPageComponent {
 export class ReportCoverPageComponent {
   @Input() client: any = {};
   @Input() dateRangeLabel = "";
-  @Input() totalSummary: any = { spend: 0, conversions: 0, conversionValue: 0, roas: 0 };
+  @Input() totalSummary: any = { spend: 0, clicks: 0, conversions: 0, conversionValue: 0, roas: 0 };
+  @Input() channelLabel = "No linked channels";
+
   formatReportCurrency = formatReportCurrency;
   formatReportNumber = formatReportNumber;
   formatMetric = formatMetric;
-  accent = T.accent;
-  rootStyle = { display: "grid", gap: "18px" };
-  kickerStyle = { fontSize: "12px", color: T.inkMute, textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 800 };
-  titleStyle = { fontSize: "44px", fontFamily: T.heading, fontWeight: 900, letterSpacing: "-0.06em", color: T.ink };
-  subStyle = { fontSize: "14px", color: T.inkSoft };
-  kpiRowStyle = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "10px", marginTop: "32px" };
+  accent = T.ink;
+
+  get logoText(): string {
+    if (this.client?.logoText) return this.client.logoText;
+    const name = String(this.client?.name || "").trim();
+    if (!name) return "AP";
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  get reportingGroupLabel(): string {
+    return String(this.client?.reportingGroup || this.client?.name || "Ungrouped");
+  }
+  get clientTargetLabel(): string {
+    return String(this.client?.focus || "Conversions");
+  }
+  get generatedAt(): string {
+    return getReportDateStamp();
+  }
+
+  rootStyle = { display: "grid", gridTemplateRows: "1fr auto", minHeight: "690px" };
+  topStackStyle = { display: "grid", alignContent: "center", gap: "24px" };
+  brandRowStyle = { display: "flex", alignItems: "center", gap: "16px" };
+  logoStyle = {
+    width: "68px",
+    height: "68px",
+    borderRadius: "22px",
+    background: `linear-gradient(135deg, ${T.accent}, ${T.sky})`,
+    color: "#fff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontFamily: T.heading,
+    fontWeight: 800,
+    fontSize: "22px",
+    letterSpacing: "-0.04em",
+    flexShrink: 0,
+  };
+  titleStyle = { fontSize: "48px", lineHeight: 1, fontWeight: 800, fontFamily: T.heading, letterSpacing: "-0.07em" };
+  subtitleStyle = { marginTop: "10px", fontSize: "17px", color: T.inkSoft };
+
+  windowGridStyle = { display: "grid", gridTemplateColumns: "1.4fr 0.9fr", gap: "24px", alignItems: "stretch" };
+  windowPanelStyle = {
+    padding: "28px",
+    borderRadius: "28px",
+    background: "linear-gradient(135deg, #162218, #214e40)",
+    color: "#fff",
+    display: "grid",
+    gap: "18px",
+  };
+  windowKickerStyle = {
+    fontSize: "12px",
+    textTransform: "uppercase",
+    letterSpacing: "0.12em",
+    opacity: 0.78,
+    fontWeight: 800,
+  };
+  windowDateStyle = { fontSize: "38px", fontFamily: T.heading, fontWeight: 800, letterSpacing: "-0.06em" };
+  windowBodyStyle = { fontSize: "13px", lineHeight: 1.6, opacity: 0.82 };
+
+  primaryKpiGridStyle = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" };
+  secondaryKpiGridStyle = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "10px" };
+
+  footerStyle = {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: "12px",
+    alignItems: "center",
+    color: T.inkSoft,
+    fontSize: "12px",
+  };
 }
 
 
@@ -1242,7 +1336,8 @@ export class ReportStrategistPageComponent {
   template: `
     <div class="report-print-root" [ngStyle]="rootStyle">
       <app-report-cover-page *ngIf="has('cover')"
-        [client]="client" [dateRangeLabel]="dateRangeLabel" [totalSummary]="totalSummary"
+        [client]="client" [dateRangeLabel]="dateRangeLabel"
+        [totalSummary]="totalSummary" [channelLabel]="channelLabel"
       ></app-report-cover-page>
 
       <app-report-executive-summary-page *ngIf="has('executive_summary')"
@@ -1256,7 +1351,7 @@ export class ReportStrategistPageComponent {
       ></app-report-strategist-page>
 
       <app-report-channel-overview *ngIf="has('google_overview')"
-        title="Google Ads Performance" platform="google_ads"
+        title="Google Ads Performance Overview" platform="google_ads"
         [summary]="googleSummary" [series]="googleSeries" [campaigns]="googleCampaigns"
         [empty]="!googleCampaigns.length && !googleSummary.spend"
       ></app-report-channel-overview>
@@ -1274,8 +1369,8 @@ export class ReportStrategistPageComponent {
       ></app-report-google-impression-share-page>
 
       <app-report-campaign-table-page *ngIf="has('google_campaigns')"
-        title="Google Ads Campaigns" platform="google_ads"
-        [campaigns]="googleCampaigns" emptyLabel="No Google Ads campaigns are available for this client."
+        title="Google Campaign Performance" platform="google_ads"
+        [campaigns]="googleCampaigns" emptyLabel="No linked Google Ads campaigns were found for this client."
       ></app-report-campaign-table-page>
 
       <app-report-google-keyword-page *ngIf="has('google_keywords')"
@@ -1283,14 +1378,14 @@ export class ReportStrategistPageComponent {
       ></app-report-google-keyword-page>
 
       <app-report-channel-overview *ngIf="has('meta_overview')"
-        title="Meta Ads Performance" platform="meta_ads"
+        title="Facebook Ads Performance Overview" platform="meta_ads"
         [summary]="metaSummary" [series]="metaSeries" [campaigns]="metaCampaigns"
         [empty]="!metaCampaigns.length && !metaSummary.spend"
       ></app-report-channel-overview>
 
       <app-report-campaign-table-page *ngIf="has('meta_campaigns')"
-        title="Meta Ads Campaigns" platform="meta_ads"
-        [campaigns]="metaCampaigns" emptyLabel="No Meta Ads campaigns are available for this client."
+        title="Facebook Campaign Performance" platform="meta_ads"
+        [campaigns]="metaCampaigns" emptyLabel="No linked Meta Ads campaigns were found for this client."
       ></app-report-campaign-table-page>
 
       <app-report-ads-table-page *ngIf="has('meta_ads')" [ads]="metaAds"></app-report-ads-table-page>
@@ -1334,6 +1429,20 @@ export class CampaignReportDocumentComponent {
   }
   get googleSeries() { return getPlatformReportSeries(this.client, "google_ads", this.seriesMap); }
   get metaSeries() { return getPlatformReportSeries(this.client, "meta_ads", this.seriesMap); }
+  get hasGoogle(): boolean {
+    return ((this.client?.accounts || []).filter((a: any) => a.platform === "google_ads").length > 0);
+  }
+  get hasMeta(): boolean {
+    return ((this.client?.accounts || []).filter((a: any) => a.platform === "meta_ads").length > 0);
+  }
+  get channelLabel(): string {
+    const parts = [
+      this.hasGoogle ? "Google Ads" : "",
+      this.hasMeta ? "Meta Ads" : "",
+      this.client?.ga4 ? "GA4" : "",
+    ].filter(Boolean);
+    return parts.length ? parts.join(" + ") : "No linked channels";
+  }
   get googleDetails() {
     return aggregateGoogleReportDetails(this.googleReportState?.details || [], this.client?.id);
   }

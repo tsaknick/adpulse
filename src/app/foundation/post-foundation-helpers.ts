@@ -460,3 +460,8 @@ export function normalizeReportSectionIds(value, fallback = DEFAULT_REPORT_SECTI
   const normalized = source.filter((id) => allowed.has(id));
   return normalized.length ? normalized : [...fallback];
 }
+
+
+export function getReportDateStamp() {
+  return new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
