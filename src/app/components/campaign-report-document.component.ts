@@ -34,6 +34,7 @@ import {
   summarizeReportMetrics,
 } from "../foundation/post-foundation-helpers";
 import { PlatformChipComponent, ToneBadgeComponent } from "./primitives";
+import { ReportCustomWidgetsPageComponent } from "./report-custom-widgets-page.component";
 
 // ─────────────────────────────────────────────────────────────────────
 // Small print-preview primitives
@@ -1332,6 +1333,7 @@ export class ReportStrategistPageComponent {
     ReportAnalyticsPageComponent,
     ReportDefinitionsPageComponent,
     ReportStrategistPageComponent,
+    ReportCustomWidgetsPageComponent,
   ],
   template: `
     <div class="report-print-root" [ngStyle]="rootStyle">
@@ -1394,6 +1396,13 @@ export class ReportStrategistPageComponent {
         [client]="client" [ga4]="client.ga4"
       ></app-report-analytics-page>
 
+      <app-report-custom-widgets-page *ngIf="customWidgets?.length"
+        [widgets]="customWidgets"
+        [client]="client"
+        [seriesMap]="seriesMap"
+        [dateRangeLabel]="dateRangeLabel"
+      ></app-report-custom-widgets-page>
+
       <app-report-definitions-page *ngIf="has('definitions')"></app-report-definitions-page>
     </div>
   `,
@@ -1405,6 +1414,7 @@ export class CampaignReportDocumentComponent {
   @Input() googleReportState: any = { loading: false, details: [] };
   @Input() selectedSections: string[] = [];
   @Input() strategistResult: any = null;
+  @Input() customWidgets: any[] = [];
 
   has(id: string): boolean {
     return Array.isArray(this.selectedSections) && this.selectedSections.includes(id);

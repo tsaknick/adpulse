@@ -344,6 +344,26 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    const reportWidgetsMatch = url.pathname.match(/^\/api\/report-widgets\/([^/]+)$/);
+    if (request.method === "GET" && reportWidgetsMatch) {
+      const clientId = decodeURIComponent(reportWidgetsMatch[1]);
+      sendJson(response, 200, { clientId, widgets: getStoredReportWidgets(clientId) });
+      return;
+    }
+
+    if (request.method === "PUT" && reportWidgetsMatch) {
+      const clientId = decodeURIComponent(reportWidgetsMatch[1]);
+      const body = await readRequestBody(request);
+      let parsed;
+      try { parsed = JSON.parse(body || "{}"); } catch (_) {
+        sendJson(response, 400, { error: "Invalid JSON body." });
+        return;
+      }
+      const widgets = saveStoredReportWidgets(clientId, parsed?.widgets);
+      sendJson(response, 200, { clientId, widgets });
+      return;
+    }
+
     const searchTermHierarchyMatch = url.pathname.match(/^\/api\/search-terms\/([^/]+)\/hierarchy$/);
     if (request.method === "GET" && searchTermHierarchyMatch) {
       const payload = await fetchSearchTermHierarchy(searchTermHierarchyMatch[1], url.searchParams);
@@ -403,7 +423,7 @@ function ensureStore() {
   fs.mkdirSync(STORE_DIR, { recursive: true });
 
   if (!fs.existsSync(STORE_FILE)) {
-    fs.writeFileSync(STORE_FILE, JSON.stringify({ connections: [], searchTermTags: [], users: getDefaultStoredUsers(), clients: [] }, null, 2));
+    fs.writeFileSync(STORE_FILE, JSON.stringify({ connections: [], searchTermTags: [], users: getDefaultStoredUsers(), clients: [], reportWidgets: {} }, null, 2));
   }
 }
 
@@ -424,9 +444,10 @@ function readStore() {
       searchTermTags: Array.isArray(parsed.searchTermTags) ? parsed.searchTermTags : [],
       users,
       clients,
+      reportWidgets: parsed.reportWidgets && typeof parsed.reportWidgets === "object" ? parsed.reportWidgets : {},
     };
   } catch (error) {
-    return { connections: [], searchTermTags: [], users: getDefaultStoredUsers(), clients: [] };
+    return { connections: [], searchTermTags: [], users: getDefaultStoredUsers(), clients: [], reportWidgets: {} };
   }
 }
 
@@ -434,14 +455,17 @@ function writeStore(store) {
   ensureStore();
   let existingUsers = [];
   let existingClients = [];
+  let existingReportWidgets = {};
 
   try {
     const parsed = JSON.parse(fs.readFileSync(STORE_FILE, "utf8"));
     existingUsers = Array.isArray(parsed.users) ? parsed.users.map(normalizeStoredUser).filter(Boolean) : [];
     existingClients = Array.isArray(parsed.clients) ? parsed.clients.map(normalizeStoredClient).filter(Boolean) : [];
+    existingReportWidgets = parsed.reportWidgets && typeof parsed.reportWidgets === "object" ? parsed.reportWidgets : {};
   } catch (error) {
     existingUsers = [];
     existingClients = [];
+    existingReportWidgets = {};
   }
 
   fs.writeFileSync(STORE_FILE, JSON.stringify({
@@ -453,6 +477,9 @@ function writeStore(store) {
     clients: Array.isArray(store.clients)
       ? store.clients.map(normalizeStoredClient).filter(Boolean)
       : existingClients,
+    reportWidgets: store.reportWidgets && typeof store.reportWidgets === "object"
+      ? store.reportWidgets
+      : existingReportWidgets,
   }, null, 2));
 }
 
@@ -5870,6 +5897,66 @@ function getSearchTermTagFilters(searchParams) {
     adGroupId,
     scopeLevel: normalizeSearchTermScopeLevel(searchParams.get("scopeLevel"), adGroupId),
   };
+}
+
+// ─── Report widgets persistence ───────────────────────────────────────────
+const ALLOWED_WIDGET_KINDS = new Set(["kpi", "chart", "pie", "table"]);
+const ALLOWED_WIDGET_VIZ = new Set(["value", "speedometer", "line", "bar", "area", "pie", "donut", "table"]);
+const ALLOWED_WIDGET_SCOPES = new Set(["client", "account", "campaign"]);
+const ALLOWED_WIDGET_COMPARISONS = new Set(["none", "mom", "yoy"]);
+
+function sanitizeReportWidget(widget) {
+  if (!widget || typeof widget !== "object") return null;
+  const kind = ALLOWED_WIDGET_KINDS.has(widget.kind) ? widget.kind : null;
+  if (!kind) return null;
+  const viz = ALLOWED_WIDGET_VIZ.has(widget.viz) ? widget.viz : "value";
+  const scope = ALLOWED_WIDGET_SCOPES.has(widget.scope) ? widget.scope : "client";
+  const comparison = ALLOWED_WIDGET_COMPARISONS.has(widget.comparison) ? widget.comparison : "none";
+  const metrics = Array.isArray(widget.metrics)
+    ? widget.metrics.map((m) => String(m).slice(0, 32)).slice(0, 8)
+    : [];
+  return {
+    id: String(widget.id || "").slice(0, 64) || `wgt-${Math.random().toString(36).slice(2, 8)}`,
+    kind,
+    title: String(widget.title || "").slice(0, 120),
+    viz,
+    scope,
+    accountId: String(widget.accountId || "").slice(0, 96),
+    campaignId: String(widget.campaignId || "").slice(0, 96),
+    metric: String(widget.metric || "spend").slice(0, 32),
+    metrics,
+    comparison,
+    dimension: String(widget.dimension || "").slice(0, 32),
+    rowLimit: Math.max(3, Math.min(20, Number(widget.rowLimit) || 5)),
+    width: Math.max(1, Math.min(2, Number(widget.width) || 1)),
+  };
+}
+
+function getStoredReportWidgets(clientId) {
+  if (!clientId) return [];
+  const store = readStore();
+  const map = store.reportWidgets || {};
+  const list = Array.isArray(map[clientId]) ? map[clientId] : [];
+  return list.map(sanitizeReportWidget).filter(Boolean).slice(0, 24);
+}
+
+function saveStoredReportWidgets(clientId, widgets) {
+  if (!clientId) return [];
+  const sanitized = Array.isArray(widgets)
+    ? widgets.map(sanitizeReportWidget).filter(Boolean).slice(0, 24)
+    : [];
+  const store = readStore();
+  const nextMap = { ...(store.reportWidgets || {}) };
+  if (sanitized.length) nextMap[clientId] = sanitized;
+  else delete nextMap[clientId];
+  writeStore({
+    connections: store.connections,
+    searchTermTags: store.searchTermTags,
+    users: store.users,
+    clients: store.clients,
+    reportWidgets: nextMap,
+  });
+  return sanitized;
 }
 
 function listStoredSearchTermTags(filters = {}) {

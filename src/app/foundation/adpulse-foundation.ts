@@ -219,6 +219,295 @@ export const DEFAULT_REPORT_SCHEDULE = {
   notes: "",
 };
 
+
+// ─── Drag-and-Drop Widget Builder ──────────────────────────────────────────
+// Widgets let users compose custom report sections without code. Each widget
+// has a kind (KPI/chart/pie/table), a data scope (client/account/campaign),
+// a metric configuration and a visualization configuration.
+
+export const WIDGET_KIND_OPTIONS = [
+  {
+    id: "kpi",
+    label: "KPI tile",
+    description: "Single metric with optional comparison delta.",
+    icon: "▣",
+    defaultViz: "value",
+    vizOptions: ["value", "speedometer"],
+    multiMetric: false,
+  },
+  {
+    id: "chart",
+    label: "Chart",
+    description: "Time-series of one or more metrics.",
+    icon: "📈",
+    defaultViz: "line",
+    vizOptions: ["line", "bar", "area"],
+    multiMetric: true,
+  },
+  {
+    id: "pie",
+    label: "Distribution",
+    description: "How a metric splits across platforms or campaigns.",
+    icon: "◐",
+    defaultViz: "pie",
+    vizOptions: ["pie", "donut"],
+    multiMetric: false,
+  },
+  {
+    id: "table",
+    label: "Table",
+    description: "Sortable rows for accounts, campaigns, or ads.",
+    icon: "▤",
+    defaultViz: "table",
+    vizOptions: ["table"],
+    multiMetric: true,
+  },
+];
+
+export const WIDGET_SCOPE_OPTIONS = [
+  { id: "client", label: "Whole client", description: "Roll up across every account." },
+  { id: "account", label: "Single account", description: "One Google / Meta / TikTok account." },
+  { id: "campaign", label: "Single campaign", description: "One campaign inside an account." },
+];
+
+export const WIDGET_COMPARISON_OPTIONS = [
+  { id: "none", label: "No comparison" },
+  { id: "mom", label: "Month over month" },
+  { id: "yoy", label: "Year over year" },
+];
+
+export const WIDGET_PIE_DIMENSION_OPTIONS = [
+  { id: "platform", label: "By platform" },
+  { id: "account", label: "By account" },
+  { id: "campaign", label: "By campaign" },
+];
+
+export const WIDGET_TABLE_DIMENSION_OPTIONS = [
+  { id: "account", label: "Accounts" },
+  { id: "campaign", label: "Campaigns" },
+  { id: "ad", label: "Ads" },
+];
+
+// Hardcoded to avoid temporal-dead-zone errors with KPI_LIBRARY (declared later).
+export const WIDGET_METRIC_KEYS = [
+  "spend",
+  "clicks",
+  "conversions",
+  "conversionValue",
+  "cpc",
+  "cpm",
+  "roas",
+  "revenue",
+  "sessions",
+  "users",
+];
+
+export const DEFAULT_WIDGET_METRIC = "spend";
+
+let __widgetIdCounter = 0;
+export function nextWidgetId() {
+  __widgetIdCounter += 1;
+  return `wgt-${Date.now().toString(36)}-${__widgetIdCounter}`;
+}
+
+export function createDefaultWidget(kindId, overrides = {}) {
+  const kind = WIDGET_KIND_OPTIONS.find((k) => k.id === kindId) || WIDGET_KIND_OPTIONS[0];
+  const base = {
+    id: nextWidgetId(),
+    kind: kind.id,
+    title: kind.label,
+    viz: kind.defaultViz,
+    scope: "client",
+    accountId: "",
+    campaignId: "",
+    metric: DEFAULT_WIDGET_METRIC,
+    metrics: kind.multiMetric ? [DEFAULT_WIDGET_METRIC] : [],
+    comparison: "none",
+    dimension: kind.id === "pie" ? "platform" : kind.id === "table" ? "campaign" : "",
+    rowLimit: kind.id === "table" ? 5 : 0,
+    width: kind.id === "table" || kind.id === "chart" ? 2 : 1,
+  };
+  return { ...base, ...overrides };
+}
+
+export function normalizeReportWidget(widget) {
+  if (!widget || typeof widget !== "object") return null;
+  const kind = WIDGET_KIND_OPTIONS.find((k) => k.id === widget.kind);
+  if (!kind) return null;
+  const viz = kind.vizOptions.includes(widget.viz) ? widget.viz : kind.defaultViz;
+  const scope = WIDGET_SCOPE_OPTIONS.some((s) => s.id === widget.scope) ? widget.scope : "client";
+  const metric = WIDGET_METRIC_KEYS.includes(widget.metric) ? widget.metric : DEFAULT_WIDGET_METRIC;
+  const metrics = Array.isArray(widget.metrics)
+    ? widget.metrics.filter((m) => WIDGET_METRIC_KEYS.includes(m))
+    : [];
+  return {
+    id: String(widget.id || nextWidgetId()),
+    kind: kind.id,
+    title: String(widget.title || kind.label).slice(0, 80),
+    viz,
+    scope,
+    accountId: String(widget.accountId || ""),
+    campaignId: String(widget.campaignId || ""),
+    metric,
+    metrics: kind.multiMetric ? (metrics.length > 0 ? metrics.slice(0, 4) : [metric]) : [],
+    comparison: WIDGET_COMPARISON_OPTIONS.some((c) => c.id === widget.comparison) ? widget.comparison : "none",
+    dimension: String(widget.dimension || (kind.id === "pie" ? "platform" : kind.id === "table" ? "campaign" : "")),
+    rowLimit: Math.max(3, Math.min(20, Number(widget.rowLimit) || (kind.id === "table" ? 5 : 0))),
+    width: Math.max(1, Math.min(2, Number(widget.width) || 1)),
+  };
+}
+
+export function normalizeReportWidgetList(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(normalizeReportWidget).filter(Boolean).slice(0, 24);
+}
+
+STORAGE_KEYS.reportWidgets = "adpulse/reportWidgets";
+
+export function readStoredReportWidgets(clientId) {
+  if (!clientId) return [];
+  const stored = readStoredValue(STORAGE_KEYS.reportWidgets, {});
+  if (!stored || typeof stored !== "object") return [];
+  return normalizeReportWidgetList(stored[clientId] || []);
+}
+
+export function writeStoredReportWidgets(clientId, widgets) {
+  if (typeof window === "undefined" || !clientId) return;
+  const stored = readStoredValue(STORAGE_KEYS.reportWidgets, {});
+  const current = stored && typeof stored === "object" ? stored : {};
+  const next = { ...current, [clientId]: normalizeReportWidgetList(widgets) };
+  try {
+    window.localStorage.setItem(STORAGE_KEYS.reportWidgets, JSON.stringify(next));
+  } catch (error) {
+    /* localStorage quota exhausted — silently ignore */
+  }
+}
+
+export function resolveWidgetSourceItems(widget, client) {
+  if (!widget || !client) return [];
+  if (widget.scope === "client") return [client];
+  if (widget.scope === "account") {
+    return (client.accounts || []).filter((a) => !widget.accountId || a.id === widget.accountId);
+  }
+  if (widget.scope === "campaign") {
+    return (client.campaigns || []).filter((c) => !widget.campaignId || c.id === widget.campaignId);
+  }
+  return [];
+}
+
+export function sumMetric(items, metricKey) {
+  if (!items || !items.length) return 0;
+  if (metricKey === "roas") {
+    const spend = items.reduce((acc, it) => acc + (Number(it?.spend) || 0), 0);
+    const value = items.reduce((acc, it) => acc + (Number(it?.conversionValue) || getConversionValue(it) || 0), 0);
+    return spend > 0 ? value / spend : 0;
+  }
+  if (metricKey === "cpc") {
+    const spend = items.reduce((acc, it) => acc + (Number(it?.spend) || 0), 0);
+    const clicks = items.reduce((acc, it) => acc + (Number(it?.clicks) || 0), 0);
+    return clicks > 0 ? spend / clicks : 0;
+  }
+  if (metricKey === "cpm") {
+    const spend = items.reduce((acc, it) => acc + (Number(it?.spend) || 0), 0);
+    const impressions = items.reduce((acc, it) => acc + (Number(it?.impressions) || 0), 0);
+    return impressions > 0 ? (spend / impressions) * 1000 : 0;
+  }
+  return items.reduce((acc, it) => acc + (Number(it?.[metricKey]) || 0), 0);
+}
+
+export function comparisonMultiplier(comparisonId) {
+  if (comparisonId === "yoy") return 0.83;
+  if (comparisonId === "mom") return 0.92;
+  return 0;
+}
+
+export function buildWidgetPieSlices(widget, client) {
+  if (!widget || !client) return [];
+  const dim = widget.dimension || "platform";
+  const metric = widget.metric || DEFAULT_WIDGET_METRIC;
+  if (dim === "platform") {
+    const platforms = ["google_ads", "meta_ads", "tiktok_ads"];
+    return platforms.map((platform) => {
+      const accounts = (client.accounts || []).filter((a) => a.platform === platform);
+      return {
+        key: platform,
+        label: PLATFORM_META[platform]?.label || platform,
+        value: sumMetric(accounts, metric),
+        color: PLATFORM_META[platform]?.color || T.accent,
+      };
+    }).filter((s) => s.value > 0);
+  }
+  if (dim === "account") {
+    return (client.accounts || []).map((account) => ({
+      key: account.id,
+      label: account.name,
+      value: sumMetric([account], metric),
+      color: PLATFORM_META[account.platform]?.color || T.accent,
+    })).filter((s) => s.value > 0).slice(0, 8);
+  }
+  if (dim === "campaign") {
+    return (client.campaigns || []).map((campaign) => ({
+      key: campaign.id,
+      label: campaign.name,
+      value: sumMetric([campaign], metric),
+      color: T.accent,
+    })).filter((s) => s.value > 0).slice(0, 8);
+  }
+  return [];
+}
+
+export function buildWidgetTableRows(widget, client) {
+  if (!widget || !client) return { rows: [], columns: [] };
+  const metrics = widget.metrics?.length ? widget.metrics : [widget.metric || DEFAULT_WIDGET_METRIC];
+  const limit = widget.rowLimit || 5;
+  const dim = widget.dimension || "campaign";
+  let raw = [];
+  if (dim === "account") raw = (client.accounts || []).map((a) => ({ name: a.name, ref: a }));
+  else if (dim === "campaign") raw = (client.campaigns || []).map((c) => ({ name: c.name, ref: c }));
+  else if (dim === "ad") raw = (client.ads || []).map((ad) => ({ name: ad.name, ref: ad }));
+
+  const rows = raw
+    .map((entry) => {
+      const cells = metrics.map((m) => sumMetric([entry.ref], m));
+      const sortValue = cells[0] || 0;
+      return { name: entry.name, cells, sortValue };
+    })
+    .sort((a, b) => b.sortValue - a.sortValue)
+    .slice(0, limit);
+
+  const columns = [
+    { key: "name", label: dim.charAt(0).toUpperCase() + dim.slice(1) },
+    ...metrics.map((m) => ({ key: m, label: KPI_LIBRARY[m]?.label || m, metric: m })),
+  ];
+
+  return { rows, columns };
+}
+
+export function buildWidgetSeries(widget, client, seriesMap) {
+  if (!widget || !client || !seriesMap) return [];
+  const metrics = widget.metrics?.length ? widget.metrics : [widget.metric || DEFAULT_WIDGET_METRIC];
+  let raw = [];
+  if (widget.scope === "account" && widget.accountId) {
+    raw = seriesMap[`account:${widget.accountId}`] || [];
+  } else {
+    raw = seriesMap[`client:${client.id}`] || [];
+  }
+  if (!Array.isArray(raw) || !raw.length) return [];
+  return metrics.map((metricKey) => {
+    const points = raw.map((p) => ({
+      date: p?.date || p?.label || "",
+      label: p?.label || p?.date || "",
+      value: Number(p?.[metricKey]) || 0,
+    }));
+    return {
+      key: metricKey,
+      label: KPI_LIBRARY[metricKey]?.label || metricKey,
+      color: KPI_LIBRARY[metricKey]?.color || T.accent,
+      points,
+    };
+  });
+}
+
 export const SEARCH_TERM_TAG_META = {
   good: { label: "Good", color: T.accent, tint: T.accentSoft, border: "rgba(15, 143, 102, 0.18)" },
   bad: { label: "Bad / irrelevant", color: T.coral, tint: T.coralSoft, border: "rgba(215, 93, 66, 0.18)" },

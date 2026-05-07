@@ -104,6 +104,17 @@ export class IntegrationApiService {
     return this.request("/search-terms/tags", this.jsonOptions("POST", payload));
   }
 
+  fetchReportWidgets(clientId: string): Promise<any> {
+    return this.request(`/report-widgets/${encodeURIComponent(clientId)}`);
+  }
+
+  saveReportWidgets(clientId: string, widgets: any[]): Promise<any> {
+    return this.request(
+      `/report-widgets/${encodeURIComponent(clientId)}`,
+      this.jsonOptions("PUT", { widgets }),
+    );
+  }
+
   private jsonOptions(method: string, payload: any): RequestInit {
     return {
       method,

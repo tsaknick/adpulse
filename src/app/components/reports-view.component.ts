@@ -23,10 +23,13 @@ import {
   formatNumber,
   getAiStrategyChatKey,
   normalizeAiStrategyChatThread,
+  normalizeReportWidgetList,
   readStoredAiStrategyChatThread,
   readStoredAiStrategyResult,
+  readStoredReportWidgets,
   writeStoredAiStrategyChatThread,
   writeStoredAiStrategyResult,
+  writeStoredReportWidgets,
 } from "../foundation/adpulse-foundation";
 import { groupClientsByReportingGroup } from "../foundation/post-foundation-helpers";
 import { IntegrationApiService } from "../integration-api.service";
@@ -42,6 +45,7 @@ import {
 } from "./primitives";
 import { AccountDateRangeControlComponent } from "./account-date-range-control.component";
 import { CampaignReportDocumentComponent } from "./campaign-report-document.component";
+import { ReportBuilderCanvasComponent } from "./report-builder-canvas.component";
 
 @Component({
   selector: "app-reports-view",
@@ -58,6 +62,7 @@ import { CampaignReportDocumentComponent } from "./campaign-report-document.comp
     ToneBadgeComponent,
     CampaignReportDocumentComponent,
     AiStrategistPanelComponent,
+    ReportBuilderCanvasComponent,
   ],
   template: `
     <div [ngStyle]="rootStyle">
@@ -148,6 +153,15 @@ import { CampaignReportDocumentComponent } from "./campaign-report-document.comp
             </div>
           </div>
 
+          <!-- Drag-and-drop widget builder -->
+          <app-report-builder-canvas
+            [widgets]="reportWidgets"
+            [client]="selectedClient"
+            [seriesMap]="seriesMap"
+            [saveState]="widgetSaveState"
+            (widgetsChange)="onWidgetsChange($event)"
+          ></app-report-builder-canvas>
+
           <!-- Schedule plan -->
           <div [ngStyle]="scheduleStyle">
             <div [ngStyle]="sectionTitleStyle">Recurring schedule</div>
@@ -211,6 +225,7 @@ import { CampaignReportDocumentComponent } from "./campaign-report-document.comp
           [googleReportState]="googleReportState"
           [selectedSections]="selectedSections"
           [strategistResult]="aiState?.data"
+          [customWidgets]="reportWidgets"
         ></app-campaign-report-document>
       </ng-template>
     </div>
@@ -247,13 +262,60 @@ export class ReportsViewComponent implements OnChanges {
   private aiChatKey = "";
   private lastReportClientId = "";
 
+  reportWidgets: any[] = [];
+  widgetSaveState: "idle" | "saving" | "saved" | "error" = "idle";
+  private widgetSaveTimer: any = null;
+  private widgetStateResetTimer: any = null;
+
   constructor(private api: IntegrationApiService) {}
 
   ngOnChanges() {
     if (this.selectedClient?.id && this.selectedClient.id !== this.lastReportClientId) {
       this.lastReportClientId = this.selectedClient.id;
       this.refreshAiKeys();
+      this.loadWidgetsForClient(this.selectedClient.id);
     }
+  }
+
+  private loadWidgetsForClient(clientId: string) {
+    this.reportWidgets = readStoredReportWidgets(clientId);
+    this.api
+      .fetchReportWidgets(clientId)
+      .then((payload: any) => {
+        const serverWidgets = normalizeReportWidgetList(payload?.widgets || []);
+        if (serverWidgets.length || (payload && Array.isArray(payload.widgets))) {
+          this.reportWidgets = serverWidgets;
+          writeStoredReportWidgets(clientId, serverWidgets);
+        }
+      })
+      .catch(() => { /* offline / no server save yet */ });
+  }
+
+  onWidgetsChange(widgets: any[]) {
+    const clientId = this.selectedClient?.id;
+    if (!clientId) return;
+    const normalized = normalizeReportWidgetList(widgets);
+    this.reportWidgets = normalized;
+    writeStoredReportWidgets(clientId, normalized);
+    this.scheduleWidgetSave(clientId, normalized);
+  }
+
+  private scheduleWidgetSave(clientId: string, widgets: any[]) {
+    if (this.widgetSaveTimer) clearTimeout(this.widgetSaveTimer);
+    if (this.widgetStateResetTimer) clearTimeout(this.widgetStateResetTimer);
+    this.widgetSaveState = "saving";
+    this.widgetSaveTimer = setTimeout(() => {
+      this.api
+        .saveReportWidgets(clientId, widgets)
+        .then(() => {
+          this.widgetSaveState = "saved";
+          this.widgetStateResetTimer = setTimeout(() => { this.widgetSaveState = "idle"; }, 2200);
+        })
+        .catch(() => {
+          this.widgetSaveState = "error";
+          this.widgetStateResetTimer = setTimeout(() => { this.widgetSaveState = "idle"; }, 4000);
+        });
+    }, 600);
   }
 
   private refreshAiKeys() {
